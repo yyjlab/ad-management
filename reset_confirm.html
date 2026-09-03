@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>重置密码</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            background: #f0f2f5;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 40px;
+            width: 100%;
+            max-width: 460px;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+        }
+        .header { text-align: center; margin-bottom: 32px; }
+        .header h1 { font-size: 22px; color: #1a1a1a; font-weight: 600; }
+        .header p { color: #888; font-size: 14px; margin-top: 6px; }
+
+        /* 工号展示区（只读，让用户知道在改哪个账号） */
+        .account-info {
+            background: #f0f7ff;
+            border: 1px solid #bae0ff;
+            border-radius: 8px;
+            padding: 12px 16px;
+            margin-bottom: 20px;
+            font-size: 14px;
+            color: #0958d9;
+        }
+
+        .form-group { margin-bottom: 18px; }
+        label { display: block; font-size: 14px; color: #444; margin-bottom: 6px; font-weight: 500; }
+        label .required { color: #ff4d4f; margin-left: 2px; }
+        input {
+            width: 100%;
+            padding: 10px 14px;
+            border: 1px solid #d9d9d9;
+            border-radius: 8px;
+            font-size: 14px;
+            color: #333;
+            transition: border-color 0.2s;
+            outline: none;
+        }
+        input:focus { border-color: #ff7a00; box-shadow: 0 0 0 2px rgba(255,122,0,0.1); }
+        .hint { font-size: 12px; color: #999; margin-top: 5px; }
+
+        #submitBtn {
+            width: 100%;
+            padding: 12px;
+            background: #ff7a00;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 15px;
+            font-weight: 500;
+            cursor: pointer;
+            margin-top: 8px;
+            transition: background 0.2s;
+        }
+        #submitBtn:hover:not(:disabled) { background: #d96800; }
+        #submitBtn:disabled { background: #f5c08a; cursor: not-allowed; }
+
+        .message {
+            padding: 12px 16px;
+            border-radius: 8px;
+            font-size: 14px;
+            margin-bottom: 16px;
+            display: none;
+        }
+        .message.success { background: #f6ffed; border: 1px solid #b7eb8f; color: #389e0d; }
+        .message.error   { background: #fff2f0; border: 1px solid #ffccc7; color: #cf1322; }
+        .message.show    { display: block; }
+
+        /* 加载中提示（验证token时显示） */
+        .loading { text-align: center; padding: 40px 0; color: #888; }
+
+        /* 链接无效/过期的错误面板 */
+        .error-panel { display: none; text-align: center; }
+        .error-panel.show { display: block; }
+        .error-panel .icon { font-size: 56px; margin-bottom: 16px; }
+        .error-panel h2 { color: #cf1322; margin-bottom: 8px; }
+        .error-panel p { color: #666; font-size: 14px; margin-bottom: 16px; }
+        .error-panel a {
+            display: inline-block;
+            padding: 10px 24px;
+            background: #ff7a00;
+            color: white;
+            border-radius: 8px;
+            text-decoration: none;
+            font-size: 14px;
+        }
+
+        /* 成功面板 */
+        .success-panel { display: none; text-align: center; }
+        .success-panel.show { display: block; }
+        .success-panel .icon { font-size: 56px; margin-bottom: 16px; }
+        .success-panel h2 { color: #389e0d; margin-bottom: 8px; }
+        .success-panel p { color: #666; font-size: 14px; }
+
+        .footer-link { text-align: center; margin-top: 24px; font-size: 13px; color: #999; }
+        .footer-link a { color: #1677ff; text-decoration: none; }
+    </style>
+</head>
+<body>
+<div class="card">
+
+    <!-- 验证token时显示加载中 -->
+    <div class="loading" id="loadingPanel">
+        <p>⏳ 验证链接有效性...</p>
+    </div>
+
+    <!-- 链接无效或过期 -->
+    <div class="error-panel" id="errorPanel">
+        <div class="icon">❌</div>
+        <h2>链接无效或已过期</h2>
+        <p id="errorMsg"></p>
+        <a href="/reset">重新申请重置链接</a>
+    </div>
+
+    <!-- 正常的重置密码表单（token有效时显示） -->
+    <div id="mainPanel" style="display:none;">
+        <div class="header">
+            <h1>🔐 设置新密码</h1>
+            <p>请为您的账号设置新密码</p>
+        </div>
+
+        <!-- 显示正在重置哪个工号 -->
+        <div class="account-info" id="accountInfo"></div>
+
+        <div id="message" class="message"></div>
+
+        <form id="resetForm">
+            <div class="form-group">
+                <label>新密码 <span class="required">*</span></label>
+                <input type="password" id="newPassword" placeholder="请设置新密码">
+                <div class="hint">至少8位，需包含大小写字母、数字和特殊字符（!@#$%等）</div>
+            </div>
+
+            <div class="form-group">
+                <label>确认新密码 <span class="required">*</span></label>
+                <input type="password" id="confirmPassword" placeholder="再次输入新密码">
+            </div>
+
+            <button type="button" id="submitBtn" onclick="submitReset()">确认修改密码</button>
+        </form>
+
+        <div class="footer-link">
+            <a href="/reset">← 重新申请</a>
+        </div>
+    </div>
+
+    <!-- 修改成功面板 -->
+    <div class="success-panel" id="successPanel">
+        <div class="icon">✅</div>
+        <h2>密码修改成功！</h2>
+        <p>请使用新密码登录公司系统</p>
+        <p style="margin-top:12px;">
+            <a href="/" style="color:#1677ff;">← 返回首页</a>
+        </p>
+    </div>
+
+</div>
+
+<script>
+// ============================================================
+// 页面加载时自动读取URL里的token，验证是否有效
+// ============================================================
+
+// 从URL参数里拿token
+// 例如：/reset/confirm?token=abc123  →  token = "abc123"
+const urlParams = new URLSearchParams(window.location.search);
+const token = urlParams.get('token');
+
+// 页面一加载就验证token
+window.addEventListener('DOMContentLoaded', async () => {
+    if (!token) {
+        // URL里没有token，直接显示错误
+        showError('链接格式不正确，请重新申请');
+        return;
+    }
+
+    try {
+        // 调后端验证token
+        const res = await fetch('/api/reset/verify_token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token })
+        });
+        const data = await res.json();
+
+        document.getElementById('loadingPanel').style.display = 'none';
+
+        if (data.valid) {
+            // token有效，显示重置表单，并显示工号
+            document.getElementById('accountInfo').textContent =
+                `正在重置账号：${data.employee_id}`;
+            document.getElementById('mainPanel').style.display = 'block';
+        } else {
+            showError(data.message);
+        }
+    } catch(e) {
+        showError('网络错误，请稍后重试');
+    }
+});
+
+function showError(msg) {
+    document.getElementById('loadingPanel').style.display = 'none';
+    document.getElementById('errorMsg').textContent = msg;
+    document.getElementById('errorPanel').classList.add('show');
+}
+
+function showMessage(text, type) {
+    const el = document.getElementById('message');
+    el.textContent = text;
+    el.className = `message ${type} show`;
+    setTimeout(() => el.classList.remove('show'), 5000);
+}
+
+async function submitReset() {
+    const newPassword = document.getElementById('newPassword').value;
+    const confirmPassword = document.getElementById('confirmPassword').value;
+    const btn = document.getElementById('submitBtn');
+
+    if (!newPassword || !confirmPassword) return showMessage('请填写所有必填项', 'error');
+    if (newPassword !== confirmPassword) return showMessage('两次密码不一致', 'error');
+
+    btn.disabled = true;
+    btn.textContent = '提交中...';
+
+    try {
+        const res = await fetch('/api/reset/confirm', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                token,              // 把URL里的token带上提交
+                new_password: newPassword,
+                confirm_password: confirmPassword
+            })
+        });
+        const data = await res.json();
+
+        if (data.success) {
+            // 成功：隐藏表单，显示成功面板
+            document.getElementById('mainPanel').style.display = 'none';
+            document.getElementById('successPanel').classList.add('show');
+        } else {
+            showMessage(data.message, 'error');
+            btn.disabled = false;
+            btn.textContent = '确认修改密码';
+        }
+    } catch(e) {
+        showMessage('网络错误，请稍后重试', 'error');
+        btn.disabled = false;
+        btn.textContent = '确认修改密码';
+    }
+}
+</script>
+</body>
+</html>

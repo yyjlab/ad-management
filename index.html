@@ -1,0 +1,313 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>员工账号注册</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            background: #f0f2f5;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 40px;
+            width: 100%;
+            max-width: 460px;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+        }
+        .header { text-align: center; margin-bottom: 32px; }
+        .header h1 { font-size: 22px; color: #1a1a1a; font-weight: 600; }
+        .header p { color: #888; font-size: 14px; margin-top: 6px; }
+        .form-group { margin-bottom: 18px; }
+        label { display: block; font-size: 14px; color: #444; margin-bottom: 6px; font-weight: 500; }
+        label .required { color: #ff4d4f; margin-left: 2px; }
+        input {
+            width: 100%;
+            padding: 10px 14px;
+            border: 1px solid #d9d9d9;
+            border-radius: 8px;
+            font-size: 14px;
+            color: #333;
+            transition: border-color 0.2s;
+            outline: none;
+        }
+        input:focus { border-color: #1677ff; box-shadow: 0 0 0 2px rgba(22,119,255,0.1); }
+        input.error { border-color: #ff4d4f; }
+        .hint { font-size: 12px; color: #999; margin-top: 5px; }
+        .email-hint {
+            color: #d48806;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .code-row { display: flex; gap: 10px; }
+        .code-row input { flex: 1; }
+        #sendCodeBtn {
+            padding: 10px 16px;
+            background: #1677ff;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 13px;
+            cursor: pointer;
+            white-space: nowrap;
+            min-width: 110px;
+            transition: background 0.2s;
+        }
+        #sendCodeBtn:hover:not(:disabled) { background: #0958d9; }
+        #sendCodeBtn:disabled { background: #b0c4e8; cursor: not-allowed; }
+        #submitBtn {
+            width: 100%;
+            padding: 12px;
+            background: #1677ff;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 15px;
+            font-weight: 500;
+            cursor: pointer;
+            margin-top: 8px;
+            transition: background 0.2s;
+        }
+        #submitBtn:hover:not(:disabled) { background: #0958d9; }
+        #submitBtn:disabled { background: #b0c4e8; cursor: not-allowed; }
+        .message {
+            padding: 12px 16px;
+            border-radius: 8px;
+            font-size: 14px;
+            margin-bottom: 16px;
+            display: none;
+        }
+        .message.success { background: #f6ffed; border: 1px solid #b7eb8f; color: #389e0d; }
+        .message.error   { background: #fff2f0; border: 1px solid #ffccc7; color: #cf1322; }
+        .message.show    { display: block; }
+        .success-panel { text-align: center; display: none; }
+        .success-panel.show { display: block; }
+        .success-icon { font-size: 56px; margin-bottom: 16px; }
+        .success-panel h2 { color: #389e0d; margin-bottom: 8px; }
+        .success-panel p { color: #666; font-size: 14px; }
+        .footer-link { text-align: center; margin-top: 20px; font-size: 13px; color: #999; }
+        .footer-link a { color: #1677ff; text-decoration: none; }
+        .footer-link a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+<div class="card">
+    <div class="header">
+        <h1>员工账号注册</h1>
+        <!-- 改：任意邮箱均可，不限公司邮箱 -->
+        <p>请通过邮箱验证完成账号注册</p>
+    </div>
+
+    <div id="message" class="message"></div>
+
+    <form id="registerForm">
+
+        <!-- 工号 -->
+        <div class="form-group">
+            <label>工号 <span class="required">*</span></label>
+            <input type="text" id="employeeId" placeholder="例如：wfq101755" maxlength="9">
+            <div class="hint">格式：wfq + 6位数字</div>
+        </div>
+
+        <!-- 姓名：限1-5个字符 -->
+        <div class="form-group">
+            <label>真实姓名 <span class="required">*</span></label>
+            <input type="text" id="fullName" placeholder="请输入中文姓名" maxlength="5" oninput="filterChineseInput(this)">
+        </div>
+
+        <!-- 部门：限1-5个字符，新增字段 -->
+        <div class="form-group">
+            <label>所在部门 <span class="required">*</span></label>
+            <input type="text" id="department" placeholder="请输入中文部门" maxlength="5" oninput="filterChineseInput(this)">
+        </div>
+
+        <!-- 邮箱：任意邮箱均可 -->
+        <div class="form-group">
+            <label>邮箱 <span class="required">*</span></label>
+            <div class="code-row">
+                <input type="email" id="email" placeholder="请输入邮箱（任意邮箱均可）">
+                <button type="button" id="sendCodeBtn" onclick="sendCode()">发送验证码</button>
+            </div>
+            <!-- 需求1：提示此邮箱用于找回密码 -->
+            <div class="hint email-hint">
+                ⚠ 请填写真实可收件邮箱，用于找回密码
+            </div>
+        </div>
+
+        <!-- 验证码 -->
+        <div class="form-group">
+            <label>邮箱验证码 <span class="required">*</span></label>
+            <input type="text" id="code" placeholder="请输入6位验证码" maxlength="6">
+            <div class="hint">验证码5分钟内有效</div>
+        </div>
+
+        <!-- 密码 -->
+        <div class="form-group">
+            <label>设置密码 <span class="required">*</span></label>
+            <input type="password" id="password" placeholder="请设置登录密码">
+            <div class="hint">至少8位，需包含大小写字母、数字和特殊字符（!@#$%等）</div>
+        </div>
+
+        <!-- 确认密码 -->
+        <div class="form-group">
+            <label>确认密码 <span class="required">*</span></label>
+            <input type="password" id="confirmPassword" placeholder="再次输入密码">
+        </div>
+
+        <button type="button" id="submitBtn" onclick="submitRegister()">注 册</button>
+    </form>
+
+    <!-- 底部入口：忘记密码 -->
+    <div class="footer-link">
+        <a href="/reset">忘记密码？点击重置</a>
+    </div>
+
+    <!-- 注册成功面板 -->
+    <div class="success-panel" id="successPanel">
+        <div class="success-icon">✅</div>
+        <h2>注册成功！</h2>
+        <p id="successMsg"></p>
+        <!-- 改：公司系统 → 公司电脑 -->
+        <p style="margin-top:12px; color:#999;">请使用工号和刚设置的密码登录公司电脑</p>
+    </div>
+</div>
+
+<script>
+let countdown = 0;
+
+function filterChineseInput(input) {
+    input.value = input.value.replace(/[^\u4e00-\u9fff]/g, '').slice(0, 5);
+}
+
+function isChineseOnly(value, minLen, maxLen) {
+    if (!value || value.length < minLen || value.length > maxLen) return false;
+    return /^[\u4e00-\u9fff]+$/.test(value);
+}
+
+function showMessage(text, type) {
+    const el = document.getElementById('message');
+    el.textContent = text;
+    el.className = `message ${type} show`;
+    setTimeout(() => el.classList.remove('show'), 4000);
+}
+
+async function sendCode() {
+    const employeeId = document.getElementById('employeeId').value.trim().toLowerCase();
+    const fullName   = document.getElementById('fullName').value.trim();
+    const email = document.getElementById('email').value.trim();
+    const btn = document.getElementById('sendCodeBtn');
+
+    if (!employeeId) return showMessage('请先填写工号', 'error');
+    const department = document.getElementById('department').value.trim();
+
+    if (!fullName) return showMessage('请先填写真实姓名', 'error');
+    if (!isChineseOnly(fullName, 1, 5))
+        return showMessage('姓名只能填写中文，1-5个字', 'error');
+    if (!department) return showMessage('请先填写所在部门', 'error');
+    if (!isChineseOnly(department, 1, 5))
+        return showMessage('部门只能填写中文，1-5个字', 'error');
+    if (!email) return showMessage('请先填写邮箱', 'error');
+
+    btn.disabled = true;
+    btn.textContent = '发送中...';
+
+    try {
+        const res = await fetch('/api/send_code', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ employee_id: employeeId, full_name: fullName, department, email })
+        });
+        const data = await res.json();
+        if (data.success) {
+            showMessage(data.message, 'success');
+            startCountdown(btn);
+        } else {
+            showMessage(data.message, 'error');
+            btn.disabled = false;
+            btn.textContent = '发送验证码';
+        }
+    } catch(e) {
+        showMessage('网络错误，请稍后重试', 'error');
+        btn.disabled = false;
+        btn.textContent = '发送验证码';
+    }
+}
+
+function startCountdown(btn) {
+    countdown = 60;
+    const timer = setInterval(() => {
+        btn.textContent = `${--countdown}秒后重试`;
+        if (countdown <= 0) {
+            clearInterval(timer);
+            btn.disabled = false;
+            btn.textContent = '重新发送';
+        }
+    }, 1000);
+}
+
+async function submitRegister() {
+    const employeeId      = document.getElementById('employeeId').value.trim().toLowerCase();
+    const fullName        = document.getElementById('fullName').value.trim();
+    const department      = document.getElementById('department').value.trim();
+    const email           = document.getElementById('email').value.trim();
+    const code            = document.getElementById('code').value.trim();
+    const password        = document.getElementById('password').value;
+    const confirmPassword = document.getElementById('confirmPassword').value;
+    const btn = document.getElementById('submitBtn');
+
+    if (!employeeId || !fullName || !department || !email || !code || !password || !confirmPassword)
+        return showMessage('请填写所有必填项', 'error');
+    if (password !== confirmPassword)
+        return showMessage('两次密码不一致', 'error');
+
+    // 前端也做一次长度校验，提示更快
+    if (!isChineseOnly(fullName, 1, 5))
+        return showMessage('姓名只能填写中文，1-5个字', 'error');
+    if (!isChineseOnly(department, 1, 5))
+        return showMessage('部门只能填写中文，1-5个字', 'error');
+
+    btn.disabled = true;
+    btn.textContent = '注册中，请稍候...';
+
+    try {
+        const res = await fetch('/api/register', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                employee_id: employeeId,
+                full_name: fullName,
+                department: department,
+                email,
+                code,
+                password,
+                confirm_password: confirmPassword
+            })
+        });
+        const data = await res.json();
+        if (data.success) {
+            document.getElementById('registerForm').style.display = 'none';
+            document.getElementById('successMsg').textContent = `工号 ${employeeId} 已成功创建`;
+            document.getElementById('successPanel').classList.add('show');
+        } else {
+            showMessage(data.message, 'error');
+            btn.disabled = false;
+            btn.textContent = '注 册';
+        }
+    } catch(e) {
+        showMessage('网络错误，请稍后重试', 'error');
+        btn.disabled = false;
+        btn.textContent = '注 册';
+    }
+}
+</script>
+</body>
+</html>

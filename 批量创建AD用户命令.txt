@@ -1,0 +1,32 @@
+﻿# 批量创建 AD 域用户
+# 数据来源：E:\codex\users.csv
+# 域名：wfq.com
+# 目标 OU：OU=用户,DC=wfq,DC=com
+# 默认密码：Wfq888888
+# 要求：用户下次登录时须更改密码
+
+Import-Module ActiveDirectory
+
+$CsvPath = "D:\users.csv"
+$DefaultPassword = ConvertTo-SecureString "Wfq888888" -AsPlainText -Force
+
+Import-Csv $CsvPath -Encoding UTF8 | ForEach-Object {
+    if (Get-ADUser -Filter "SamAccountName -eq '$($_.SamAccountName)'" -ErrorAction SilentlyContinue) {
+        Write-Warning "用户已存在，跳过：$($_.SamAccountName)"
+    } else {
+        New-ADUser `
+            -SamAccountName $_.SamAccountName `
+            -UserPrincipalName $_.UserPrincipalName `
+            -Name $_.Name `
+            -DisplayName $_.DisplayName `
+            -Description $_.Description `
+            -Path $_.OUPath `
+            -AccountPassword $DefaultPassword `
+            -Enabled $true `
+            -ChangePasswordAtLogon $true
+    }
+}
+
+# 创建后检查用户数量
+Get-ADUser -Filter * -SearchBase "OU=用户,DC=wfq,DC=com" -Properties Description | `
+    Select-Object Name,SamAccountName,UserPrincipalName,Description,Enabled

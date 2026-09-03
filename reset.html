@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>忘记密码 - 申请重置</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            background: #f0f2f5;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 40px;
+            width: 100%;
+            max-width: 460px;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+        }
+        .header { text-align: center; margin-bottom: 32px; }
+        .header .icon { font-size: 48px; margin-bottom: 12px; }
+        .header h1 { font-size: 22px; color: #1a1a1a; font-weight: 600; }
+        .header p { color: #888; font-size: 14px; margin-top: 6px; line-height: 1.6; }
+
+        .form-group { margin-bottom: 18px; }
+        label { display: block; font-size: 14px; color: #444; margin-bottom: 6px; font-weight: 500; }
+        label .required { color: #ff4d4f; margin-left: 2px; }
+        input {
+            width: 100%;
+            padding: 10px 14px;
+            border: 1px solid #d9d9d9;
+            border-radius: 8px;
+            font-size: 14px;
+            color: #333;
+            transition: border-color 0.2s;
+            outline: none;
+        }
+        input:focus { border-color: #ff7a00; box-shadow: 0 0 0 2px rgba(255,122,0,0.1); }
+        .hint { font-size: 12px; color: #999; margin-top: 5px; }
+
+        #submitBtn {
+            width: 100%;
+            padding: 12px;
+            background: #ff7a00;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 15px;
+            font-weight: 500;
+            cursor: pointer;
+            margin-top: 8px;
+            transition: background 0.2s;
+        }
+        #submitBtn:hover:not(:disabled) { background: #d96800; }
+        #submitBtn:disabled { background: #f5c08a; cursor: not-allowed; }
+
+        .message {
+            padding: 12px 16px;
+            border-radius: 8px;
+            font-size: 14px;
+            margin-bottom: 16px;
+            display: none;
+        }
+        .message.success { background: #f6ffed; border: 1px solid #b7eb8f; color: #389e0d; }
+        .message.error   { background: #fff2f0; border: 1px solid #ffccc7; color: #cf1322; }
+        .message.show    { display: block; }
+
+        /* 发送成功后的提示面板 */
+        .sent-panel { display: none; text-align: center; }
+        .sent-panel.show { display: block; }
+        .sent-panel .icon { font-size: 56px; margin-bottom: 16px; }
+        .sent-panel h2 { color: #1677ff; margin-bottom: 8px; }
+        .sent-panel p { color: #666; font-size: 14px; line-height: 1.8; }
+
+        .footer-link { text-align: center; margin-top: 24px; font-size: 13px; color: #999; }
+        .footer-link a { color: #1677ff; text-decoration: none; }
+        .footer-link a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+<div class="card">
+    <div class="header">
+        <div class="icon">🔑</div>
+        <h1>忘记密码</h1>
+        <p>输入工号和企业邮箱<br>我们将发送重置链接到您的邮箱</p>
+    </div>
+
+    <div id="message" class="message"></div>
+
+    <!-- 申请表单 -->
+    <form id="resetForm">
+        <div class="form-group">
+            <label>工号 <span class="required">*</span></label>
+            <input type="text" id="employeeId" placeholder="例如：wfq101755" maxlength="9">
+            <div class="hint">格式：wfq + 6位数字</div>
+        </div>
+
+        <div class="form-group">
+            <label>找回密码邮箱 <span class="required">*</span></label>
+            <input type="email" id="email" placeholder="请输入注册时填写的邮箱">
+            <div class="hint">请填写您注册账号时绑定的邮箱，重置链接将发送至该邮箱（30分钟有效）</div>
+        </div>
+
+        <button type="button" id="submitBtn" onclick="submitRequest()">发送重置链接</button>
+    </form>
+
+    <!-- 发送成功面板 -->
+    <div class="sent-panel" id="sentPanel">
+        <div class="icon">📧</div>
+        <h2>邮件已发送！</h2>
+        <p id="sentMsg"></p>
+        <p style="margin-top:12px; color:#999; font-size:13px;">
+            没收到？请检查垃圾邮件文件夹<br>
+            或等待1分钟后重新申请
+        </p>
+    </div>
+
+    <div class="footer-link">
+        <a href="/">← 返回注册页面</a>
+    </div>
+</div>
+
+<script>
+function showMessage(text, type) {
+    const el = document.getElementById('message');
+    el.textContent = text;
+    el.className = `message ${type} show`;
+    setTimeout(() => el.classList.remove('show'), 5000);
+}
+
+async function submitRequest() {
+    const employeeId = document.getElementById('employeeId').value.trim().toLowerCase();
+    const email = document.getElementById('email').value.trim().toLowerCase();
+    const btn = document.getElementById('submitBtn');
+
+    if (!employeeId) return showMessage('请填写工号', 'error');
+    if (!email) return showMessage('请填写企业邮箱', 'error');
+
+    btn.disabled = true;
+    btn.textContent = '发送中...';
+
+    try {
+        const res = await fetch('/api/reset/request', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ employee_id: employeeId, email })
+        });
+        const data = await res.json();
+
+        if (data.success) {
+            // 隐藏表单，显示发送成功面板
+            document.getElementById('resetForm').style.display = 'none';
+            document.getElementById('sentMsg').textContent = data.message;
+            document.getElementById('sentPanel').classList.add('show');
+        } else {
+            showMessage(data.message, 'error');
+            btn.disabled = false;
+            btn.textContent = '发送重置链接';
+        }
+    } catch(e) {
+        showMessage('网络错误，请稍后重试', 'error');
+        btn.disabled = false;
+        btn.textContent = '发送重置链接';
+    }
+}
+</script>
+</body>
+</html>
