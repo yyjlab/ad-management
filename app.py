@@ -13,6 +13,7 @@ import re
 import secrets
 import logging
 import json
+import hashlib
 import shutil
 import subprocess
 import sys
@@ -30,14 +31,17 @@ try:
 except ImportError:
     ZoneInfo = None
 
-from flask import Flask, request, jsonify, session, Response
+from flask import Flask, request, jsonify, session, Response, redirect
 from flask_sqlalchemy import SQLAlchemy
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.orm import joinedload
 from werkzeug.security import check_password_hash, generate_password_hash
 import ldap3
 from ldap3.core.exceptions import LDAPException
+from urllib.parse import urlencode, urlsplit
+from dingtalk_auth import DingTalkClient, DingTalkConfig, DingTalkError
 
 # ============================================================
 # 初始化 Flask 应用
@@ -175,6 +179,25 @@ class SystemSetting(db.Model):
     key = db.Column(db.String(80), unique=True, nullable=False)
     value = db.Column(db.String(500), nullable=False)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+class DingTalkAccount(db.Model):
+    """钉钉身份与平台账号的独立对应记录，不关联 AD 域账号。"""
+    identity_hash = db.Column(db.String(64), primary_key=True)
+    admin_user_id = db.Column(db.Integer, db.ForeignKey('admin_user.id'), unique=True, nullable=False)
+    admin_user = db.relationship('AdminUser', backref=db.backref(
+        'dingtalk_account', uselist=False, cascade='all, delete-orphan'
+    ))
+    employee_name = db.Column(db.String(80), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+class DingTalkLoginState(db.Model):
+    """跨 Gunicorn worker 共用的一次性授权状态。"""
+    state_hash = db.Column(db.String(64), primary_key=True)
+    browser_hash = db.Column(db.String(64), nullable=False)
+    client_hash = db.Column(db.String(64), nullable=False)
+    expires_at = db.Column(db.DateTime, nullable=False, index=True)
 
 
 class EmployeeAccountProvision(db.Model):
@@ -653,6 +676,25 @@ def mark_admin_login_session(username, role, ip_address):
     audit.last_seen_at = now
     audit.is_online = True
     db.session.commit()
+
+
+def start_admin_login_session(user, message='登录成功'):
+    session.clear()
+    session['admin_logged_in'] = True
+    session['admin_username'] = user.username
+    session['admin_role'] = user.role
+    session.permanent = True
+    timeout_minutes = int(get_setting(
+        'super_admin_session_minutes' if user.role == 'super_admin' else 'admin_session_minutes',
+        480 if user.role == 'super_admin' else 10
+    ))
+    app.permanent_session_lifetime = timedelta(minutes=timeout_minutes)
+    db.session.add(AdminLoginLog(
+        admin_username=user.username, success=True, message=message, ip_address=request.remote_addr
+    ))
+    db.session.commit()
+    mark_admin_login_session(user.username, user.role, request.remote_addr)
+    admin_logger.info(f'{message} | 用户名:{user.username} | IP:{request.remote_addr}')
 
 
 def write_admin_action(action, target_employee_id, message, ip_address, admin_username=None):
@@ -2108,6 +2150,7 @@ def admin_check():
     return jsonify({
         'logged_in': bool(session.get('admin_logged_in')),
         'username': session.get('admin_username'),
+        'display_name': user.dingtalk_account.employee_name if user and user.dingtalk_account else None,
         'role': user.role if user else None,
         'permissions': user_permissions(user) if user else [],
         'settings': {
@@ -2132,22 +2175,7 @@ def admin_login():
     user = AdminUser.query.filter_by(username=username, is_active=True).first()
 
     if user and check_password_hash(user.password_hash, password):
-        session['admin_logged_in'] = True
-        session['admin_username'] = username
-        session['admin_role'] = user.role
-        session.permanent = True
-        timeout_minutes = int(get_setting(
-            'super_admin_session_minutes' if user.role == 'super_admin' else 'admin_session_minutes',
-            480 if user.role == 'super_admin' else 10
-        ))
-        app.permanent_session_lifetime = timedelta(minutes=timeout_minutes)
-        db.session.add(AdminLoginLog(
-            admin_username=username, success=True,
-            message='登录成功', ip_address=client_ip
-        ))
-        db.session.commit()
-        mark_admin_login_session(username, user.role, client_ip)
-        admin_logger.info(f"管理员登录成功 | 用户名:{username} | IP:{client_ip}")
+        start_admin_login_session(user)
         return jsonify({'success': True})
     else:
         db.session.add(AdminLoginLog(
@@ -2157,6 +2185,145 @@ def admin_login():
         db.session.commit()
         admin_logger.warning(f"管理员登录失败 | 用户名:{username} | IP:{client_ip}")
         return jsonify({'success': False, 'message': '账号或密码错误'})
+
+
+def dingtalk_digest(value):
+    return hashlib.sha256(value.encode('utf-8')).hexdigest()
+
+
+def dingtalk_config():
+    config = DingTalkConfig.load(app.config)
+    if config is None:
+        raise DingTalkError('disabled')
+    return config
+
+
+def begin_dingtalk_login(embedded=False):
+    config = dingtalk_config()
+    if embedded:
+        origin = request.headers.get('Origin')
+        callback = urlsplit(config.redirect_uri)
+        expected_origin = f'{callback.scheme}://{callback.netloc}'
+        if (request.headers.get('X-Requested-With') != 'XMLHttpRequest'
+                or (origin and origin != expected_origin)):
+            raise DingTalkError('origin')
+    previous_browser = session.get('dingtalk_browser')
+    if previous_browser:
+        DingTalkLoginState.query.filter_by(browser_hash=dingtalk_digest(previous_browser)).delete()
+    DingTalkLoginState.query.filter(DingTalkLoginState.expires_at <= datetime.utcnow()).delete()
+    browser = secrets.token_urlsafe(32)
+    state = secrets.token_urlsafe(32)
+    expires = datetime.utcnow() + timedelta(seconds=config.state_ttl)
+    db.session.add(DingTalkLoginState(
+        state_hash=dingtalk_digest(state), browser_hash=dingtalk_digest(browser),
+        client_hash=dingtalk_digest(config.client_id), expires_at=expires
+    ))
+    db.session.commit()
+    session['dingtalk_browser'] = browser
+    return {
+        'authorizationUrl': config.authorization_url(state, embedded),
+        'redirectUri': config.redirect_uri, 'state': state,
+        'expiresAt': int(time.time() * 1000) + config.state_ttl * 1000
+    }
+
+
+def resolve_dingtalk_account(config, union_id, employee_name):
+    identity = dingtalk_digest(config.client_id + '\0' + union_id)
+    binding = db.session.get(DingTalkAccount, identity)
+    if not binding:
+        user = AdminUser(
+            username='dt_' + identity[:24], password_hash=generate_password_hash(secrets.token_urlsafe(48)),
+            role='readonly', permissions='', is_active=True, created_by='dingtalk'
+        )
+        db.session.add(user)
+        db.session.add(DingTalkAccount(
+            identity_hash=identity, admin_user=user, employee_name=employee_name
+        ))
+        try:
+            db.session.commit()
+            return user
+        except IntegrityError:
+            # Concurrent first logins must resolve the same identity, never merge by name.
+            db.session.rollback()
+            binding = db.session.get(DingTalkAccount, identity)
+            if not binding:
+                raise DingTalkError('account') from None
+    user = binding.admin_user
+    if not user or not user.is_active:
+        raise DingTalkError('account')
+    return user
+
+
+@app.after_request
+def protect_dingtalk_response(response):
+    if request.path.startswith('/api/admin/dingtalk/'):
+        response.headers['Cache-Control'] = 'no-store'
+        response.headers['Referrer-Policy'] = 'no-referrer'
+    return response
+
+
+@app.route('/api/admin/dingtalk/status', methods=['GET'])
+def dingtalk_status():
+    try:
+        enabled = DingTalkConfig.load(app.config) is not None
+    except DingTalkError:
+        enabled = False
+    return jsonify({'enabled': enabled})
+
+
+@app.route('/api/admin/dingtalk/login', methods=['GET'])
+def dingtalk_login():
+    try:
+        authorization = begin_dingtalk_login()
+        return redirect(authorization['authorizationUrl'])
+    except DingTalkError as e:
+        return redirect('/admin?' + urlencode({'dingtalkError': str(e)}))
+
+
+@app.route('/api/admin/dingtalk/qr', methods=['POST'])
+def dingtalk_qr():
+    try:
+        return jsonify(begin_dingtalk_login(embedded=True))
+    except DingTalkError:
+        return jsonify({'success': False, 'message': '无法初始化钉钉二维码，请检查登录域名和应用配置'}), 400
+
+
+@app.route('/api/admin/dingtalk/callback', methods=['GET'])
+def dingtalk_callback():
+    try:
+        config = dingtalk_config()
+        state = request.args.get('state', '')
+        browser = session.pop('dingtalk_browser', '')
+        if (len(request.args.getlist('state')) != 1 or not re.fullmatch(r'[A-Za-z0-9_-]{43}', state)
+                or not isinstance(browser, str) or not browser):
+            raise DingTalkError('state')
+        consumed = DingTalkLoginState.query.filter_by(
+            state_hash=dingtalk_digest(state), browser_hash=dingtalk_digest(browser),
+            client_hash=dingtalk_digest(config.client_id)
+        ).filter(DingTalkLoginState.expires_at > datetime.utcnow()).delete(synchronize_session=False)
+        db.session.commit()
+        if consumed != 1:
+            raise DingTalkError('state')
+        codes = request.args.getlist('authCode') + request.args.getlist('code')
+        if request.args.get('error') is not None or len(codes) != 1 or not codes[0].strip() or len(codes[0]) > 2048:
+            raise DingTalkError('authorization')
+        union_id, employee_name = DingTalkClient(config).employee(codes[0])
+        user = resolve_dingtalk_account(config, union_id, employee_name)
+        start_admin_login_session(user, '钉钉登录成功')
+        return redirect('/admin/manage')
+    except Exception as e:
+        db.session.rollback()
+        reason = str(e) if isinstance(e, DingTalkError) else 'provider'
+        app.logger.warning('钉钉登录失败: %s', reason)
+        try:
+            db.session.add(AdminLoginLog(
+                admin_username='dingtalk', success=False,
+                message='钉钉登录失败: ' + reason, ip_address=request.remote_addr
+            ))
+            db.session.commit()
+        except (IntegrityError, OperationalError):
+            db.session.rollback()
+        return redirect('/admin?' + urlencode({'dingtalkError': reason}))
 
 
 @app.route('/api/admin/logout', methods=['POST'])
@@ -2605,7 +2772,7 @@ def admin_enable():
 @permission_required('delete_user')
 def admin_delete():
     """
-    彻底删除AD账号（不可恢复！）
+    彻底删除AD用户账号（不可恢复），不删除任何关联计算机对象。
     删除前请确认已禁用或确认离职
     操作记录写入admin.log
     """
@@ -2625,7 +2792,7 @@ def admin_delete():
             '删除AD用户',
             employee_id,
             {'employee_id': employee_id, 'confirm_text': 'YES'},
-            f'请求删除AD用户 {employee_id}'
+            f'请求删除AD用户 {employee_id}，关联计算机保留'
         )
         write_admin_action('发起删除审批', employee_id, f"审批ID:{approval.id}", client_ip)
         return jsonify({'success': False, 'need_approval': True, 'approval_id': approval.id,
@@ -2640,7 +2807,7 @@ def admin_delete():
         conn = get_ad_connection()
         conn.search(
             search_base=app.config['AD_BASE_DN'],
-            search_filter=f'(sAMAccountName={employee_id})',
+            search_filter=f'(&(objectCategory=person)(objectClass=user)(sAMAccountName={employee_id}))',
             search_scope=ldap3.SUBTREE,
             attributes=['distinguishedName', 'description', 'department']
         )
@@ -2981,6 +3148,61 @@ def admin_password_policy_batch():
     except Exception as e:
         app.logger.error(f"批量密码策略失败: {e}")
         return jsonify({'success': False, 'message': '批量操作失败，请联系IT'})
+
+
+@app.route('/api/admin/domain_password_policy', methods=['GET'])
+@admin_required
+@permission_required('password_policy')
+def domain_password_policy_get():
+    conn = None
+    try:
+        conn = get_ad_connection()
+        conn.search(
+            search_base='',
+            search_filter='(objectClass=*)',
+            search_scope=ldap3.BASE,
+            attributes=['defaultNamingContext']
+        )
+        domain_dn = get_entry_text(conn.entries[0], 'defaultNamingContext') if conn.entries else ''
+        if not domain_dn:
+            raise ValueError('AD 未返回默认域 DN')
+        conn.search(
+            search_base=domain_dn,
+            search_filter='(objectClass=domainDNS)',
+            search_scope=ldap3.BASE,
+            attributes=['minPwdLength', 'minPwdAge', 'maxPwdAge', 'pwdHistoryLength', 'pwdProperties']
+        )
+        if not conn.entries:
+            raise ValueError('AD 未返回域密码策略')
+        entry = conn.entries[0]
+
+        def policy_integer(attr):
+            values = entry[attr].raw_values
+            if not values:
+                raise ValueError(f'AD 未返回 {attr}')
+            return int(values[0])
+
+        min_age = policy_integer('minPwdAge')
+        max_age = policy_integer('maxPwdAge')
+        properties = policy_integer('pwdProperties')
+        return jsonify({
+            'success': True,
+            'policy': {
+                'min_password_length': policy_integer('minPwdLength'),
+                'min_age_seconds': abs(min_age) / 10_000_000,
+                'max_age_seconds': None if max_age == -(2 ** 63) else abs(max_age) / 10_000_000,
+                'max_age_never_expires': max_age == -(2 ** 63),
+                'password_history_count': policy_integer('pwdHistoryLength'),
+                'complexity_enabled': bool(properties & 1),
+                'reversible_encryption_enabled': bool(properties & 16)
+            }
+        })
+    except Exception as e:
+        app.logger.warning(f'读取域密码策略失败: {e}')
+        return jsonify({'success': False, 'message': '读取 AD 域密码策略失败，请检查 AD 连接或权限'}), 503
+    finally:
+        if conn:
+            conn.unbind()
 
 
 @app.route('/api/admin/password_expire/settings', methods=['GET'])
@@ -3378,13 +3600,14 @@ def admin_settings_save():
 @permission_required('manage_admins')
 def admin_users():
     """返回后台用户列表，密码永远不返回前端。"""
-    users = AdminUser.query.order_by(AdminUser.created_at.desc()).all()
+    users = AdminUser.query.options(joinedload(AdminUser.dingtalk_account)).order_by(AdminUser.created_at.desc()).all()
     return jsonify({
         'success': True,
         'roles': ROLE_PERMISSIONS,
         'admins': [{
             'id': u.id,
             'username': u.username,
+            'display_name': u.dingtalk_account.employee_name if u.dingtalk_account else None,
             'role': u.role,
             'permissions': user_permissions(u),
             'is_active': bool(u.is_active),

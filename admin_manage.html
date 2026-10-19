@@ -138,7 +138,8 @@
         <button class="menu-item active" data-page="dashboard" onclick="openDashboard()">数据概览</button>
         <button class="menu-item" data-page="adUsers" onclick="switchPage('adUsers')">AD用户管理</button>
         <button class="menu-item" data-page="computers" data-permission="view_computers" onclick="switchPage('computers')">计算机管理</button>
-        <button class="menu-item" data-page="passwordPolicy" data-permission="password_policy" onclick="switchPage('passwordPolicy')">密码策略</button>
+        <button class="menu-item" data-page="domainPasswordPolicy" data-permission="password_policy" onclick="switchPage('domainPasswordPolicy')">域密码策略</button>
+        <button class="menu-item" data-page="passwordPolicy" data-permission="password_policy" onclick="switchPage('passwordPolicy')">密码到期提醒</button>
         <button class="menu-item" data-page="logs" data-permission="view_logs" onclick="switchPage('logs')">日志中心</button>
         <button class="menu-item" data-page="approvals" data-permission="view_logs" onclick="switchPage('approvals')">审批中心</button>
         <button class="menu-item" data-page="admins" data-permission="manage_admins" onclick="switchPage('admins')">用户中心</button>
@@ -181,7 +182,7 @@
                 <div class="search-row"><input id="searchId" placeholder="请搜索工号" oninput="clearSearchNotice()" onkeydown="if(event.key==='Enter') doSearch()"><button class="btn btn-dark" onclick="doSearch()">查询</button></div>
             </div>
             <div class="card result-card" id="resultCard"><h2>账号概况</h2><div id="matchBox"></div><div id="userInfo"></div><div id="actionRow"></div></div>
-            <div class="card result-card" id="computerCard"><h2>关联计算机</h2><div id="userComputersBox" class="empty">暂无关联计算机</div></div>
+            <div class="card result-card" id="computerCard"><h2 id="computerCardTitle">关联计算机</h2><div id="userComputersBox" class="empty">暂无关联计算机</div></div>
         </section>
 
         <section class="page" id="page-computers">
@@ -231,8 +232,29 @@
             <div class="card"><div id="logTable" class="empty">点击刷新日志</div></div>
         </section>
 
+        <section class="page" id="page-domainPasswordPolicy">
+            <div class="page-head">
+                <div><h1>域密码策略</h1><p>AD 域默认密码策略；应用了细粒度密码策略的账号可能不同。</p></div>
+                <button class="btn btn-primary" id="domainPolicyRefreshButton" onclick="loadDomainPasswordPolicy()">刷新</button>
+            </div>
+            <div class="card">
+                <h2>密码策略</h2>
+                <p class="hint" id="domainPolicyStatus">打开页面后读取 AD</p>
+                <table class="table" style="min-width: 0; margin-top: 12px;"><thead><tr><th>策略</th><th>当前值</th></tr></thead><tbody>
+                    <tr><td>放宽最小密码长度限制</td><td>暂不可读取（需从 GPO 读取）</td></tr>
+                    <tr><td>密码必须符合复杂性要求</td><td data-domain-policy="complexity_enabled">-</td></tr>
+                    <tr><td>密码长度最小值</td><td data-domain-policy="min_password_length">-</td></tr>
+                    <tr><td>密码最短使用期限</td><td data-domain-policy="min_age_seconds">-</td></tr>
+                    <tr><td>密码最长使用期限</td><td data-domain-policy="max_age_seconds">-</td></tr>
+                    <tr><td>强制密码历史</td><td data-domain-policy="password_history_count">-</td></tr>
+                    <tr><td>用可还原的加密来存储密码</td><td data-domain-policy="reversible_encryption_enabled">-</td></tr>
+                    <tr><td>最小密码长度审核</td><td>暂不可读取（需从 GPO 读取）</td></tr>
+                </tbody></table>
+            </div>
+        </section>
+
         <section class="page" id="page-passwordPolicy">
-            <div class="page-head"><div><h1>密码策略</h1></div></div>
+            <div class="page-head"><div><h1>密码到期提醒</h1></div></div>
             <div class="card">
                 <h2>AD 密码策略状态</h2>
                 <div class="stats-grid overview-grid">
@@ -357,6 +379,7 @@
 
 <script>
 let currentUser = null;
+let deletedUserComputers = null;
 let currentUsername = '';
 let currentRole = '';
 let currentPermissions = [];
@@ -401,7 +424,7 @@ async function checkLogin() {
         currentUsername = data.username || '';
         currentRole = data.role || '';
         currentPermissions = data.permissions || [];
-        document.getElementById('loginUser').textContent = currentUsername ? `已登录：${currentUsername}（${roleName(currentRole)}）` : '已登录';
+        document.getElementById('loginUser').textContent = currentUsername ? `已登录：${data.display_name || currentUsername}（${roleName(currentRole)}）` : '已登录';
         if (data.settings) document.querySelector('.title').textContent = `${data.settings.company_name} · ${data.settings.admin_title}`;
         applyPermissions();
         loadStats();
@@ -430,6 +453,7 @@ function switchPage(page) {
     if (page === 'audit') loadSessions();
     if (page === 'admins') loadAdminUsers();
     if (page === 'logs') loadLogs();
+    if (page === 'domainPasswordPolicy') loadDomainPasswordPolicy();
     if (page === 'passwordPolicy') { loadExpireSettings(); previewExpireReminder({ silent: true }); loadExpireLogs(); }
     if (page === 'settings') loadSettings();
 }
@@ -561,8 +585,10 @@ async function submitCreateEmployee() {
 
 function clearSearchResult() {
     currentUser = null;
+    deletedUserComputers = null;
     document.getElementById('resultCard').classList.remove('show');
     document.getElementById('computerCard').classList.remove('show');
+    document.getElementById('computerCardTitle').textContent = '关联计算机';
     document.getElementById('matchBox').innerHTML = '';
     document.getElementById('userInfo').innerHTML = '';
     document.getElementById('actionRow').innerHTML = '';
@@ -722,8 +748,10 @@ async function doSearch(options = {}) {
 
 function renderMatches(rows) {
     currentUser = null;
+    deletedUserComputers = null;
     document.getElementById('resultCard').classList.add('show');
     document.getElementById('computerCard').classList.remove('show');
+    document.getElementById('computerCardTitle').textContent = '关联计算机';
     document.getElementById('userInfo').innerHTML = '';
     document.getElementById('actionRow').innerHTML = '';
     document.getElementById('userComputersBox').innerHTML = '<div class="empty">暂无关联计算机</div>';
@@ -742,6 +770,8 @@ function renderSecurityAction(sec) {
 }
 
 function renderUser(u) {
+    deletedUserComputers = null;
+    document.getElementById('computerCardTitle').textContent = '关联计算机';
     document.getElementById('matchBox').innerHTML = '';
     document.getElementById('resultCard').classList.add('show');
     const sec = u.last_security_action || {};
@@ -911,9 +941,22 @@ async function mustChangePasswordNextLogin() {
 }
 
 async function deleteUser() {
-    if (!currentUser || !(await confirmYes(`删除账号：${currentUser.employee_id}`))) return;
+    if (!currentUser || !(await confirmYes(
+        `删除账号：${currentUser.employee_id}`,
+        '仅删除AD用户账号，关联计算机对象将保留并可单独管理。请输入 YES 确认。'
+    ))) return;
     const data = await apiFetch('/api/admin/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ employee_id: currentUser.account_name || currentUser.employee_id, confirm_text: 'YES' }) });
     showActionMsg(data.success, data.message);
+    if (data.success) {
+        const employeeId = currentUser.employee_id;
+        deletedUserComputers = [...(currentUser.computers || [])];
+        currentUser = null;
+        document.getElementById('matchBox').innerHTML = '';
+        document.getElementById('userInfo').textContent = `用户 ${employeeId} 已删除`;
+        document.getElementById('actionRow').innerHTML = '';
+        document.getElementById('computerCardTitle').textContent = '删除前关联计算机（页面记录）';
+        renderUserComputers(deletedUserComputers);
+    }
     if (data.need_approval) loadApprovals();
 }
 
@@ -1101,6 +1144,15 @@ async function deleteComputer(encodedName, encodedDn) {
     showToast(data.success ? 'success' : 'error', data.message);
     if (data.success) {
         document.getElementById('computerResultCard')?.classList.remove('show');
+        const computers = currentUser?.computers || deletedUserComputers;
+        if (Array.isArray(computers)) {
+            const remaining = computers.filter(row => dn && row.dn ? row.dn !== dn : row.name !== name);
+            if (remaining.length !== computers.length) {
+                if (currentUser) currentUser.computers = remaining;
+                else deletedUserComputers = remaining;
+                renderUserComputers(remaining);
+            }
+        }
         loadComputerStats();
     }
     if (data.need_approval) loadApprovals();
@@ -1182,10 +1234,11 @@ async function loadAdminUsers() {
     if (!data.success) return box.innerHTML = `<div class="empty">${fmt(data.message)}</div>`;
     if (!data.admins.length) return box.innerHTML = '<div class="empty">暂无后台用户</div>';
     box.innerHTML = `<table class="table"><thead><tr><th>用户名</th><th>角色</th><th>状态</th><th>允许发起删除审批</th><th>重置密码</th><th>创建人</th><th>操作</th></tr></thead><tbody>${data.admins.map(u => {
-        if (u.role === 'super_admin') return `<tr><td>${fmt(u.username)}</td><td>超级管理员</td><td>启用</td><td>是</td><td>-</td><td>${fmt(u.created_by)}</td><td>不可修改</td></tr>`;
+        const username = escAttr(u.username) + (u.display_name ? `<div class="hint">${escAttr(u.display_name)}</div>` : '');
+        if (u.role === 'super_admin') return `<tr><td>${username}</td><td>超级管理员</td><td>启用</td><td>是</td><td>-</td><td>${fmt(u.created_by)}</td><td>不可修改</td></tr>`;
         const canDelete = (u.permissions || []).includes('delete_user');
         const roleSelect = `<select id="role-${u.id}" onchange="toggleAdminDeletePermission(${u.id})"><option value="readonly" ${u.role === 'readonly' ? 'selected' : ''}>只读用户</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>管理员</option></select>`;
-        return `<tr><td>${fmt(u.username)}</td><td>${roleSelect}</td><td><input id="active-${u.id}" type="checkbox" style="width:auto;" ${u.is_active ? 'checked' : ''}></td><td><input id="deleteperm-${u.id}" type="checkbox" style="width:auto;" ${canDelete ? 'checked' : ''} ${u.role === 'admin' ? '' : 'disabled'}></td><td><input id="password-${u.id}" type="password" placeholder="不改请留空"></td><td>${fmt(u.created_by)}</td><td><button class="btn btn-primary" onclick="updateAdminUser(${u.id})">保存</button> <button class="btn btn-danger" onclick="deleteAdminUser(${u.id})">删除</button></td></tr>`;
+        return `<tr><td>${username}</td><td>${roleSelect}</td><td><input id="active-${u.id}" type="checkbox" style="width:auto;" ${u.is_active ? 'checked' : ''}></td><td><input id="deleteperm-${u.id}" type="checkbox" style="width:auto;" ${canDelete ? 'checked' : ''} ${u.role === 'admin' ? '' : 'disabled'}></td><td><input id="password-${u.id}" type="password" placeholder="不改请留空"></td><td>${fmt(u.created_by)}</td><td><button class="btn btn-primary" onclick="updateAdminUser(${u.id})">保存</button> <button class="btn btn-danger" onclick="deleteAdminUser(${u.id})">删除</button></td></tr>`;
     }).join('')}</tbody></table>`;
 }
 
@@ -1265,6 +1318,42 @@ async function runBatchPasswordPolicy(action) {
     const data = await apiFetch('/api/admin/password_policy/batch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, confirm_text: 'YES' }) });
     showToast(data.success ? 'success' : 'error', data.message);
     if (data.need_approval) loadApprovals();
+}
+
+function formatDomainPolicyAge(seconds) {
+    if (!Number.isFinite(seconds)) return '-';
+    if (seconds % 86400 === 0) return `${seconds / 86400} 天`;
+    if (seconds % 3600 === 0) return `${seconds / 3600} 小时`;
+    if (seconds % 60 === 0) return `${seconds / 60} 分钟`;
+    return `${seconds} 秒`;
+}
+
+async function loadDomainPasswordPolicy() {
+    const status = document.getElementById('domainPolicyStatus');
+    const button = document.getElementById('domainPolicyRefreshButton');
+    const cells = document.querySelectorAll('[data-domain-policy]');
+    cells.forEach(cell => cell.textContent = '-');
+    status.textContent = '正在从 AD 读取...';
+    button.disabled = true;
+    try {
+        const data = await apiFetch('/api/admin/domain_password_policy');
+        if (!data.success) throw new Error(data.message || '读取域密码策略失败');
+        const policy = data.policy;
+        const values = {
+            complexity_enabled: policy.complexity_enabled ? '已启用' : '已禁用',
+            min_password_length: `${policy.min_password_length} 个字符`,
+            min_age_seconds: formatDomainPolicyAge(policy.min_age_seconds),
+            max_age_seconds: policy.max_age_never_expires ? '永不过期' : formatDomainPolicyAge(policy.max_age_seconds),
+            password_history_count: `${policy.password_history_count} 个记住的密码`,
+            reversible_encryption_enabled: policy.reversible_encryption_enabled ? '已启用' : '已禁用'
+        };
+        cells.forEach(cell => cell.textContent = values[cell.dataset.domainPolicy]);
+        status.textContent = '当前值来自 AD 域对象，非 GPO 文件配置';
+    } catch (e) {
+        status.textContent = e.message === 'not logged in' ? '登录已失效' : e.message || '读取失败';
+    } finally {
+        button.disabled = false;
+    }
 }
 
 async function loadExpireSettings() {

@@ -40,6 +40,14 @@
         .message.error { background: #fff2f0; border: 1px solid #ffccc7; color: #cf1322; display: block; }
         .footer-link { text-align: center; margin-top: 20px; font-size: 13px; }
         .footer-link a { color: #888; text-decoration: none; }
+        [hidden] { display: none !important; }
+        .dingtalk-actions { display: grid; gap: 10px; margin-top: 18px; }
+        .dingtalk-button { width: 100%; padding: 11px 14px; border-radius: 8px; border: 1px solid #1677ff; background: #1677ff; color: #fff; font-size: 14px; cursor: pointer; }
+        .dingtalk-button.secondary { color: #1677ff; background: #fff; }
+        .dingtalk-button:disabled { opacity: .55; cursor: not-allowed; }
+        #dingtalkQrBox { margin-top: 16px; text-align: center; }
+        #dingtalkQrBox p { font-size: 14px; color: #555; margin-bottom: 12px; }
+        #dingtalkFrame { display: block; width: 100%; height: 340px; border: 0; }
     </style>
 </head>
 <body>
@@ -50,9 +58,9 @@
         <p>微丰启公司 IT管理系统</p>
     </div>
 
-    <div id="message" class="message"></div>
+    <div id="message" class="message" role="alert"></div>
 
-    <form id="loginForm">
+    <form id="loginForm" onsubmit="event.preventDefault(); doLogin();">
         <div class="form-group">
             <label>管理员账号</label>
             <input type="text" id="username" placeholder="请输入账号">
@@ -61,26 +69,163 @@
             <label>密码</label>
             <input type="password" id="password" placeholder="请输入密码">
         </div>
-        <button type="button" id="loginBtn" onclick="doLogin()">登 录</button>
+        <button type="submit" id="loginBtn">登 录</button>
     </form>
+
+    <div id="dingtalkActions" class="dingtalk-actions" hidden>
+        <button type="button" class="dingtalk-button" id="dingtalkQuickButton" onclick="quickDingtalkLogin()">钉钉快捷授权登录</button>
+        <button type="button" class="dingtalk-button secondary" id="dingtalkQrButton" onclick="startDingtalkQr()">钉钉扫码登录</button>
+    </div>
+    <div id="dingtalkQrBox" hidden>
+        <p id="dingtalkQrStatus" role="status"></p>
+        <div id="dingtalkFrameBox"></div>
+        <div class="dingtalk-actions">
+            <button type="button" class="dingtalk-button secondary" id="dingtalkRefreshButton" onclick="startDingtalkQr()">刷新二维码</button>
+            <button type="button" class="dingtalk-button secondary" id="dingtalkBackButton" onclick="closeDingtalkQr()">返回账号密码登录</button>
+        </div>
+    </div>
 
     <div class="footer-link">
         <a href="/">← 返回注册页</a>
     </div>
 </div>
 <script>
-document.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+let dingtalkAuthorization = null;
+let dingtalkTimer = null;
+let dingtalkBusy = false;
+let dingtalkRevision = 0;
+
+function loginMessage(text) {
+    const msg = document.getElementById('message');
+    msg.textContent = text;
+    msg.className = text ? 'message error' : 'message';
+}
 
 // 未登录被踢回时显示提示（/admin?need_login=1）
 (function () {
-    const msg = document.getElementById('message');
-    if (new URLSearchParams(location.search).get('need_login') === '1') {
-        msg.textContent = '请先登录';
-        msg.className = 'message error';
+    const params = new URLSearchParams(location.search);
+    const error = params.get('dingtalkError');
+    if (error) {
+        const messages = {
+            configuration: '钉钉登录配置不完整，请联系管理员', disabled: '钉钉登录未启用',
+            state: '授权会话已过期，请重新点击钉钉登录', origin: '请使用配置的钉钉登录域名访问',
+            authorization: '钉钉授权未完成，请重试', membership: '无法核验本企业成员，请检查应用可见范围和通讯录权限',
+            account: '平台账号已停用或无法创建，请联系管理员'
+        };
+        loginMessage(messages[error] || '钉钉登录失败，请稍后重试');
+        params.delete('dingtalkError');
+        history.replaceState(null, '', location.pathname + (params.size ? '?' + params.toString() : ''));
+    } else if (params.get('need_login') === '1') {
+        loginMessage('请先登录');
     }
 })();
 
+fetch('/api/admin/dingtalk/status', { cache: 'no-store' }).then(res => res.json()).then(data => {
+    document.getElementById('dingtalkActions').hidden = data.enabled !== true;
+}).catch(() => {});
+
+function quickDingtalkLogin() {
+    if (!dingtalkBusy && !document.getElementById('loginBtn').disabled) {
+        window.location.assign('/api/admin/dingtalk/login');
+    }
+}
+
+function closeDingtalkQr() {
+    dingtalkRevision++;
+    clearTimeout(dingtalkTimer);
+    dingtalkAuthorization = null;
+    document.getElementById('dingtalkFrameBox').replaceChildren();
+    document.getElementById('dingtalkQrBox').hidden = true;
+    document.getElementById('loginForm').hidden = false;
+    document.getElementById('dingtalkQrButton').hidden = false;
+}
+
+function validateDingtalkQr(authorization) {
+    const callback = new URL(authorization.redirectUri);
+    const frame = new URL(authorization.authorizationUrl);
+    if (callback.origin !== location.origin || callback.pathname !== '/api/admin/dingtalk/callback'
+        || callback.search || callback.hash || callback.username || callback.password) {
+        throw new Error('请使用与钉钉回调地址相同的域名、协议和端口访问平台');
+    }
+    if (frame.origin !== 'https://login.dingtalk.com' || frame.pathname !== '/oauth2/auth'
+        || frame.username || frame.password || frame.hash || frame.searchParams.get('iframe') !== 'true'
+        || frame.searchParams.get('redirect_uri') !== authorization.redirectUri
+        || frame.searchParams.get('state') !== authorization.state || !/^[A-Za-z0-9_-]{43}$/.test(authorization.state)
+        || frame.searchParams.get('response_type') !== 'code' || frame.searchParams.get('scope') !== 'openid'
+        || frame.searchParams.get('prompt') !== 'consent' || !frame.searchParams.get('client_id')
+        || !Number.isFinite(authorization.expiresAt) || authorization.expiresAt <= Date.now()) {
+        throw new Error('钉钉二维码参数无效，请刷新重试');
+    }
+    return frame.href;
+}
+
+async function startDingtalkQr() {
+    if (dingtalkBusy || document.getElementById('loginBtn').disabled) return;
+    dingtalkBusy = true;
+    const revision = ++dingtalkRevision;
+    clearTimeout(dingtalkTimer);
+    dingtalkAuthorization = null;
+    loginMessage('');
+    document.getElementById('loginForm').hidden = true;
+    document.getElementById('dingtalkQrButton').hidden = true;
+    document.getElementById('dingtalkQrBox').hidden = false;
+    const status = document.getElementById('dingtalkQrStatus');
+    const frameBox = document.getElementById('dingtalkFrameBox');
+    frameBox.replaceChildren();
+    status.textContent = '正在加载钉钉二维码...';
+    ['dingtalkRefreshButton', 'dingtalkBackButton', 'dingtalkQuickButton'].forEach(id => document.getElementById(id).disabled = true);
+    try {
+        const res = await fetch('/api/admin/dingtalk/qr', {
+            method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest', 'Content-Type': 'application/json' }, body: '{}'
+        });
+        const authorization = await res.json();
+        if (!res.ok) throw new Error(authorization.message || '二维码初始化失败，请重试');
+        if (revision !== dingtalkRevision) return;
+        const frame = document.createElement('iframe');
+        frame.src = validateDingtalkQr(authorization);
+        frame.id = 'dingtalkFrame';
+        frame.title = '钉钉登录二维码';
+        frame.referrerPolicy = 'no-referrer';
+        frame.onerror = () => { status.textContent = '二维码加载失败，请刷新重试'; };
+        dingtalkAuthorization = authorization;
+        frameBox.replaceChildren(frame);
+        status.textContent = '使用手机钉钉扫码并确认登录';
+        dingtalkTimer = setTimeout(() => {
+            dingtalkAuthorization = null;
+            frameBox.replaceChildren();
+            status.textContent = '二维码已过期，请刷新后重新扫码';
+        }, authorization.expiresAt - Date.now());
+    } catch (error) {
+        status.textContent = error.message || '二维码初始化失败，请重试';
+    } finally {
+        dingtalkBusy = false;
+        ['dingtalkRefreshButton', 'dingtalkBackButton', 'dingtalkQuickButton'].forEach(id => document.getElementById(id).disabled = false);
+    }
+}
+
+window.addEventListener('message', event => {
+    const authorization = dingtalkAuthorization;
+    const frame = document.getElementById('dingtalkFrame');
+    if (!authorization || Date.now() >= authorization.expiresAt || event.origin !== 'https://login.dingtalk.com'
+        || !frame || event.source !== frame.contentWindow) return;
+    const data = event.data;
+    if (!data || typeof data !== 'object' || data.success !== true || typeof data.redirectUrl !== 'string' || data.redirectUrl.length > 5000) return;
+    try {
+        const callback = new URL(data.redirectUrl);
+        const expected = new URL(authorization.redirectUri);
+        if (callback.origin !== expected.origin || callback.pathname !== expected.pathname || callback.username || callback.password
+            || callback.hash || callback.searchParams.has('error') || callback.searchParams.has('code')
+            || callback.searchParams.getAll('state').length !== 1 || callback.searchParams.get('state') !== authorization.state
+            || callback.searchParams.getAll('authCode').length !== 1) return;
+        const code = callback.searchParams.get('authCode');
+        if (!code || !code.trim() || code.length > 2048) return;
+        dingtalkAuthorization = null;
+        window.location.assign('/api/admin/dingtalk/callback?' + new URLSearchParams({ authCode: code, state: authorization.state }));
+    } catch {}
+});
+
 async function doLogin() {
+    if (dingtalkBusy || document.getElementById('loginBtn').disabled) return;
     const username = document.getElementById('username').value.trim();
     const password = document.getElementById('password').value;
     const btn = document.getElementById('loginBtn');
