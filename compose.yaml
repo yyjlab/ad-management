@@ -1,0 +1,79 @@
+# 首次使用前，将两条 image 的占位标签改为 SWR 中已成功推送的 testN。
+# 服务器配置文件放在 /opt/ad-management/compose.yaml；数据继续使用原路径。
+name: ad-management
+
+services:
+  backend:
+    image: swr.cn-south-1.myhuaweicloud.com/recovery-uat/be-ad:REPLACE_WITH_PUBLISHED_TEST_TAG
+    container_name: employee-be
+    restart: unless-stopped
+    env_file:
+      - /app/employee_register/be/.env
+    volumes:
+      - type: bind
+        source: /app/employee_register/be/config.py
+        target: /app/config.py
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /app/employee_register/be/instance
+        target: /app/instance
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /app/employee_register/be/.flask_secret_key
+        target: /app/.flask_secret_key
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /app/employee_register/be/register.log
+        target: /app/register.log
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /app/employee_register/be/reset.log
+        target: /app/reset.log
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /app/employee_register/be/admin.log
+        target: /app/admin.log
+        bind:
+          create_host_path: false
+    expose:
+      - "5000"
+    networks:
+      - employee-net
+    labels:
+      wud.watch: "true"
+      wud.watch.digest: "false"
+      wud.tag.include: '^test[0-9]+$$'
+      wud.tag.transform: '^test([0-9]+)$$ => $$1.0.0'
+      wud.compose.file: /opt/ad-management/compose.yaml
+      wud.trigger.dockercompose.shared.enabled: "true"
+
+  web:
+    image: swr.cn-south-1.myhuaweicloud.com/recovery-uat/fe-ad:REPLACE_WITH_PUBLISHED_TEST_TAG
+    container_name: employee-fe
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    networks:
+      - employee-net
+    depends_on:
+      backend:
+        condition: service_healthy
+    labels:
+      wud.watch: "true"
+      wud.watch.digest: "false"
+      wud.tag.include: '^test[0-9]+$$'
+      wud.tag.transform: '^test([0-9]+)$$ => $$1.0.0'
+      wud.compose.file: /opt/ad-management/compose.yaml
+      wud.trigger.dockercompose.shared.enabled: "true"
+
+networks:
+  employee-net:
+    external: true
+    name: employee-net
