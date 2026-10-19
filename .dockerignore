@@ -1,0 +1,14 @@
+**
+!Dockerfile.backend
+!Dockerfile.frontend
+!.dockerignore
+!requirements.txt
+!app.py
+!dingtalk_auth.py
+!nginx.conf
+!index.html
+!admin.html
+!admin_login.html
+!admin_manage.html
+!reset.html
+!reset_confirm.html
