@@ -5,4 +5,4 @@ flask==3.0.3              # Web框架，整个项目的核心
 flask-sqlalchemy==3.1.1   # 数据库ORM，让Python操作数据库像操作对象一样方便
 flask-limiter==3.7.0      # 接口限速，防止刷验证码
 ldap3==2.9.1              # 连接Windows AD的LDAP库，核心依赖
-gunicorn==26.2.2
+gunicorn==26.2.0
