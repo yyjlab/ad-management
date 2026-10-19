@@ -13,6 +13,12 @@ docker build -f Dockerfile.frontend -t employee-fe:latest .
 
 后端安装依赖后才复制源码，普通代码更新可复用依赖层。前端只复制 HTML 和 Nginx 配置，不包含后端代码。
 
+后端默认使用官方 PyPI，下载连接超时为 120 秒、连接重试 10 次。Jenkins 下载慢或超时时，可在后端构建命令中指定清华 PyPI 镜像；只影响本次构建，不修改服务器配置：
+
+```bash
+docker build -f Dockerfile.backend --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple -t swr.cn-south-1.myhuaweicloud.com/recovery-uat/be-ad:test${BUILD_NUMBER} .
+```
+
 ## 运行配置
 
 后端仍需挂载服务器原有的 `config.py`，保留其中的 AD、数据库和邮件配置。钉钉参数在服务器的 `.env` 中填写，不要提交到 Git 或打进镜像：
