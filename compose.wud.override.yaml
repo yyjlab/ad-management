@@ -1,0 +1,9 @@
+# Merge with /opt/asset-management/compose.wud.yaml; do not run alone.
+services:
+  wud:
+    volumes:
+      - type: bind
+        source: /opt/ad-management
+        target: /opt/ad-management
+        bind:
+          create_host_path: false

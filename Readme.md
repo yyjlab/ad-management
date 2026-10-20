@@ -57,13 +57,25 @@ docker compose -p ad-management -f /opt/ad-management/compose.yaml up -d --no-bu
 
 ## 接入现有 WUD
 
-AD 服务已配置共享触发器，只接受递增的 `testN` 标签。先验证 AD 能正常访问，再在服务器 `/opt/asset-management/compose.wud.yaml` 的 `wud.volumes` 下追加以下挂载，保留原挂载、凭据和 WUD 数据卷：
+AD 服务已配置共享触发器，只接受递增的 `testN` 标签。先验证 AD 能正常访问，再把本仓库的 `compose.wud.override.yaml` 放到服务器 `/opt/ad-management/compose.wud.override.yaml`。它只给现有 WUD 增加 AD 配置目录挂载，不修改资产项目原文件，不挂载 AD 数据、密钥或 `.env`。
 
-```yaml
-- /opt/ad-management:/opt/ad-management:rw
+以下命令先检查配置，再单独重建 WUD。这会短暂停止所有项目的镜像监测，不重启 AD、资产系统或 MySQL，不创建新 WUD 数据卷：
+
+```bash
+(
+set -e
+test -s /opt/ad-management/compose.yaml
+test -f /opt/asset-management/.env
+test "$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' wud)" = wud
+docker volume inspect wud_data >/dev/null
+WUD=(docker compose --project-directory /opt/asset-management --env-file /opt/asset-management/.env -p wud -f /opt/asset-management/compose.wud.yaml -f /opt/ad-management/compose.wud.override.yaml)
+"${WUD[@]}" config --quiet
+"${WUD[@]}" up -d --no-build --no-deps --pull never --wait --wait-timeout 180 wud
+docker exec wud node -e 'const fs=require("fs"); fs.accessSync("/opt/ad-management/compose.yaml",fs.constants.R_OK|fs.constants.W_OK); console.log("AD Compose is readable and writable")'
+)
 ```
 
-此处只给 WUD 挂载 Compose 配置目录，不挂载 AD 数据、密钥或 `.env`。随后需单独重建 WUD 容器使挂载生效；这会短暂停止所有项目的镜像监测，不能运行资产项目的整体 `up/down`。
+原 WUD 的 SWR 凭据、通知配置、`/store` 数据卷和资产项目挂载继续从原文件加载。此后重建 WUD 要保留上面的两份 `-f` 参数；补充文件不能单独启动。不要运行资产项目的整体 `up/down`。
 
 接入后 Jenkins 推送新版本，WUD 会更新容器并写回服务器的 Compose 镜像标签。不要用 Git 文件覆盖 WUD 已写回的服务器版本。共享触发器已有的配置备份、禁用清理和健康检查回滚继续适用；回滚容器不等于回滚数据库，前后端独立更新也不是原子发布。
 
