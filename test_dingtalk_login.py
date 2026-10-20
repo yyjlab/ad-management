@@ -23,6 +23,7 @@ class DingTalkLoginTests(unittest.TestCase):
             'FLASK_SECRET_KEY': 'isolated-test-session-key', 'DISABLE_INTERNAL_PASSWORD_SCHEDULER': 'true'
         }), patch('logging.FileHandler', return_value=logging.NullHandler()):
             cls.platform = importlib.import_module('app')
+        sys.modules['app'] = cls.platform
 
     def setUp(self):
         self.env = patch.dict(os.environ, {

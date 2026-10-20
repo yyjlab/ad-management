@@ -3157,13 +3157,10 @@ def domain_password_policy_get():
     conn = None
     try:
         conn = get_ad_connection()
-        conn.search(
-            search_base='',
-            search_filter='(objectClass=*)',
-            search_scope=ldap3.BASE,
-            attributes=['defaultNamingContext']
-        )
-        domain_dn = get_entry_text(conn.entries[0], 'defaultNamingContext') if conn.entries else ''
+        # get_info=ldap3.ALL already loads RootDSE fields outside the AD object schema.
+        server_info = conn.server.info
+        domain_contexts = server_info.other.get('defaultNamingContext', []) if server_info else []
+        domain_dn = domain_contexts[0] if domain_contexts else ''
         if not domain_dn:
             raise ValueError('AD 未返回默认域 DN')
         conn.search(
