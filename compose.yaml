@@ -5,7 +5,7 @@ name: ad-management
 services:
   backend:
     image: swr.cn-south-1.myhuaweicloud.com/recovery-uat/be-ad:REPLACE_WITH_PUBLISHED_TEST_TAG
-    container_name: employee-be
+    container_name: be-ad
     restart: unless-stopped
     env_file:
       - /app/employee_register/be/.env
@@ -45,7 +45,10 @@ services:
     expose:
       - "5000"
     networks:
-      - employee-net
+      employee-net:
+        # Keep the upstream name used by existing frontend images.
+        aliases:
+          - employee-be
     labels:
       wud.watch: "true"
       wud.watch.digest: "false"
@@ -56,7 +59,7 @@ services:
 
   web:
     image: swr.cn-south-1.myhuaweicloud.com/recovery-uat/fe-ad:REPLACE_WITH_PUBLISHED_TEST_TAG
-    container_name: employee-fe
+    container_name: fe-ad
     restart: unless-stopped
     ports:
       - "80:80"

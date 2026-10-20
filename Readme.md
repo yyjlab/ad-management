@@ -7,8 +7,8 @@ AD 用户注册、密码修改和后台管理平台。前端静态页面与 Flas
 在仓库根目录执行，得到两个镜像；推送 SWR 时使用 Jenkins 中配置的镜像仓库和版本号。
 
 ```bash
-docker build -f Dockerfile.backend -t employee-be:latest .
-docker build -f Dockerfile.frontend -t employee-fe:latest .
+docker build -f Dockerfile.backend -t be-ad:latest .
+docker build -f Dockerfile.frontend -t fe-ad:latest .
 ```
 
 后端安装依赖后才复制源码，普通代码更新可复用依赖层。前端只复制 HTML 和 Nginx 配置，不包含后端代码。
@@ -34,11 +34,11 @@ Compose 已通过 `env_file` 读取 `/app/employee_register/be/.env`，不使用
 
 ## Compose 部署
 
-服务器使用 `/opt/ad-management/compose.yaml`，只管理 AD 前后端，复用现有 `employee-net`，不创建数据库或 WUD 服务。
+服务器使用 `/opt/ad-management/compose.yaml`，只管理 `be-ad`、`fe-ad` 两个容器，复用现有 `employee-net`，不创建数据库或 WUD 服务。后端保留 `employee-be` 内网别名，兼容已有前端镜像的 Nginx 配置；这不是额外容器。
 
 1. 将 `compose.yaml` 的两条 `image` 标签 `REPLACE_WITH_PUBLISHED_TEST_TAG` 分别替换为 SWR 已成功推送的 `testN`，前后端版本号可以不同。镜像地址必须直接写在 Compose 中，不能改成环境变量，否则现有 WUD 无法匹配并写回版本。
 2. 在 `/app/employee_register/be/.env` 填写钉钉参数，原 `config.py`、数据和密钥不变。已有 `.env` 只补充需要的配置，不覆盖原值。
-3. 首次接管前先做一致性备份并安排短暂停机。原 `employee-be`、`employee-fe` 尚存在时不能直接启动同名 Compose 容器；需确认后停用并改名保留旧容器。不要删除原数据，不运行 `down -v` 或 `--remove-orphans`。
+3. 首次接管前先做一致性备份并安排短暂停机。先确认并停用原 `employee-be`、`employee-fe`，保留旧容器用于回退；旧、新后端不能同时运行并写入原数据库，前端还会争用 80 端口。不要删除原数据，不运行 `down -v` 或 `--remove-orphans`。
 
 准备后先执行只读检查，确认数据库非空、所需文件存在及 Compose 格式正确：
 
@@ -69,7 +69,7 @@ AD 服务已配置共享触发器，只接受递增的 `testN` 标签。先验�
 
 ## 保留现有数据
 
-当前服务器为 `172.168.30.202`。后续切换镜像时继续使用 `employee-be`、`employee-fe` 容器名及 `employee-net` 网络，前端发布 `80:80`，后端仅使用容器内 `5000` 端口。必须保留以下已有文件和挂载：
+当前服务器为 `172.168.30.202`。新容器使用 `be-ad`、`fe-ad` 名称及原 `employee-net` 网络，前端发布 `80:80`，后端仅使用容器内 `5000` 端口。容器改名不改变服务器数据目录，必须保留以下已有文件和挂载：
 
 | 服务器原有路径 | 后端容器内路径 | 用途 |
 | --- | --- | --- |
@@ -91,9 +91,9 @@ Compose 不再将整个 `be` 目录挂到 `/app`，也不再挂载旧前端源�
 部署后可用以下只读命令查看状态；健康检查只检查 Web 接口，不代表 AD 或钉钉认证成功。
 
 ```bash
-docker ps --filter name=employee-
-docker logs --tail 50 employee-be
-docker logs --tail 50 employee-fe
+docker compose -p ad-management -f /opt/ad-management/compose.yaml ps
+docker logs --tail 50 be-ad
+docker logs --tail 50 fe-ad
 curl -fsS http://127.0.0.1/api/admin/check
 curl -fsS http://127.0.0.1/api/admin/dingtalk/status
 ```
