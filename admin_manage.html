@@ -56,6 +56,14 @@
         .table { width: 100%; min-width: 760px; border-collapse: collapse; font-size: 13px; }
         .table th, .table td { text-align: left; border-bottom: 1px solid #edf0f5; padding: 10px 8px; vertical-align: top; word-break: break-word; }
         .table th { color: #4b5563; background: #fafafa; }
+        #page-domainPasswordPolicy .domain-policy-table { min-width: 0; table-layout: fixed; margin-top: 12px; }
+        #page-domainPasswordPolicy .domain-policy-table th:first-child { width: 44%; }
+        #page-domainPasswordPolicy fieldset { border: 0; min-width: 0; }
+        #page-domainPasswordPolicy input, #page-domainPasswordPolicy select { padding: 7px; min-width: 0; }
+        #domainPolicyDialog { border: 1px solid #e5e7eb; border-radius: 8px; padding: 22px; margin: auto; width: min(620px, calc(100% - 24px)); max-height: 90vh; overflow-y: auto; }
+        #domainPolicyDialog::backdrop { background: rgba(0,0,0,.45); }
+        #domainPolicyDialog table { min-width: 0; table-layout: fixed; margin: 14px 0; }
+        #domainPolicyDialog p { margin: 12px 0; }
         .approval-table { min-width: 1120px; table-layout: fixed; }
         .approval-table th:nth-child(1) { width: 50px; }
         .approval-table th:nth-child(2) { width: 95px; }
@@ -234,23 +242,27 @@
 
         <section class="page" id="page-domainPasswordPolicy">
             <div class="page-head">
-                <div><h1>域密码策略</h1><p>AD 域默认密码策略；应用了细粒度密码策略的账号可能不同。</p></div>
+                <div><h1>域密码策略</h1><p>域默认密码策略；细粒度策略和其他 GPO 的实际应用结果可能不同。</p></div>
                 <button class="btn btn-primary" id="domainPolicyRefreshButton" onclick="loadDomainPasswordPolicy()">刷新</button>
             </div>
             <div class="card">
                 <h2>密码策略</h2>
                 <p class="hint" id="domainPolicyStatus">打开页面后读取 AD</p>
-                <table class="table" style="min-width: 0; margin-top: 12px;"><thead><tr><th>策略</th><th>当前值</th></tr></thead><tbody>
-                    <tr><td>放宽最小密码长度限制</td><td>暂不可读取（需从 GPO 读取）</td></tr>
-                    <tr><td>密码必须符合复杂性要求</td><td data-domain-policy="complexity_enabled">-</td></tr>
-                    <tr><td>密码长度最小值</td><td data-domain-policy="min_password_length">-</td></tr>
-                    <tr><td>密码最短使用期限</td><td data-domain-policy="min_age_seconds">-</td></tr>
-                    <tr><td>密码最长使用期限</td><td data-domain-policy="max_age_seconds">-</td></tr>
-                    <tr><td>强制密码历史</td><td data-domain-policy="password_history_count">-</td></tr>
-                    <tr><td>用可还原的加密来存储密码</td><td data-domain-policy="reversible_encryption_enabled">-</td></tr>
-                    <tr><td>最小密码长度审核</td><td>暂不可读取（需从 GPO 读取）</td></tr>
-                </tbody></table>
+                <p class="hint" id="domainPolicySource"></p>
+                <fieldset id="domainPolicyFields" disabled>
+                    <table class="table domain-policy-table"><thead><tr><th>策略</th><th>当前值</th><th data-policy-edit>修改为</th></tr></thead><tbody id="domainPolicyRows"></tbody></table>
+                </fieldset>
+                <div class="action-row" style="margin-top:16px;"><button class="btn btn-primary" id="domainPolicySaveButton" onclick="previewDomainPolicy()" disabled hidden>预览变更</button></div>
             </div>
+            <dialog id="domainPolicyDialog">
+                <h3>确认修改真实 GPO</h3>
+                <p id="domainPolicyPreviewSource" class="hint"></p>
+                <table class="table"><thead><tr><th>策略</th><th>保存前</th><th>保存后</th></tr></thead><tbody id="domainPolicyDiff"></tbody></table>
+                <p>将影响应用此 GPO 的账号或计算机，域控应用和复制可能有延迟。“未定义”不会主动恢复已应用的注册表值。</p>
+                <label for="domainPolicyConfirm">输入 YES 确认保存</label>
+                <input id="domainPolicyConfirm" autocomplete="off">
+                <div class="modal-btns"><button class="btn btn-light" onclick="closeDomainPolicyPreview()">取消</button><button class="btn btn-danger" id="domainPolicyConfirmButton" onclick="saveDomainPolicy()">确认保存</button></div>
+            </dialog>
         </section>
 
         <section class="page" id="page-passwordPolicy">
@@ -1328,31 +1340,160 @@ function formatDomainPolicyAge(seconds) {
     return `${seconds} 秒`;
 }
 
+const domainPolicyDefinitions = [
+    ['relax_min_password_length_limits', '放宽最小密码长度限制', 'bool'],
+    ['complexity_enabled', '密码必须符合复杂性要求', 'bool'],
+    ['min_password_length', '密码长度最小值', '字符', 128],
+    ['min_age_days', '密码最短使用期限', '天', 999],
+    ['max_age_days', '密码最长使用期限', '天', 999],
+    ['password_history_count', '强制密码历史', '个记住的密码', 24],
+    ['reversible_encryption_enabled', '用可还原的加密来存储密码', 'bool'],
+    ['min_password_length_audit', '最小密码长度审核', '字符', 128]
+];
+let domainPolicyState = null, domainPolicyPending = null;
+
+function domainPolicyValue(key, value) {
+    if (value == null) return '未定义';
+    const definition = domainPolicyDefinitions.find(row => row[0] === key);
+    if (definition[2] === 'bool') return value ? '已启用' : '已禁用';
+    if (key === 'max_age_days' && value === 0) return '永不过期';
+    return `${value} ${definition[2]}`;
+}
+
+function renderDomainPolicy(data, fallbackValues = null) {
+    const body = document.getElementById('domainPolicyRows');
+    body.replaceChildren();
+    document.querySelectorAll('[data-policy-edit]').forEach(cell => cell.hidden = !data.writable);
+    for (const [key, label, kind, maximum] of domainPolicyDefinitions) {
+        const row = body.insertRow();
+        row.insertCell().textContent = label;
+        row.insertCell().textContent = fallbackValues ? (fallbackValues[key] || '需启用 GPO 接入') : domainPolicyValue(key, data.policy[key]);
+        const cell = row.insertCell();
+        cell.hidden = !data.writable;
+        const input = document.createElement(kind === 'bool' ? 'select' : 'input');
+        input.dataset.policyInput = key;
+        input.setAttribute('aria-label', label);
+        if (kind === 'bool') {
+            for (const [value, text] of [['', '未定义'], ['true', '已启用'], ['false', '已禁用']]) input.add(new Option(text, value));
+        } else {
+            input.type = 'number'; input.min = key === 'min_password_length_audit' ? '1' : '0'; input.max = maximum; input.step = '1'; input.placeholder = '未定义';
+            if (key === 'max_age_days') input.title = '0 表示永不过期；留空表示未定义';
+        }
+        input.value = data.policy?.[key] == null ? '' : String(data.policy[key]);
+        cell.append(input);
+    }
+    document.getElementById('domainPolicyFields').disabled = !data.writable;
+    const save = document.getElementById('domainPolicySaveButton');
+    save.hidden = !data.writable; save.disabled = !data.writable;
+}
+
 async function loadDomainPasswordPolicy() {
     const status = document.getElementById('domainPolicyStatus');
     const button = document.getElementById('domainPolicyRefreshButton');
-    const cells = document.querySelectorAll('[data-domain-policy]');
-    cells.forEach(cell => cell.textContent = '-');
-    status.textContent = '正在从 AD 读取...';
-    button.disabled = true;
+    domainPolicyState = null;
+    document.getElementById('domainPolicySource').textContent = '';
+    document.getElementById('domainPolicySaveButton').disabled = true;
+    document.getElementById('domainPolicyFields').disabled = true;
+    document.getElementById('domainPolicyRows').replaceChildren();
+    status.textContent = '正在读取...'; button.disabled = true;
     try {
-        const data = await apiFetch('/api/admin/domain_password_policy');
-        if (!data.success) throw new Error(data.message || '读取域密码策略失败');
-        const policy = data.policy;
-        const values = {
-            complexity_enabled: policy.complexity_enabled ? '已启用' : '已禁用',
-            min_password_length: `${policy.min_password_length} 个字符`,
-            min_age_seconds: formatDomainPolicyAge(policy.min_age_seconds),
-            max_age_seconds: policy.max_age_never_expires ? '永不过期' : formatDomainPolicyAge(policy.max_age_seconds),
-            password_history_count: `${policy.password_history_count} 个记住的密码`,
-            reversible_encryption_enabled: policy.reversible_encryption_enabled ? '已启用' : '已禁用'
-        };
-        cells.forEach(cell => cell.textContent = values[cell.dataset.domainPolicy]);
-        status.textContent = '当前值来自 AD 域对象，非 GPO 文件配置';
+        const data = await apiFetch('/api/admin/domain_password_policy/gpo');
+        if (!data.success) throw new Error(data.message || '读取 GPO 失败');
+        if (!data.enabled) {
+            const fallback = await apiFetch('/api/admin/domain_password_policy');
+            if (!fallback.success) throw new Error(fallback.message || '读取域策略失败');
+            const p = fallback.policy;
+            renderDomainPolicy(data, {
+                complexity_enabled: p.complexity_enabled ? '已启用' : '已禁用',
+                min_password_length: `${p.min_password_length} 个字符`,
+                min_age_days: formatDomainPolicyAge(p.min_age_seconds),
+                max_age_days: p.max_age_never_expires ? '永不过期' : formatDomainPolicyAge(p.max_age_seconds),
+                password_history_count: `${p.password_history_count} 个记住的密码`,
+                reversible_encryption_enabled: p.reversible_encryption_enabled ? '已启用' : '已禁用'
+            });
+            status.textContent = '当前值来自 AD 域对象，非 GPO 文件配置；GPO 接入未启用';
+        } else {
+            domainPolicyState = data;
+            renderDomainPolicy(data);
+            document.getElementById('domainPolicySource').textContent = `${data.source.name} | ${data.source.guid} | 版本 ${data.source.version} | ${data.source.dc}`;
+            status.textContent = data.writable ? '已读取真实 GPO 配置' : '已读取真实 GPO 配置；写入未启用';
+        }
     } catch (e) {
         status.textContent = e.message === 'not logged in' ? '登录已失效' : e.message || '读取失败';
-    } finally {
+    } finally { button.disabled = false; }
+}
+
+async function previewDomainPolicy() {
+    if (!domainPolicyState?.writable) return;
+    const changes = {};
+    for (const input of document.querySelectorAll('[data-policy-input]')) {
+        if (!input.reportValidity()) return;
+        const key = input.dataset.policyInput;
+        const kind = domainPolicyDefinitions.find(row => row[0] === key)[2];
+        const value = input.value === '' ? null : kind === 'bool' ? input.value === 'true' : Number(input.value);
+        if (value !== domainPolicyState.policy[key]) changes[key] = value;
+    }
+    if (!Object.keys(changes).length) return showToast('warning', '没有需要保存的变更');
+    const button = document.getElementById('domainPolicySaveButton');
+    button.disabled = true;
+    document.getElementById('domainPolicyRefreshButton').disabled = true;
+    document.getElementById('domainPolicyFields').disabled = true;
+    try {
+        const payload = {revision: domainPolicyState.revision, changes};
+        const data = await apiFetch('/api/admin/domain_password_policy/gpo/preview', {method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': domainPolicyState.csrf_token}, body: JSON.stringify(payload)});
+        if (!data.success) throw new Error(data.message || '预览失败');
+        domainPolicyPending = payload;
+        document.getElementById('domainPolicyPreviewSource').textContent = `${data.source.name} | 版本 ${data.source.version}`;
+        const body = document.getElementById('domainPolicyDiff'); body.replaceChildren();
+        for (const change of data.diff) {
+            const row = body.insertRow();
+            row.insertCell().textContent = domainPolicyDefinitions.find(item => item[0] === change.key)[1];
+            row.insertCell().textContent = domainPolicyValue(change.key, change.before);
+            row.insertCell().textContent = domainPolicyValue(change.key, change.after);
+        }
+        document.getElementById('domainPolicyConfirm').value = '';
+        document.getElementById('domainPolicyDialog').showModal();
+    } catch (e) { showToast('error', e.message); }
+    finally {
         button.disabled = false;
+        document.getElementById('domainPolicyRefreshButton').disabled = false;
+        document.getElementById('domainPolicyFields').disabled = false;
+    }
+}
+
+function closeDomainPolicyPreview() {
+    domainPolicyPending = null;
+    document.getElementById('domainPolicyDialog').close();
+}
+
+async function saveDomainPolicy() {
+    if (!domainPolicyPending || document.getElementById('domainPolicyConfirm').value !== 'YES') return showToast('error', '请输入 YES');
+    const button = document.getElementById('domainPolicyConfirmButton');
+    button.disabled = true;
+    const dialog = document.getElementById('domainPolicyDialog');
+    dialog.oncancel = event => event.preventDefault();
+    dialog.querySelector('.btn-light').disabled = true;
+    try {
+        const data = await apiFetch('/api/admin/domain_password_policy/gpo', {method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': domainPolicyState.csrf_token}, body: JSON.stringify({...domainPolicyPending, confirm_text: 'YES'})});
+        closeDomainPolicyPreview();
+        await loadDomainPasswordPolicy();
+        const message = `${data.message || '保存失败'}${data.backup_id ? `；备份编号 ${data.backup_id}` : ''}`;
+        document.getElementById('domainPolicyStatus').textContent = message;
+        showToast(data.success ? 'success' : 'error', message);
+        if (data.recovery_required) {
+            domainPolicyState = null;
+            document.getElementById('domainPolicyFields').disabled = true;
+            document.getElementById('domainPolicySaveButton').disabled = true;
+        }
+    } catch (e) {
+        closeDomainPolicyPreview();
+        domainPolicyState = null;
+        document.getElementById('domainPolicyFields').disabled = true;
+        document.getElementById('domainPolicySaveButton').disabled = true;
+        document.getElementById('domainPolicyStatus').textContent = '请求结果未确认，请刷新并核查 GPO 版本，勿重复提交';
+        showToast('error', e.message);
+    } finally {
+        button.disabled = false; dialog.oncancel = null; dialog.querySelector('.btn-light').disabled = false;
     }
 }
 

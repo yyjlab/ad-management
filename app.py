@@ -23,6 +23,7 @@ from collections import Counter
 from functools import wraps
 import threading
 import time
+import ssl
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -42,6 +43,7 @@ import ldap3
 from ldap3.core.exceptions import LDAPException
 from urllib.parse import urlencode, urlsplit
 from dingtalk_auth import DingTalkClient, DingTalkConfig, DingTalkError
+from gpo_password_policy import GpoPasswordPolicy, PolicyError, validate_changes as validate_gpo_changes
 
 # ============================================================
 # 初始化 Flask 应用
@@ -3200,6 +3202,100 @@ def domain_password_policy_get():
     finally:
         if conn:
             conn.unbind()
+
+
+def get_gpo_ad_connection():
+    tls = ldap3.Tls(validate=ssl.CERT_REQUIRED,
+                     ca_certs_file=os.getenv('GPO_LDAP_CA_CERTS_FILE') or None)
+    server = ldap3.Server(os.getenv('GPO_LDAP_SERVER') or app.config['AD_SERVER'],
+                          port=636, use_ssl=True, tls=tls, get_info=ldap3.ALL, connect_timeout=10)
+    return ldap3.Connection(server, user=app.config['AD_BIND_USER'],
+                            password=app.config['AD_BIND_PASSWORD'], authentication=ldap3.SIMPLE,
+                            auto_bind=True, receive_timeout=15)
+
+
+@app.route('/api/admin/domain_password_policy/gpo', methods=['GET', 'POST'])
+@app.route('/api/admin/domain_password_policy/gpo/preview', methods=['POST'])
+@admin_required
+@permission_required('password_policy')
+def domain_password_policy_gpo():
+    if not is_super_admin_user():
+        return jsonify(success=False, message='仅超级管理员可管理域密码策略'), 403
+    enabled = os.getenv('GPO_PASSWORD_POLICY_ENABLED', 'false').lower() == 'true'
+    writable = os.getenv('GPO_PASSWORD_POLICY_WRITE_ENABLED', 'false').lower() == 'true'
+    if not enabled:
+        return jsonify(success=request.method == 'GET', enabled=False, writable=False,
+                       message='GPO 接入未启用，当前仅展示 AD 域对象策略'), 200 if request.method == 'GET' else 403
+    conn = None
+    preview = request.path.endswith('/preview')
+    try:
+        if request.method == 'GET':
+            session.setdefault('domain_policy_csrf', secrets.token_urlsafe(32))
+        else:
+            token = request.headers.get('X-CSRF-Token', '')
+            expected = session.get('domain_policy_csrf', '')
+            if not expected or not secrets.compare_digest(token, expected):
+                raise PolicyError('页面校验已失效，请刷新后重试', 403)
+            if not writable:
+                raise PolicyError('GPO 写入开关未启用', 403)
+            data = request.get_json(silent=True)
+            if not isinstance(data, dict) or set(data) - {'revision', 'changes', 'confirm_text'}:
+                raise PolicyError('请求格式无效')
+            validate_gpo_changes(data.get('changes'))
+            if not isinstance(data.get('revision'), str) or not 1 <= len(data['revision']) <= 128:
+                raise PolicyError('缺少有效的 GPO 版本，请刷新后重试')
+            payload_hash = hashlib.sha256(json.dumps(
+                [data.get('revision'), data.get('changes')], sort_keys=True, allow_nan=False
+            ).encode()).hexdigest()
+            if not preview:
+                ticket = session.pop('domain_policy_preview', {})
+                if (ticket.get('hash') != payload_hash or time.time() - ticket.get('at', 0) > 300
+                        or data.get('confirm_text') != 'YES'):
+                    raise PolicyError('请重新预览变更，并输入 YES 确认', 409)
+        smb_username = os.getenv('GPO_SMB_USERNAME', '')
+        smb_password = os.getenv('GPO_SMB_PASSWORD', '')
+        if bool(smb_username) != bool(smb_password):
+            raise PolicyError('GPO_SMB_USERNAME 和 GPO_SMB_PASSWORD 必须同时填写或同时留空', 503)
+        conn = get_gpo_ad_connection()
+        editor = GpoPasswordPolicy(
+            conn, os.path.join(app.instance_path, 'gpo_password_policy_backups'),
+            guid=os.getenv('GPO_PASSWORD_POLICY_GUID', '31b2f340-016d-11d2-945f-00c04fb984f9'),
+            username=smb_username or app.config.get('AD_BIND_USER', ''),
+            password=smb_password or app.config.get('AD_BIND_PASSWORD', ''))
+        if request.method == 'GET':
+            result = editor.read()
+        elif preview:
+            result = editor.preview(data.get('revision'), data.get('changes'))
+            session['domain_policy_preview'] = {'hash': payload_hash, 'at': time.time()}
+        else:
+            write_admin_action('域密码策略保存开始', editor.guid,
+                               json.dumps(data['changes'], ensure_ascii=False), request.remote_addr)
+            result = editor.save(data.get('revision'), data.get('changes'))
+            result['message'] = '已写入真实 GPO 并回读校验；域控应用或复制可能尚未完成'
+            try:
+                write_admin_action('域密码策略保存完成', editor.guid,
+                                   f"版本:{result['source']['version']} 备份:{result['backup_id']}", request.remote_addr)
+            except Exception:
+                db.session.rollback()
+                app.logger.error('GPO 已保存，但完成审计记录失败，备份:%s', result['backup_id'])
+                result['message'] += '；完成审计记录失败，请核查后台日志'
+        return jsonify(success=True, enabled=True, writable=writable,
+                       csrf_token=session['domain_policy_csrf'], **result)
+    except PolicyError as exc:
+        app.logger.warning('域密码策略 GPO 操作失败:%s 备份:%s', str(exc), exc.backup_id)
+        return jsonify(success=False, message=str(exc), backup_id=exc.backup_id,
+                       recovery_required=exc.recovery_required), exc.status
+    except Exception as exc:
+        db.session.rollback()
+        # Authentication/library exception strings may contain sensitive connection details.
+        app.logger.warning('域密码策略 GPO 操作失败，异常类型:%s', type(exc).__name__)
+        return jsonify(success=False, message='GPO 操作失败，请检查 LDAPS、加密 SMB(445)、账号权限和备份目录'), 503
+    finally:
+        if conn:
+            try:
+                conn.unbind()
+            except Exception:
+                app.logger.warning('GPO 操作后关闭 LDAP 连接失败')
 
 
 @app.route('/api/admin/password_expire/settings', methods=['GET'])

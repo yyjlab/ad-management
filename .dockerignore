@@ -5,6 +5,7 @@
 !requirements.txt
 !app.py
 !dingtalk_auth.py
+!gpo_password_policy.py
 !nginx.conf
 !index.html
 !admin.html
