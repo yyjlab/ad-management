@@ -7,8 +7,21 @@
 在钉钉企业内部应用启用网页登录，配置应用可见范围及用户个人信息、企业通讯录读取权限。回调地址填写：
 
 ```text
-https://你的平台域名/api/admin/dingtalk/callback
+http://ad.wfq.com/api/admin/dingtalk/callback
 ```
+
+`http://ad.wfq.com/admin` 是登录入口，不是回调接口。asset 的 `/api/v1/auth/dingtalk/callback` 也不能直接用于 AD。若共用同一个钉钉应用，应保留 asset 原回调并新增 AD 回调，不能覆盖 asset 的地址。
+
+在服务器现有 `/app/employee_register/be/.env` 中补充配置，不覆盖已有参数；Compose 已通过 `env_file` 读取它。参考：
+
+```dotenv
+DINGTALK_LOGIN_ENABLED=true
+DINGTALK_LOGIN_CLIENT_ID=填写AD所用钉钉应用的ClientID
+DINGTALK_LOGIN_CLIENT_SECRET=填写该应用的ClientSecret
+DINGTALK_LOGIN_REDIRECT_URI=http://ad.wfq.com/api/admin/dingtalk/callback
+```
+
+环境变量更改后需重建后端容器才会重新载入，普通 restart 不会载入新值；安排操作窗口并保留原数据挂载。正式环境建议统一使用 HTTPS，届时登录地址与回调地址一起切换。
 
 服务器环境变量或外部 `config.Config` 使用以下同名配置。密钥不要提交到仓库。
 
