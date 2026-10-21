@@ -2306,10 +2306,13 @@ def dingtalk_callback():
         db.session.commit()
         if consumed != 1:
             raise DingTalkError('state')
-        codes = request.args.getlist('authCode') + request.args.getlist('code')
-        if request.args.get('error') is not None or len(codes) != 1 or not codes[0].strip() or len(codes[0]) > 2048:
+        auth_codes = request.args.getlist('authCode')
+        codes = request.args.getlist('code')
+        code = request.args.get('authCode') if auth_codes else request.args.get('code')
+        if (request.args.get('error') is not None or len(auth_codes) > 1 or len(codes) > 1
+                or not code or not code.strip() or len(code) > 2048):
             raise DingTalkError('authorization')
-        union_id, employee_name = DingTalkClient(config).employee(codes[0])
+        union_id, employee_name = DingTalkClient(config).employee(code)
         user = resolve_dingtalk_account(config, union_id, employee_name)
         start_admin_login_session(user, '钉钉登录成功')
         return redirect('/admin/manage')

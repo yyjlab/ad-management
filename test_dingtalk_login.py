@@ -114,10 +114,60 @@ class DingTalkLoginTests(unittest.TestCase):
         self.assertIn('dingtalkError=state', self.callback(fresh).location)
         self.employee.assert_not_called()
 
+    def test_callback_accepts_code_aliases_and_prefers_auth_code(self):
+        cases = (
+            ([('authCode', 'auth-code')], 'auth-code'),
+            ([('code', 'legacy-code')], 'legacy-code'),
+            ([('code', 'same-code'), ('authCode', 'same-code')], 'same-code'),
+            ([('code', 'other-code'), ('authCode', 'auth-code')], 'auth-code'),
+        )
+        for params, expected in cases:
+            with self.subTest(params=params):
+                self.employee.reset_mock()
+                response = self.client.get('/api/admin/dingtalk/callback', query_string=[
+                    ('state', self.begin()), *params
+                ])
+                self.assertEqual(response.location, '/admin/manage')
+                self.employee.assert_called_once_with(expected)
+        self.ldap.assert_not_called()
+
     def test_duplicate_code_parameters_and_authorization_denial_are_rejected(self):
-        self.assertIn('dingtalkError=authorization', self.callback(self.begin(), code='another-code').location)
-        self.assertIn('dingtalkError=authorization', self.callback(self.begin(), error='access_denied').location)
+        cases = (
+            [],
+            [('authCode', 'one'), ('authCode', 'two')],
+            [('code', 'one'), ('code', 'two')],
+            [('authCode', 'valid'), ('code', 'same'), ('code', 'same')],
+            [('authCode', 'same'), ('authCode', 'same'), ('code', 'valid')],
+            [('authCode', ''), ('code', 'valid')],
+            [('authCode', ' '), ('code', 'valid')],
+            [('authCode', 'x' * 2049), ('code', 'valid')],
+            [('code', '')],
+            [('code', ' ')],
+            [('code', 'x' * 2049)],
+            [('authCode', 'valid'), ('code', 'other'), ('error', 'access_denied')],
+        )
+        for params in cases:
+            with self.subTest(params=params):
+                response = self.client.get('/api/admin/dingtalk/callback', query_string=[
+                    ('state', self.begin()), *params
+                ])
+                self.assertIn('dingtalkError=authorization', response.location)
         self.employee.assert_not_called()
+        self.assertEqual(self.platform.AdminUser.query.count(), 0)
+
+    def test_dual_alias_callback_still_requires_single_use_state(self):
+        state = self.begin()
+        cookie_name = self.platform.app.config['SESSION_COOKIE_NAME']
+        old_cookie = self.client.get_cookie(cookie_name).value
+        self.assertIn('dingtalkError=state', self.client.get('/api/admin/dingtalk/callback', query_string=[
+            ('state', state), ('state', state), ('authCode', 'test-code'), ('code', 'other-code')
+        ]).location)
+        self.employee.assert_not_called()
+        self.client.set_cookie(cookie_name, old_cookie)
+        self.assertEqual(self.callback(state, code='other-code').location, '/admin/manage')
+        self.client.set_cookie(cookie_name, old_cookie)
+        self.assertIn('dingtalkError=state', self.callback(state, code='other-code').location)
+        self.employee.assert_called_once_with('test-code')
 
     def test_member_failure_never_creates_account(self):
         self.employee.side_effect = DingTalkError('membership')

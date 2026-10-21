@@ -214,10 +214,10 @@ window.addEventListener('message', event => {
         const callback = new URL(data.redirectUrl);
         const expected = new URL(authorization.redirectUri);
         if (callback.origin !== expected.origin || callback.pathname !== expected.pathname || callback.username || callback.password
-            || callback.hash || callback.searchParams.has('error') || callback.searchParams.has('code')
+            || callback.hash || callback.searchParams.has('error')
             || callback.searchParams.getAll('state').length !== 1 || callback.searchParams.get('state') !== authorization.state
-            || callback.searchParams.getAll('authCode').length !== 1) return;
-        const code = callback.searchParams.get('authCode');
+            || callback.searchParams.getAll('authCode').length > 1 || callback.searchParams.getAll('code').length > 1) return;
+        const code = callback.searchParams.has('authCode') ? callback.searchParams.get('authCode') : callback.searchParams.get('code');
         if (!code || !code.trim() || code.length > 2048) return;
         dingtalkAuthorization = null;
         window.location.assign('/api/admin/dingtalk/callback?' + new URLSearchParams({ authCode: code, state: authorization.state }));
