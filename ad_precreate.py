@@ -1,5 +1,6 @@
 """Validated monthly account ranges and bounded, create-only AD operations."""
 from dataclasses import dataclass
+import re
 import uuid
 
 import ldap3
@@ -14,10 +15,19 @@ class PrecreateError(Exception):
 
 
 def validate_spec(data):
-    allowed = {'year', 'month', 'start', 'end', 'full_name', 'enabled'}
+    allowed = {'prefix', 'year', 'month', 'start', 'end', 'full_name', 'enabled'}
     if not isinstance(data, dict) or set(data) - allowed:
-        raise PrecreateError('只允许设置年月、序号、姓名说明和启用状态')
-    limits = {'year': (2000, 2099), 'month': (1, 12), 'start': (0, 99), 'end': (0, 99)}
+        raise PrecreateError('只允许设置账号前缀、序号、姓名说明和启用状态')
+    identity = {}
+    limits = {'start': (0, 99), 'end': (0, 99)}
+    if 'prefix' in data:
+        prefix = data['prefix']
+        if (not isinstance(prefix, str) or not re.fullmatch(r'wfq[0-9]{4}', prefix.strip().lower())
+                or 'year' in data or 'month' in data):
+            raise PrecreateError('账号前缀应为 wfq 加四位数字，例如 wfq2611；末两位序号单独设置')
+        identity['prefix'] = prefix.strip().lower()
+    else:
+        limits.update({'year': (2000, 2099), 'month': (1, 12)})
     for key, (low, high) in limits.items():
         if type(data.get(key)) is not int or not low <= data[key] <= high:
             raise PrecreateError('年月或序号范围不正确')
@@ -30,11 +40,12 @@ def validate_spec(data):
     enabled = data.get('enabled', False)
     if type(enabled) is not bool:
         raise PrecreateError('启用状态必须为布尔值')
-    return {**{key: data[key] for key in limits}, 'full_name': name.strip(), 'enabled': enabled}
+    return {**identity, **{key: data[key] for key in limits}, 'full_name': name.strip(), 'enabled': enabled}
 
 
 def account_ids(spec):
-    return [f"wfq{spec['year'] % 100:02d}{spec['month']:02d}{number:02d}"
+    prefix = spec['prefix'] if 'prefix' in spec else f"wfq{spec['year'] % 100:02d}{spec['month']:02d}"
+    return [f"{prefix}{number:02d}"
             for number in range(spec['start'], spec['end'] + 1)]
 
 

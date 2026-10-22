@@ -2591,9 +2591,16 @@ def precreate_required(fn):
     return wrapped
 
 
-def precreate_password():
-    password = os.environ.get('AD_PRECREATE_DEFAULT_PASSWORD', app.config.get('AD_PRECREATE_DEFAULT_PASSWORD', ''))
-    if not isinstance(password, str) or not password or len(password) > 256 or not validate_password(password)[0]:
+def precreate_password(data=None):
+    if data is not None:
+        password = data.get('password') if isinstance(data, dict) else None
+    else:
+        password = os.environ.get('AD_PRECREATE_DEFAULT_PASSWORD', app.config.get('AD_PRECREATE_DEFAULT_PASSWORD', ''))
+    valid = isinstance(password, str) and 0 < len(password) <= 256
+    valid, message = validate_password(password) if valid else (False, '请填写 1 至 256 位的本批次初始密码')
+    if not valid:
+        if data is not None:
+            raise PrecreateError(message)
         raise PrecreateError('请先在服务器私有配置中设置符合密码规则的 AD_PRECREATE_DEFAULT_PASSWORD', 503)
     return password
 
@@ -2630,13 +2637,14 @@ def get_precreate_batch(batch_id):
     return batch
 
 
-def check_precreate_batch(batch):
+def check_precreate_batch(batch, data=None):
     spec = json.loads(batch.spec)
     if spec['ou'] != app.config.get('AD_USER_OU'):
         raise PrecreateError('创建 OU 配置已变化，此批次已暂停，请核对后重新预览', 409)
-    password = precreate_password()
+    custom = spec.get('password_source') == 'input' or (isinstance(data, dict) and 'password' in data)
+    password = precreate_password(data if isinstance(data, dict) else {}) if custom else precreate_password()
     if not secrets.compare_digest(batch.password_mac, precreate_password_mac(password)):
-        raise PrecreateError('统一初始密码已变化，此批次已暂停，请核对后重新预览', 409)
+        raise PrecreateError('密码与本批次预览时不一致，已暂停；续跑请输入该批次原密码，新密码请重新预览建立新批次', 409)
     return spec, password
 
 
@@ -2651,7 +2659,7 @@ def ad_precreate_config():
     except PrecreateError:
         password_ready = False
     return precreate_response({'success': True, 'ou': app.config.get('AD_USER_OU', ''),
-        'password_ready': password_ready, 'csrf_token': session['ad_precreate_csrf']})
+        'password_ready': password_ready, 'password_input': True, 'csrf_token': session['ad_precreate_csrf']})
 
 
 @app.route('/api/admin/ad-precreate/password', methods=['POST'])
@@ -2668,8 +2676,14 @@ def ad_precreate_password():
 @limiter.limit('10 per minute')
 @precreate_required
 def ad_precreate_preview():
-    spec = validate_spec(request.get_json(silent=True))
-    password = precreate_password()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        raise PrecreateError('请求格式不正确')
+    spec = validate_spec({key: value for key, value in data.items() if key != 'password'})
+    custom = 'password' in data or 'prefix' in spec
+    password = precreate_password(data) if custom else precreate_password()
+    if custom:
+        spec['password_source'] = 'input'
     ou = app.config.get('AD_USER_OU')
     if not isinstance(ou, str) or not ou.strip():
         raise PrecreateError('未配置单个创建使用的 AD_USER_OU', 503)
@@ -2711,6 +2725,7 @@ def ad_precreate_batches():
     if existing:
         if existing.created_by != current_admin_username() or existing.spec != serialized or existing.password_mac != payload['password_mac']:
             raise PrecreateError('相同请求标识不能用于不同批次', 409)
+        check_precreate_batch(existing, data)
         return precreate_response({'success': True, 'batch': precreate_batch_data(existing)})
     try:
         precreate_signer().loads(data.get('preview_token', ''), max_age=600)
@@ -2718,7 +2733,7 @@ def ad_precreate_batches():
         raise PrecreateError('预览已过期，请重新预览', 409) from None
     batch = AdPrecreateBatch(id=str(uuid.uuid4()), request_key=key, spec=serialized,
         password_mac=payload['password_mac'], created_by=current_admin_username())
-    check_precreate_batch(batch)
+    check_precreate_batch(batch, data)
     db.session.add(batch)
     batch.items = [AdPrecreateItem(employee_id=value) for value in account_ids(spec)]
     precreate_audit('建立预建批次', batch.id, f"{account_ids(spec)[0]} 至 {account_ids(spec)[-1]}；启用:{spec['enabled']}；不要求首次改密")
@@ -2745,7 +2760,7 @@ def ad_precreate_batch(batch_id):
 @precreate_required
 def ad_precreate_retry(batch_id):
     batch = get_precreate_batch(batch_id)
-    check_precreate_batch(batch)
+    check_precreate_batch(batch, request.get_json(silent=True))
     AdPrecreateItem.query.filter_by(batch_id=batch.id).filter(
         AdPrecreateItem.status.in_(['failed', 'unknown'])).update(
             {'status': 'pending', 'message': '待核对并重试', 'attempt_token': None,
@@ -2772,7 +2787,7 @@ def precreate_account_result(account, item, spec, marker):
 @precreate_required
 def ad_precreate_step(batch_id):
     batch = get_precreate_batch(batch_id)
-    spec, password = check_precreate_batch(batch)
+    spec, password = check_precreate_batch(batch, request.get_json(silent=True))
     cutoff = datetime.utcnow() - timedelta(seconds=180)
     item = next((row for row in batch.items if row.status == 'pending' or
         (row.status == 'processing' and row.started_at and row.started_at < cutoff)), None)

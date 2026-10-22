@@ -214,19 +214,19 @@
         <section class="page" id="page-adPrecreate">
             <div class="page-head"><div><h1>批量预建账号</h1></div><button class="btn btn-light" onclick="switchPage('adUsers')">返回AD用户管理</button></div>
             <div class="precreate-panel">
-                <fieldset id="precreateFields" onchange="invalidatePrecreatePreview()" oninput="invalidatePrecreatePreview()">
+                <fieldset id="precreateFields" onchange="invalidatePrecreatePreview(event)" oninput="invalidatePrecreatePreview(event)">
                     <div class="precreate-grid">
-                        <div class="form-group"><label for="precreateYear">年份</label><input id="precreateYear" type="number" min="2000" max="2099" step="1"></div>
-                        <div class="form-group"><label for="precreateMonth">月份</label><input id="precreateMonth" type="number" min="1" max="12" step="1"></div>
+                        <div class="form-group precreate-span"><label for="precreatePrefix">账号前缀</label><input id="precreatePrefix" maxlength="7" placeholder="wfq2611" autocomplete="off" spellcheck="false"></div>
                         <div class="form-group"><label for="precreateStart">起始序号</label><input id="precreateStart" type="number" min="0" max="99" step="1" value="0"></div>
                         <div class="form-group"><label for="precreateEnd">结束序号</label><input id="precreateEnd" type="number" min="0" max="99" step="1" value="99"></div>
                         <div class="form-group precreate-span"><label for="precreateName">姓名 / 说明</label><input id="precreateName" maxlength="80" value="预建待分配"></div>
-                        <div class="form-group precreate-span"><label for="precreatePassword">当前默认初始密码</label><div class="precreate-secret"><input id="precreatePassword" type="password" readonly autocomplete="off" placeholder="未加载"><button type="button" class="btn btn-light precreate-eye" id="precreateEye" title="显示默认密码" aria-label="显示默认密码" aria-pressed="false" onclick="togglePrecreatePassword()"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"></path><circle cx="12" cy="12" r="3"></circle></svg></button></div></div>
+                        <div class="form-group precreate-span"><label for="precreatePassword">本批次初始密码</label><div class="precreate-secret"><input id="precreatePassword" type="password" maxlength="256" autocomplete="new-password" placeholder="填写本批次统一密码"><button type="button" class="btn btn-light precreate-eye" id="precreateEye" title="显示密码" aria-label="显示密码" aria-pressed="false" onclick="togglePrecreatePassword()"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"></path><circle cx="12" cy="12" r="3"></circle></svg></button></div></div>
+                        <div class="form-group precreate-wide"><label>账号范围</label><output id="precreateRange"></output></div>
                         <div class="form-group precreate-wide"><label for="precreateOu">创建 OU（与单个创建相同）</label><input id="precreateOu" readonly></div>
                     </div>
                     <label class="check-line"><input type="checkbox" id="precreateEnabled">立即启用账号（统一密码，不要求首次登录改密）</label>
                 </fieldset>
-                <p class="hint" style="margin:12px 0;">未分配账号建议保持禁用。密码有效期从设置时计算，发放前请核对；不修改现有域密码策略。显密只显示当前配置，不读取已有 AD 账号的密码。</p>
+                <p class="hint" style="margin:12px 0;">未分配账号建议保持禁用，不修改域密码策略。密码仅用于本批次，不明文保存；刷新后续跑需重新输入本批次原密码。</p>
                 <div class="action-row">
                     <button class="btn btn-light" id="precreatePreviewButton" onclick="previewPrecreate()" disabled>预览账号</button>
                     <button class="btn btn-primary" id="precreateCreateButton" onclick="startPrecreate()" disabled>确认创建</button>
@@ -505,7 +505,7 @@ function applyPermissions() {
 
 function switchPage(page) {
     if (page === 'adPrecreate' && currentRole !== 'super_admin') return;
-    if (page !== 'adPrecreate') { pausePrecreate(); hidePrecreatePassword(); }
+    if (page !== 'adPrecreate') { pausePrecreate(); hidePrecreatePassword(true); }
     document.querySelectorAll('.menu-item').forEach(btn => btn.classList.toggle('active', btn.dataset.page === (page === 'adPrecreate' ? 'adUsers' : page)));
     document.querySelectorAll('.page').forEach(el => el.classList.toggle('active', el.id === `page-${page}`));
     if (page === 'dashboard') loadStats();
@@ -576,38 +576,35 @@ function updatePrecreateControls() {
     const {config, preview, batch, busy, running} = precreateState;
     const counts = batch?.counts || {};
     document.getElementById('precreateFields').disabled = busy || running;
-    document.getElementById('precreatePreviewButton').disabled = busy || running || !config?.password_ready || !config?.ou;
-    document.getElementById('precreateCreateButton').disabled = busy || running || !preview || Boolean(batch);
-    document.getElementById('precreateEye').disabled = busy || running || !config?.password_ready;
+    const hasPassword = Boolean(document.getElementById('precreatePassword').value);
+    document.getElementById('precreatePreviewButton').disabled = busy || running || !config?.password_input || !config?.ou || !hasPassword;
+    document.getElementById('precreateCreateButton').disabled = busy || running || !config?.password_input || !hasPassword || !preview || Boolean(batch);
+    document.getElementById('precreateEye').disabled = busy || running || !hasPassword;
     document.getElementById('precreateContinueButton').hidden = !batch || running || !(counts.pending || counts.processing);
-    document.getElementById('precreateContinueButton').disabled = busy;
+    document.getElementById('precreateContinueButton').disabled = busy || !config?.password_input || !hasPassword;
     document.getElementById('precreatePauseButton').hidden = !running;
     document.getElementById('precreateRetryButton').hidden = !batch || running || !(counts.failed || counts.unknown);
-    document.getElementById('precreateRetryButton').disabled = busy;
+    document.getElementById('precreateRetryButton').disabled = busy || !config?.password_input || !hasPassword;
     document.getElementById('precreateHistory').disabled = busy || running;
 }
 
-function hidePrecreatePassword() {
+function hidePrecreatePassword(clear = false) {
     clearTimeout(precreateState.passwordTimer);
     const field = document.getElementById('precreatePassword');
-    field.type = 'password'; field.value = '';
+    field.type = 'password';
+    if (clear) field.value = '';
     const button = document.getElementById('precreateEye');
-    button.setAttribute('aria-pressed', 'false'); button.title = '显示默认密码'; button.setAttribute('aria-label', button.title);
+    button.setAttribute('aria-pressed', 'false'); button.title = '显示密码'; button.setAttribute('aria-label', button.title);
 }
 
-async function togglePrecreatePassword() {
+function togglePrecreatePassword() {
     const field = document.getElementById('precreatePassword');
     if (field.type === 'text') return hidePrecreatePassword();
+    if (!field.value) return;
     const button = document.getElementById('precreateEye');
-    button.disabled = true;
-    try {
-        const result = await precreateApi('password', {});
-        if (!document.getElementById('page-adPrecreate').classList.contains('active') || document.hidden) return;
-        field.value = result.password; field.type = 'text';
-        button.setAttribute('aria-pressed', 'true'); button.title = '隐藏默认密码'; button.setAttribute('aria-label', button.title);
-        precreateState.passwordTimer = setTimeout(hidePrecreatePassword, 15000);
-    } catch (error) { showToast('error', error.message); }
-    finally { updatePrecreateControls(); }
+    field.type = 'text';
+    button.setAttribute('aria-pressed', 'true'); button.title = '隐藏密码'; button.setAttribute('aria-label', button.title);
+    precreateState.passwordTimer = setTimeout(() => hidePrecreatePassword(), 15000);
 }
 
 document.addEventListener('visibilitychange', () => { if (document.hidden) { hidePrecreatePassword(); pausePrecreate(); } });
@@ -618,7 +615,7 @@ async function loadPrecreateHistory() {
     select.replaceChildren(new Option('选择批次', ''));
     for (const batch of result.batches) {
         const spec = batch.spec;
-        select.add(new Option(`${spec.year}-${String(spec.month).padStart(2,'0')} | ${String(spec.start).padStart(2,'0')}-${String(spec.end).padStart(2,'0')} | ${batch.created_by} | ${batch.created_at}`, batch.id));
+        select.add(new Option(`${precreatePrefix(spec)} | ${String(spec.start).padStart(2,'0')}-${String(spec.end).padStart(2,'0')} | ${batch.created_by} | ${batch.created_at}`, batch.id));
     }
     select.value = precreateState.batch?.id || '';
 }
@@ -631,23 +628,41 @@ async function loadPrecreate() {
         precreateState.config = await precreateApi('config');
         const config = precreateState.config;
         document.getElementById('precreateOu').value = config.ou;
-        document.getElementById('precreatePassword').placeholder = config.password_ready ? '已配置，点击眼睛查看' : '服务器未配置统一初始密码';
-        if (!document.getElementById('precreateYear').value) {
+        if (!document.getElementById('precreatePrefix').value) {
             const now = new Date();
-            document.getElementById('precreateYear').value = now.getFullYear();
-            document.getElementById('precreateMonth').value = now.getMonth() + 1;
+            const next = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+            document.getElementById('precreatePrefix').value = `wfq${String(next.getFullYear()).slice(-2)}${String(next.getMonth() + 1).padStart(2,'0')}`;
         }
+        updatePrecreateRange();
         await loadPrecreateHistory();
         if (precreateState.batch) await loadPrecreateBatch(precreateState.batch.id, true);
-        else precreateStatus(config.password_ready ? '配置已加载，尚未执行创建。首次登录不强制改密。' : '请在服务器私有 .env 中配置 AD_PRECREATE_DEFAULT_PASSWORD 后重建后端容器；不要覆盖现有配置。');
+        else precreateStatus(config.password_input ? '尚未执行创建。首次登录不强制改密。' : '请更新后端镜像后使用自定义账号和密码。');
     } catch (error) { precreateStatus(error.message); }
     finally { precreateState.busy = false; updatePrecreateControls(); }
 }
 
-function invalidatePrecreatePreview() {
+function precreatePrefix(spec) {
+    return spec.prefix || `wfq${String(spec.year).slice(-2)}${String(spec.month).padStart(2,'0')}`;
+}
+
+function updatePrecreateRange() {
+    const prefix = document.getElementById('precreatePrefix').value.trim().toLowerCase();
+    const start = document.getElementById('precreateStart').value;
+    const end = document.getElementById('precreateEnd').value;
+    const valid = /^wfq[0-9]{4}$/.test(prefix) && /^[0-9]{1,2}$/.test(start) && /^[0-9]{1,2}$/.test(end) && Number(start) <= Number(end);
+    document.getElementById('precreateRange').textContent = valid ? `${prefix}${start.padStart(2,'0')} ~ ${prefix}${end.padStart(2,'0')} (${Number(end) - Number(start) + 1})` : '-';
+}
+
+function invalidatePrecreatePreview(event) {
+    hidePrecreatePassword();
+    updatePrecreateRange();
+    if (event?.target.id === 'precreatePassword' && precreateState.batch) {
+        precreateStatus('续跑需输入本批次原密码；更换批次请修改账号范围并重新预览。');
+        updatePrecreateControls();
+        return;
+    }
     precreateState.preview = null;
     precreateState.batch = null;
-    hidePrecreatePassword();
     document.getElementById('precreateHistory').value = '';
     document.getElementById('precreateRows').innerHTML = '<tr><td colspan="3" class="empty">配置已变化，请重新预览</td></tr>';
     precreateStatus('尚未执行创建；原批次仍保存在历史记录中');
@@ -673,10 +688,12 @@ async function previewPrecreate() {
     precreateState.preview = null; precreateState.batch = null;
     precreateState.busy = true; hidePrecreatePassword(); updatePrecreateControls();
     try {
-        const values = ['Year', 'Month', 'Start', 'End'].map(key => document.getElementById('precreate' + key).value);
-        if (values.some(value => !/^\d+$/.test(value))) throw new Error('请填写完整的年月和序号');
-        const [year, month, start, end] = values.map(Number);
-        const result = await precreateApi('preview', {year, month, start, end,
+        const prefix = document.getElementById('precreatePrefix').value.trim().toLowerCase();
+        const values = ['Start', 'End'].map(key => document.getElementById('precreate' + key).value);
+        if (!/^wfq[0-9]{4}$/.test(prefix)) throw new Error('账号前缀应为 wfq 加四位数字，例如 wfq2611');
+        if (values.some(value => !/^[0-9]{1,2}$/.test(value)) || Number(values[0]) > Number(values[1])) throw new Error('末两位序号须为 0 至 99，且起始不大于结束');
+        const [start, end] = values.map(Number);
+        const result = await precreateApi('preview', {prefix, start, end, password: document.getElementById('precreatePassword').value,
             full_name: document.getElementById('precreateName').value.trim(), enabled: document.getElementById('precreateEnabled').checked});
         precreateState.preview = {...result, request_key: precreateUuid()};
         document.getElementById('precreateOu').value = result.spec.ou;
@@ -692,10 +709,10 @@ async function startPrecreate() {
     if (!preview || precreateState.busy || precreateState.running || precreateState.batch) return;
     precreateState.busy = true; updatePrecreateControls();
     try {
-        const detail = `创建 ${preview.items.length} 个账号到 ${preview.spec.ou}。已有账号只跳过。统一初始密码、不要求首次改密；${preview.spec.enabled ? '账号将立即启用，存在未分配账号被冒用的风险。' : '账号保持禁用，发放时需启用。'}请输入 YES 确认。`;
+        const detail = `创建 ${preview.items[0].employee_id} 至 ${preview.items[preview.items.length - 1].employee_id}，共 ${preview.items.length} 个账号到 ${preview.spec.ou}。已有账号只跳过。使用本批次填写的初始密码、不要求首次改密；${preview.spec.enabled ? '账号将立即启用，存在未分配账号被冒用的风险。' : '账号保持禁用，发放时需启用。'}请输入 YES 确认。`;
         if (!(await confirmYes('确认批量预建账号', detail))) return;
         const result = await precreateApi('batches', {preview_token: preview.preview_token, request_key: preview.request_key,
-            confirm_text: 'YES', confirm_enabled: preview.spec.enabled});
+            confirm_text: 'YES', confirm_enabled: preview.spec.enabled, password: document.getElementById('precreatePassword').value});
         renderPrecreateBatch(result.batch);
         await loadPrecreateHistory();
     } catch (error) { precreateStatus(error.message); return; }
@@ -710,6 +727,8 @@ function pausePrecreate() {
 
 async function runPrecreate() {
     if (!precreateState.batch || precreateState.busy || precreateState.running) return;
+    const password = document.getElementById('precreatePassword').value;
+    if (!password) { precreateStatus('请输入本批次原密码后继续。'); return; }
     precreateState.running = true; precreateState.busy = true;
     hidePrecreatePassword(); updatePrecreateControls();
     try {
@@ -717,7 +736,7 @@ async function runPrecreate() {
             const batch = precreateState.batch;
             if (!(batch.counts.pending || batch.counts.processing)) break;
             const previousUnknown = batch.counts.unknown;
-            const result = await precreateApi(`batches/${batch.id}/step`, {});
+            const result = await precreateApi(`batches/${batch.id}/step`, {password});
             renderPrecreateBatch(result.batch);
             if (result.waiting) { precreateStatus('前一个请求尚在处理中，请稍后重新查看批次；中断请求会在三分钟后允许核对续跑。'); break; }
             if (result.batch.counts.unknown > previousUnknown) { precreateStatus('有账号的创建结果未确认，已暂停；请查看逐条结果，核对后再重试。'); break; }
@@ -733,13 +752,15 @@ async function loadPrecreateBatch(id, internal = false) {
         const result = await precreateApi('batches/' + encodeURIComponent(id));
         precreateState.preview = null;
         const spec = result.batch.spec;
-        for (const key of ['year', 'month', 'start', 'end']) {
+        document.getElementById('precreatePrefix').value = precreatePrefix(spec);
+        for (const key of ['start', 'end']) {
             document.getElementById('precreate' + key[0].toUpperCase() + key.slice(1)).value = spec[key];
         }
         document.getElementById('precreateName').value = spec.full_name;
         document.getElementById('precreateEnabled').checked = spec.enabled;
         document.getElementById('precreateOu').value = spec.ou;
-        hidePrecreatePassword();
+        hidePrecreatePassword(true);
+        updatePrecreateRange();
         renderPrecreateBatch(result.batch);
     } catch (error) { precreateStatus(error.message); }
     finally { if (!internal) { precreateState.busy = false; updatePrecreateControls(); } }
@@ -751,7 +772,7 @@ async function retryPrecreate() {
     precreateState.busy = true; updatePrecreateControls();
     try {
         if (!(await confirmYes('核对并重试失败项', '先查询 AD，已存在的账号不会改密或覆盖。请输入 YES 确认。'))) return;
-        const result = await precreateApi(`batches/${batch.id}/retry`, {});
+        const result = await precreateApi(`batches/${batch.id}/retry`, {password: document.getElementById('precreatePassword').value});
         renderPrecreateBatch(result.batch);
     } catch (error) { precreateStatus(error.message); return; }
     finally { precreateState.busy = false; updatePrecreateControls(); }

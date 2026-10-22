@@ -20,6 +20,14 @@ OU = 'OU=用户,DC=wfq,DC=com'
 
 
 class PrecreateHelpersTests(unittest.TestCase):
+    def test_editable_prefix_and_two_digit_suffix(self):
+        spec = validate_spec({'prefix': ' WFQ2612 ', 'start': 0, 'end': 99})
+        self.assertEqual(spec['prefix'], 'wfq2612')
+        self.assertEqual((account_ids(spec)[0], account_ids(spec)[-1], len(account_ids(spec))),
+                         ('wfq261200', 'wfq261299', 100))
+        self.assertEqual(account_ids({**spec, 'prefix': 'wfq2701', 'start': 9, 'end': 10}),
+                         ['wfq270109', 'wfq270110'])
+
     def test_monthly_ranges_and_defaults(self):
         spec = validate_spec({'year': 2026, 'month': 11, 'start': 0, 'end': 99})
         ids = account_ids(spec)
@@ -113,6 +121,7 @@ class PrecreateApiTests(unittest.TestCase):
         self.directory_factory = self.directory_patch.start()
         self.addCleanup(self.directory_patch.stop)
         self.spec = {'year': 2026, 'month': 11, 'start': 0, 'end': 2, 'full_name': '预建待分配', 'enabled': False}
+        self.custom_spec = {'prefix': 'wfq2612', 'start': 0, 'end': 2, 'full_name': '预建待分配', 'enabled': False}
 
     def create_record(self, account, password, name, enabled, marker):
         self.records[account] = DirectoryAccount(account, 'CN=' + account + ',' + OU,
@@ -122,17 +131,18 @@ class PrecreateApiTests(unittest.TestCase):
     def post(self, path, data=None):
         return self.client.post('/api/admin/ad-precreate/' + path, json=data or {}, headers=self.headers)
 
-    def begin(self, spec=None, request_key=None):
-        preview = self.post('preview', spec or self.spec)
+    def begin(self, spec=None, request_key=None, password=None):
+        secret = {'password': password} if password is not None else {}
+        preview = self.post('preview', {**(spec or self.spec), **secret})
         self.assertEqual(preview.status_code, 200, preview.json)
         payload = {'preview_token': preview.json['preview_token'], 'request_key': request_key or str(uuid.uuid4()),
-                   'confirm_text': 'YES', 'confirm_enabled': (spec or self.spec)['enabled']}
+                   'confirm_text': 'YES', 'confirm_enabled': (spec or self.spec)['enabled'], **secret}
         result = self.post('batches', payload)
         self.assertEqual(result.status_code, 200, result.json)
         return result.json['batch'], payload
 
-    def step(self, batch):
-        response = self.post('batches/' + batch['id'] + '/step')
+    def step(self, batch, password=None):
+        response = self.post('batches/' + batch['id'] + '/step', {'password': password} if password is not None else {})
         self.assertEqual(response.status_code, 200, response.json)
         return response.json['batch']
 
@@ -188,11 +198,88 @@ class PrecreateApiTests(unittest.TestCase):
     def test_invalid_or_extra_fields_are_rejected_before_ad_access(self):
         for changes in ({'year': True}, {'year': 2100}, {'year': '2026'}, {'month': 13}, {'start': -1},
                         {'end': 100}, {'start': 2, 'end': 1}, {'full_name': ''}, {'full_name': 'x\n'}, {'full_name': '<img src=x>'},
-                        {'enabled': 'false'}, {'ou': 'OU=Administrators'}, {'password': PASSWORD},
+                        {'enabled': 'false'}, {'ou': 'OU=Administrators'},
                         {'must_change_next_login': False}):
             with self.subTest(changes=changes):
                 self.assertEqual(self.post('preview', {**self.spec, **changes}).status_code, 400)
         self.directory_factory.assert_not_called()
+
+    def test_invalid_prefixes_and_passwords_are_rejected_before_ad_access(self):
+        for prefix in ('', 'wfq261100', 'wfq26', 'other26', 'wfq26*1', 'wfq２６１１', 'wfq2611,OU=x'):
+            self.assertEqual(self.post('preview', {**self.custom_spec, 'prefix': prefix, 'password': PASSWORD}).status_code, 400)
+        for password in ('', 'weak', None, True, ['Password'], 'A' * 257):
+            self.assertEqual(self.post('preview', {**self.custom_spec, 'password': password}).status_code, 400)
+        for extra in ({'year': 2026}, {'month': 11}, {'password_source': 'input'}):
+            self.assertEqual(self.post('preview', {**self.custom_spec, 'password': PASSWORD, **extra}).status_code, 400)
+        self.assertEqual(self.post('preview', self.custom_spec).status_code, 400)
+        self.directory_factory.assert_not_called()
+
+    def test_custom_password_works_without_env_and_remains_out_of_storage_and_responses(self):
+        os.environ['AD_PRECREATE_DEFAULT_PASSWORD'] = ''
+        config = self.client.get('/api/admin/ad-precreate/config').json
+        self.assertTrue(config['password_input'])
+        self.assertFalse(config['password_ready'])
+        batch, payload = self.begin(self.custom_spec, password=PASSWORD)
+        result = self.step(batch, PASSWORD)
+        self.assertEqual(result['counts']['created'], 1)
+        self.assertEqual(self.directory.create.call_args.args[:2], ('wfq261200', PASSWORD))
+        self.assertNotIn(PASSWORD, json.dumps(payload['preview_token']))
+        for response in (self.client.get('/api/admin/ad-precreate/batches'),
+                         self.client.get('/api/admin/ad-precreate/batches/' + batch['id'])):
+            self.assertNotIn(PASSWORD, response.get_data(as_text=True))
+            self.assertEqual(response.headers['Cache-Control'], 'no-store')
+        stored = self.platform.AdPrecreateBatch.query.one()
+        self.assertNotIn(PASSWORD, stored.spec)
+        self.assertNotIn(PASSWORD, stored.password_mac)
+        with self.client.session_transaction() as session:
+            self.assertNotIn(PASSWORD, str(dict(session)))
+        for log in self.platform.AdminActionLog.query.all():
+            self.assertNotIn(PASSWORD, log.message)
+
+    def test_custom_batch_requires_original_password_for_create_resume_and_retry(self):
+        batch, payload = self.begin(self.custom_spec, password=PASSWORD)
+        path = 'batches/' + batch['id']
+        for operation in ('step', 'retry'):
+            self.assertEqual(self.post(path + '/' + operation).status_code, 400)
+            self.assertEqual(self.post(path + '/' + operation, {'password': 'DifferentTestPassword2!'}).status_code, 409)
+        self.assertEqual(self.post('batches', {**payload, 'password': 'DifferentTestPassword2!'}).status_code, 409)
+        self.directory.create.assert_not_called()
+        os.environ['AD_PRECREATE_DEFAULT_PASSWORD'] = 'DifferentEnvPassword3!'
+        result = self.step(batch, PASSWORD)
+        self.assertEqual(result['counts']['created'], 1)
+        self.assertEqual(self.directory.create.call_args.args[1], PASSWORD)
+        self.assertEqual(self.post(path + '/retry', {'password': PASSWORD}).status_code, 200)
+        self.assertEqual(self.step(batch, PASSWORD)['counts']['created'], 2)
+
+    def test_password_change_after_preview_does_not_create_a_batch(self):
+        preview = self.post('preview', {**self.custom_spec, 'password': PASSWORD}).json
+        payload = {'preview_token': preview['preview_token'], 'request_key': str(uuid.uuid4()),
+                   'confirm_text': 'YES', 'password': 'DifferentTestPassword2!'}
+        self.assertEqual(self.post('batches', payload).status_code, 409)
+        self.assertEqual(self.platform.AdPrecreateBatch.query.count(), 0)
+        self.directory.create.assert_not_called()
+
+    def test_each_custom_batch_keeps_its_own_password_and_skips_existing_accounts(self):
+        first, _ = self.begin(self.custom_spec, password=PASSWORD)
+        self.step(first, PASSWORD)
+        other_password = 'AnotherTestPassword2!'
+        second, _ = self.begin(self.custom_spec, password=other_password)
+        self.assertEqual(self.step(second, other_password)['counts']['skipped'], 1)
+        self.assertEqual(self.step(second, other_password)['counts']['created'], 1)
+        self.assertEqual(self.directory.create.call_args.args[:2], ('wfq261201', other_password))
+        self.assertEqual(self.directory.create.call_count, 2)
+        self.assertEqual(self.records['wfq261200'].info.split('/')[0], '备注：预建批次:' + first['id'])
+
+    def test_legacy_batches_can_resume_with_entered_original_password_without_env(self):
+        batch, _ = self.begin()
+        os.environ['AD_PRECREATE_DEFAULT_PASSWORD'] = ''
+        self.assertEqual(self.step(batch, PASSWORD)['counts']['created'], 1)
+
+    def test_custom_prefix_preview_matches_saved_batch(self):
+        batch, _ = self.begin({**self.custom_spec, 'prefix': 'wfq2701', 'start': 98, 'end': 99}, password=PASSWORD)
+        self.assertEqual([item['employee_id'] for item in batch['items']], ['wfq270198', 'wfq270199'])
+        self.assertEqual(batch['spec']['prefix'], 'wfq2701')
+        self.assertEqual(batch['spec']['password_source'], 'input')
 
     def test_preview_is_readonly_and_shows_existing_accounts(self):
         self.records['wfq261100'] = DirectoryAccount('wfq261100', 'CN=old,' + OU, 'old', '', True)
