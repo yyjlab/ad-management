@@ -6,6 +6,7 @@
 !app.py
 !dingtalk_auth.py
 !gpo_password_policy.py
+!ad_precreate.py
 !nginx.conf
 !index.html
 !admin.html
