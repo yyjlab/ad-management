@@ -14,6 +14,7 @@ import secrets
 import logging
 import json
 import hashlib
+import hmac
 import shutil
 import subprocess
 import sys
@@ -44,6 +45,8 @@ from ldap3.core.exceptions import LDAPException
 from urllib.parse import urlencode, urlsplit
 from dingtalk_auth import DingTalkClient, DingTalkConfig, DingTalkError
 from gpo_password_policy import GpoPasswordPolicy, PolicyError, validate_changes as validate_gpo_changes
+from ad_precreate import PrecreateDirectory, PrecreateError, account_ids, build_user_attributes, validate_spec
+from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 
 # ============================================================
 # 初始化 Flask 应用
@@ -218,6 +221,29 @@ class EmployeeAccountProvision(db.Model):
     created_by = db.Column(db.String(50), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class AdPrecreateBatch(db.Model):
+    id = db.Column(db.String(36), primary_key=True)
+    request_key = db.Column(db.String(36), nullable=False, unique=True)
+    spec = db.Column(db.Text, nullable=False)
+    password_mac = db.Column(db.String(64), nullable=False)
+    created_by = db.Column(db.String(50), nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    items = db.relationship('AdPrecreateItem', backref='batch', order_by='AdPrecreateItem.employee_id')
+
+
+class AdPrecreateItem(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    batch_id = db.Column(db.String(36), db.ForeignKey('ad_precreate_batch.id'), nullable=False, index=True)
+    employee_id = db.Column(db.String(20), nullable=False)
+    status = db.Column(db.String(20), nullable=False, default='pending')
+    message = db.Column(db.String(200), nullable=False, default='待创建')
+    attempt_token = db.Column(db.String(32))
+    started_at = db.Column(db.DateTime)
+    finished_at = db.Column(db.DateTime)
+    object_guid = db.Column(db.String(80))
+    __table_args__ = (db.UniqueConstraint('batch_id', 'employee_id', name='uq_precreate_batch_account'),)
 
 
 class AdminSessionAudit(db.Model):
@@ -1598,31 +1624,8 @@ def create_ad_user(
             return False, "工号已存在，请联系IT部门"
 
         user_dn = f"cn={employee_id},{app.config['AD_USER_OU']}"
-        unicode_password = ('"%s"' % password).encode('utf-16-le')
-
-        attributes = {
-            'objectClass': ['top', 'person', 'organizationalPerson', 'user'],
-            'cn': employee_id,
-            'sAMAccountName': employee_id,                  # Windows登录名
-            'userPrincipalName': employee_id + '@wfq.com',  # UPN登录名
-            'displayName': employee_id,                      # 显示名用工号
-            'description': full_name,                        # 真实姓名存描述字段
-            'unicodePwd': unicode_password,
-            'userAccountControl': '512',                     # 512=正常可登录账号
-        }
-        if department:
-            attributes['department'] = department
-        if email:
-            attributes['mail'] = email
-        if job_title:
-            attributes['title'] = job_title
-        extra_notes = []
-        if manager_name:
-            extra_notes.append(f'直属领导：{manager_name}')
-        if note:
-            extra_notes.append(f'备注：{note}')
-        if extra_notes:
-            attributes['info'] = '；'.join(extra_notes)
+        attributes = build_user_attributes(employee_id, email, password, full_name, department,
+                                           manager_name=manager_name, job_title=job_title, note=note)
 
         conn.add(user_dn, attributes=attributes)
 
@@ -2547,6 +2550,280 @@ def admin_search():
     except Exception as e:
         app.logger.error(f"管理员搜索AD失败: {e}")
         return jsonify({'success': False, 'message': '连接AD失败，请联系IT'})
+
+
+def precreate_response(payload, status=200):
+    response = jsonify(payload)
+    response.status_code = status
+    response.headers['Cache-Control'] = 'no-store'
+    response.headers['Referrer-Policy'] = 'no-referrer'
+    return response
+
+
+def precreate_required(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        if not session.get('admin_logged_in'):
+            return precreate_response({'success': False, 'message': '未登录，请重新登录'}, 401)
+        try:
+            user = current_admin_user()
+            if not user or user.role != 'super_admin':
+                return precreate_response({'success': False, 'message': '只有超级管理员可以预建账号'}, 403)
+            touch_admin_session()
+            if request.method != 'GET':
+                token = request.headers.get('X-CSRF-Token', '')
+                expected = session.get('ad_precreate_csrf', '')
+                if not expected or not re.fullmatch(r'[A-Za-z0-9_-]{43}', token) or not secrets.compare_digest(token, expected):
+                    raise PrecreateError('页面校验已失效，请重新进入批量预建页面', 403)
+                if not request.is_json or (request.content_length or 0) > 32768:
+                    raise PrecreateError('请求格式或大小不正确')
+            return fn(*args, **kwargs)
+        except PrecreateError as error:
+            db.session.rollback()
+            return precreate_response({'success': False, 'message': str(error)}, error.status)
+        except (IntegrityError, OperationalError):
+            db.session.rollback()
+            return precreate_response({'success': False, 'message': '记录保存暂未完成，请刷新批次核对结果后再继续'}, 503)
+        except Exception as error:
+            db.session.rollback()
+            app.logger.error('预建账号操作失败，异常类型:%s', type(error).__name__)
+            return precreate_response({'success': False, 'message': '操作结果未确认，请刷新批次核对结果'}, 500)
+    return wrapped
+
+
+def precreate_password():
+    password = os.environ.get('AD_PRECREATE_DEFAULT_PASSWORD', app.config.get('AD_PRECREATE_DEFAULT_PASSWORD', ''))
+    if not isinstance(password, str) or not password or len(password) > 256 or not validate_password(password)[0]:
+        raise PrecreateError('请先在服务器私有配置中设置符合密码规则的 AD_PRECREATE_DEFAULT_PASSWORD', 503)
+    return password
+
+
+def precreate_password_mac(password):
+    return hmac.new(str(app.secret_key).encode(), ('ad-precreate:' + password).encode(), hashlib.sha256).hexdigest()
+
+
+def precreate_signer():
+    return URLSafeTimedSerializer(app.secret_key, salt='ad-precreate-preview')
+
+
+def precreate_audit(action, target, message):
+    db.session.add(AdminActionLog(admin_username=current_admin_username(), action=action,
+        target_employee_id=target, message=message, ip_address=request.remote_addr))
+
+
+def precreate_batch_data(batch, include_items=True):
+    items = [{'employee_id': row.employee_id, 'status': row.status, 'message': row.message,
+              'finished_at': fmt_local_dt(row.finished_at) if row.finished_at else ''} for row in batch.items]
+    counts = {key: 0 for key in ('pending', 'processing', 'created', 'skipped', 'failed', 'unknown')}
+    counts.update(Counter(row['status'] for row in items))
+    result = {'id': batch.id, 'spec': json.loads(batch.spec), 'created_by': batch.created_by,
+              'created_at': fmt_local_dt(batch.created_at), 'counts': counts}
+    if include_items:
+        result['items'] = items
+    return result
+
+
+def get_precreate_batch(batch_id):
+    batch = db.session.get(AdPrecreateBatch, batch_id)
+    if not batch:
+        raise PrecreateError('批次不存在', 404)
+    return batch
+
+
+def check_precreate_batch(batch):
+    spec = json.loads(batch.spec)
+    if spec['ou'] != app.config.get('AD_USER_OU'):
+        raise PrecreateError('创建 OU 配置已变化，此批次已暂停，请核对后重新预览', 409)
+    password = precreate_password()
+    if not secrets.compare_digest(batch.password_mac, precreate_password_mac(password)):
+        raise PrecreateError('统一初始密码已变化，此批次已暂停，请核对后重新预览', 409)
+    return spec, password
+
+
+@app.route('/api/admin/ad-precreate/config', methods=['GET'])
+@limiter.exempt
+@precreate_required
+def ad_precreate_config():
+    session.setdefault('ad_precreate_csrf', secrets.token_urlsafe(32))
+    try:
+        precreate_password()
+        password_ready = True
+    except PrecreateError:
+        password_ready = False
+    return precreate_response({'success': True, 'ou': app.config.get('AD_USER_OU', ''),
+        'password_ready': password_ready, 'csrf_token': session['ad_precreate_csrf']})
+
+
+@app.route('/api/admin/ad-precreate/password', methods=['POST'])
+@limiter.limit('10 per minute')
+@precreate_required
+def ad_precreate_password():
+    password = precreate_password()
+    precreate_audit('查看预建初始密码', 'SYSTEM', '查看统一初始密码；未记录密码内容')
+    db.session.commit()
+    return precreate_response({'success': True, 'password': password})
+
+
+@app.route('/api/admin/ad-precreate/preview', methods=['POST'])
+@limiter.limit('10 per minute')
+@precreate_required
+def ad_precreate_preview():
+    spec = validate_spec(request.get_json(silent=True))
+    password = precreate_password()
+    ou = app.config.get('AD_USER_OU')
+    if not isinstance(ou, str) or not ou.strip():
+        raise PrecreateError('未配置单个创建使用的 AD_USER_OU', 503)
+    spec['ou'] = ou
+    ids = account_ids(spec)
+    with PrecreateDirectory(app.config, ou) as directory:
+        existing = directory.lookup(ids)
+    rows = [{'employee_id': value, 'status': 'skipped' if value in existing else 'pending',
+             'message': '账号已存在，将跳过且不修改' if value in existing else '可创建'} for value in ids]
+    token = precreate_signer().dumps({'spec': spec, 'password_mac': precreate_password_mac(password),
+                                    'operator': current_admin_username()})
+    return precreate_response({'success': True, 'spec': spec, 'items': rows, 'preview_token': token})
+
+
+@app.route('/api/admin/ad-precreate/batches', methods=['GET', 'POST'])
+@limiter.exempt
+@precreate_required
+def ad_precreate_batches():
+    if request.method == 'GET':
+        batches = AdPrecreateBatch.query.order_by(AdPrecreateBatch.created_at.desc()).limit(20).all()
+        return precreate_response({'success': True, 'batches': [precreate_batch_data(row, False) for row in batches]})
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or data.get('confirm_text') != 'YES':
+        raise PrecreateError('请先预览并确认创建')
+    key = data.get('request_key')
+    try:
+        if not isinstance(key, str) or str(uuid.UUID(key)) != key:
+            raise ValueError()
+        payload = precreate_signer().loads(data.get('preview_token', ''))
+    except (ValueError, TypeError, BadSignature):
+        raise PrecreateError('批次请求或预览凭据无效') from None
+    if payload.get('operator') != current_admin_username():
+        raise PrecreateError('预览不属于当前操作人', 403)
+    spec = payload['spec']
+    if spec['enabled'] and data.get('confirm_enabled') is not True:
+        raise PrecreateError('请确认统一密码且不要求首次改密的账号将立即启用')
+    serialized = json.dumps(spec, sort_keys=True, ensure_ascii=False)
+    existing = AdPrecreateBatch.query.filter_by(request_key=key).first()
+    if existing:
+        if existing.created_by != current_admin_username() or existing.spec != serialized or existing.password_mac != payload['password_mac']:
+            raise PrecreateError('相同请求标识不能用于不同批次', 409)
+        return precreate_response({'success': True, 'batch': precreate_batch_data(existing)})
+    try:
+        precreate_signer().loads(data.get('preview_token', ''), max_age=600)
+    except SignatureExpired:
+        raise PrecreateError('预览已过期，请重新预览', 409) from None
+    batch = AdPrecreateBatch(id=str(uuid.uuid4()), request_key=key, spec=serialized,
+        password_mac=payload['password_mac'], created_by=current_admin_username())
+    check_precreate_batch(batch)
+    db.session.add(batch)
+    batch.items = [AdPrecreateItem(employee_id=value) for value in account_ids(spec)]
+    precreate_audit('建立预建批次', batch.id, f"{account_ids(spec)[0]} 至 {account_ids(spec)[-1]}；启用:{spec['enabled']}；不要求首次改密")
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        existing = AdPrecreateBatch.query.filter_by(request_key=key).first()
+        if not existing or existing.spec != serialized or existing.created_by != current_admin_username() or existing.password_mac != payload['password_mac']:
+            raise PrecreateError('批次请求冲突，请刷新核对', 409) from None
+        batch = existing
+    return precreate_response({'success': True, 'batch': precreate_batch_data(batch)})
+
+
+@app.route('/api/admin/ad-precreate/batches/<batch_id>', methods=['GET'])
+@limiter.exempt
+@precreate_required
+def ad_precreate_batch(batch_id):
+    return precreate_response({'success': True, 'batch': precreate_batch_data(get_precreate_batch(batch_id))})
+
+
+@app.route('/api/admin/ad-precreate/batches/<batch_id>/retry', methods=['POST'])
+@limiter.exempt
+@precreate_required
+def ad_precreate_retry(batch_id):
+    batch = get_precreate_batch(batch_id)
+    check_precreate_batch(batch)
+    AdPrecreateItem.query.filter_by(batch_id=batch.id).filter(
+        AdPrecreateItem.status.in_(['failed', 'unknown'])).update(
+            {'status': 'pending', 'message': '待核对并重试', 'attempt_token': None,
+             'started_at': None, 'finished_at': None}, synchronize_session=False)
+    precreate_audit('重试预建批次', batch.id, '仅重试未确认或失败项，先查询 AD，不修改已有账号')
+    db.session.commit()
+    db.session.expire_all()
+    return precreate_response({'success': True, 'batch': precreate_batch_data(batch)})
+
+
+def precreate_account_result(account, item, spec, marker):
+    expected_dn = f"cn={item.employee_id},{spec['ou']}"
+    if account.info != '备注：' + marker:
+        return 'skipped', '账号已存在，未修改资料、密码或启用状态'
+    if account.dn.casefold() != expected_dn.casefold() or not account.guid or account.enabled != spec['enabled']:
+        return 'unknown', '已发现本批次账号，但位置或启用状态不符，请人工核对'
+    if item.object_guid and item.object_guid != account.guid:
+        return 'unknown', '账号标识已变化，请人工核对'
+    return 'created', '已创建并回读确认；' + ('已启用' if spec['enabled'] else '已禁用，待发放时启用')
+
+
+@app.route('/api/admin/ad-precreate/batches/<batch_id>/step', methods=['POST'])
+@limiter.exempt
+@precreate_required
+def ad_precreate_step(batch_id):
+    batch = get_precreate_batch(batch_id)
+    spec, password = check_precreate_batch(batch)
+    cutoff = datetime.utcnow() - timedelta(seconds=180)
+    item = next((row for row in batch.items if row.status == 'pending' or
+        (row.status == 'processing' and row.started_at and row.started_at < cutoff)), None)
+    if not item:
+        return precreate_response({'success': True, 'batch': precreate_batch_data(batch),
+                                  'waiting': any(row.status == 'processing' for row in batch.items)})
+    token = uuid.uuid4().hex
+    query = AdPrecreateItem.query.filter_by(id=item.id, status=item.status)
+    if item.status == 'processing':
+        query = query.filter(AdPrecreateItem.started_at == item.started_at)
+    claimed = query.update({'status': 'processing', 'attempt_token': token, 'started_at': datetime.utcnow(),
+                            'message': '正在核对和创建'}, synchronize_session=False)
+    db.session.commit()
+    if claimed != 1:
+        db.session.expire_all()
+        return precreate_response({'success': True, 'batch': precreate_batch_data(batch), 'waiting': True})
+    identity = f'{batch.id}/{item.employee_id}'
+    signature = hmac.new(str(app.secret_key).encode(), ('ad-precreate-owner:' + identity).encode(), hashlib.sha256).hexdigest()
+    marker = f'预建批次:{identity}:{signature}'
+    wrote = False
+    account = None
+    try:
+        with PrecreateDirectory(app.config, spec['ou']) as directory:
+            account = directory.lookup([item.employee_id]).get(item.employee_id)
+            if not account:
+                wrote = True
+                rejection = None
+                added = None
+                try:
+                    added = directory.create(item.employee_id, password, spec['full_name'], spec['enabled'], marker)
+                except PrecreateError as error:
+                    rejection = error
+                account = directory.lookup([item.employee_id]).get(item.employee_id)
+                if not account:
+                    if rejection:
+                        raise rejection
+                    if added is False:
+                        raise PrecreateError('目标 OU 存在同名对象，未修改；请核对 CN 和登录名')
+                    raise PrecreateError('创建请求后未查到账号，请先核对 AD', 503)
+            status, message = precreate_account_result(account, item, spec, marker)
+    except PrecreateError as error:
+        status = 'unknown' if wrote and error.status != 400 else 'failed'
+        message = str(error)
+    finished = AdPrecreateItem.query.filter_by(id=item.id, attempt_token=token, status='processing').update(
+        {'status': status, 'message': message, 'finished_at': datetime.utcnow(),
+         'object_guid': account.guid if account and status == 'created' else item.object_guid}, synchronize_session=False)
+    if finished:
+        precreate_audit('批量预建账号', item.employee_id, f'批次:{batch.id}；{message}')
+    db.session.commit()
+    db.session.expire_all()
+    return precreate_response({'success': True, 'batch': precreate_batch_data(batch), 'waiting': False})
 
 
 @app.route('/api/admin/ad-users/reserve-id', methods=['POST'])
