@@ -132,6 +132,11 @@
         #page-adPrecreate table { min-width: 520px; }
         #page-adPrecreate th { position: sticky; top: 0; }
         #precreateStatus { margin: 12px 0; overflow-wrap: anywhere; }
+        #bulkDeleteStatus { margin: 12px 0; overflow-wrap: anywhere; }
+        .bulk-delete-table { overflow: auto; max-height: 480px; margin-top: 14px; }
+        .bulk-delete-table table { min-width: 850px; }
+        .bulk-delete-table th { position: sticky; top: 0; }
+        .modal.bulk-delete-confirm { max-height: calc(100vh - 36px); max-height: calc(100dvh - 36px); overflow-y: auto; overflow-wrap: anywhere; }
         #page-adPrecreate .precreate-history { display: flex; gap: 10px; align-items: center; margin-top: 20px; }
         @media (max-width: 600px) {
             #page-adPrecreate .precreate-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -204,7 +209,7 @@
         <section class="page" id="page-adUsers">
             <div class="page-head"><div><h1>AD用户管理</h1></div></div>
             <div class="card">
-                <div class="card-heading-row"><h2>查询员工账号</h2><div class="action-row"><button class="btn btn-light" id="precreateEntryButton" style="display:none;" onclick="switchPage('adPrecreate')">批量预建账号</button><button class="btn btn-primary" id="createEmployeeButton" style="display:none;" onclick="openCreateEmployeeModal()">创建新员工</button></div></div>
+                <div class="card-heading-row"><h2>查询员工账号</h2><div class="action-row"><button class="btn btn-light" id="precreateEntryButton" style="display:none;" onclick="switchPage('adPrecreate')">批量预建账号</button><button class="btn btn-danger" id="bulkDeleteEntryButton" style="display:none;" onclick="switchPage('adBulkDelete')">批量删除账号</button><button class="btn btn-primary" id="createEmployeeButton" style="display:none;" onclick="openCreateEmployeeModal()">创建新员工</button></div></div>
                 <div class="search-row"><input id="searchId" placeholder="请搜索工号" oninput="clearSearchNotice()" onkeydown="if(event.key==='Enter') doSearch()"><button class="btn btn-dark" onclick="doSearch()">查询</button></div>
             </div>
             <div class="card result-card" id="resultCard"><h2>账号概况</h2><div id="matchBox"></div><div id="userInfo"></div><div id="actionRow"></div></div>
@@ -237,6 +242,31 @@
                 <p id="precreateStatus" class="hint" role="status" aria-live="polite">正在加载配置</p>
                 <div class="precreate-table-box"><table class="table"><thead><tr><th>账号</th><th>结果</th><th>说明</th></tr></thead><tbody id="precreateRows"><tr><td colspan="3" class="empty">暂无预览</td></tr></tbody></table></div>
                 <div class="precreate-history"><label for="precreateHistory">历史批次</label><select id="precreateHistory" onchange="loadPrecreateBatch(this.value)"><option value="">选择批次</option></select></div>
+            </div>
+        </section>
+
+        <section class="page" id="page-adBulkDelete">
+            <div class="page-head"><div><h1>批量删除账号</h1></div><button class="btn btn-light" onclick="switchPage('adUsers')">返回AD用户管理</button></div>
+            <div class="card">
+                <fieldset id="bulkDeleteFields" style="border:0; padding:0; min-width:0;" oninput="invalidateBulkDelete()" onchange="invalidateBulkDelete()">
+                    <div class="form-grid">
+                        <div class="form-group"><label for="bulkDeleteScope">筛选范围</label><select id="bulkDeleteScope"><option value="precreated">批量预建账号</option><option value="ordinary">普通员工账号</option></select></div>
+                        <div class="form-group"><label for="bulkDeletePrefix">账号前缀（选填）</label><input id="bulkDeletePrefix" maxlength="9" placeholder="wfq2611" autocomplete="off"></div>
+                        <div class="form-group full-row"><label for="bulkDeleteOu">员工 OU</label><input id="bulkDeleteOu" readonly></div>
+                    </div>
+                </fieldset>
+                <p class="hint">创建已满 45 天，且所有域控均无 45 天内的登录记录，才允许勾选。离线登录或业务系统使用不一定产生域登录记录，请人工核实。只删除用户，始终保留所有计算机。</p>
+                <label class="check-line"><input id="bulkDeleteRecovery" type="checkbox" onchange="updateBulkDeleteControls()">已核实所选账号无人使用，并确认域回收站或备份恢复方案</label>
+                <div class="action-row" style="margin-top:12px;">
+                    <button class="btn btn-light" id="bulkDeleteScan" onclick="scanBulkDelete()" disabled>筛选候选账号</button>
+                    <button class="btn btn-danger" id="bulkDeleteStart" onclick="startBulkDelete()" disabled>删除所选账号</button>
+                    <button class="btn btn-danger" id="bulkDeleteContinue" onclick="resumeBulkDelete()" hidden>确认并继续</button>
+                    <button class="btn btn-light" id="bulkDeletePause" onclick="pauseBulkDelete()" hidden>暂停后续</button>
+                    <button class="btn btn-light" id="bulkDeleteRetry" onclick="retryBulkDelete()" hidden>核对并重试</button>
+                </div>
+                <p class="hint" id="bulkDeleteStatus" role="status" aria-live="polite">正在加载配置</p>
+                <div class="bulk-delete-table"><table class="table"><thead><tr><th><input id="bulkDeleteAll" type="checkbox" title="全选可删除账号" aria-label="全选可删除账号" onchange="selectAllBulkDelete(this.checked)"></th><th>账号</th><th>姓名 / 说明</th><th>部门</th><th>创建时间</th><th>最后域登录</th><th>状态 / 结果</th></tr></thead><tbody id="bulkDeleteRows"><tr><td colspan="7" class="empty">暂无候选账号</td></tr></tbody></table></div>
+                <div class="action-row" style="margin-top:18px;"><label for="bulkDeleteHistory">历史批次</label><select id="bulkDeleteHistory" onchange="loadBulkDeleteBatch(this.value)"><option value="">选择批次</option></select></div>
             </div>
         </section>
 
@@ -496,6 +526,7 @@ function applyPermissions() {
     document.querySelectorAll('[data-permission]').forEach(el => el.style.display = hasPerm(el.dataset.permission) ? '' : 'none');
     document.getElementById('createEmployeeButton').style.display = currentRole === 'super_admin' ? '' : 'none';
     document.getElementById('precreateEntryButton').style.display = currentRole === 'super_admin' ? '' : 'none';
+    document.getElementById('bulkDeleteEntryButton').style.display = currentRole === 'super_admin' && hasPerm('delete_user') ? '' : 'none';
     if (currentRole === 'readonly') {
         document.querySelectorAll('.menu-item').forEach(btn => {
             if (!['dashboard', 'adUsers'].includes(btn.dataset.page)) btn.style.display = 'none';
@@ -504,9 +535,10 @@ function applyPermissions() {
 }
 
 function switchPage(page) {
-    if (page === 'adPrecreate' && currentRole !== 'super_admin') return;
+    if (['adPrecreate', 'adBulkDelete'].includes(page) && currentRole !== 'super_admin') return;
     if (page !== 'adPrecreate') { pausePrecreate(); hidePrecreatePassword(true); }
-    document.querySelectorAll('.menu-item').forEach(btn => btn.classList.toggle('active', btn.dataset.page === (page === 'adPrecreate' ? 'adUsers' : page)));
+    if (page !== 'adBulkDelete') pauseBulkDelete();
+    document.querySelectorAll('.menu-item').forEach(btn => btn.classList.toggle('active', btn.dataset.page === (['adPrecreate', 'adBulkDelete'].includes(page) ? 'adUsers' : page)));
     document.querySelectorAll('.page').forEach(el => el.classList.toggle('active', el.id === `page-${page}`));
     if (page === 'dashboard') loadStats();
     if (page === 'adUsers' && currentUser) doSearch({ silent: true });
@@ -519,6 +551,7 @@ function switchPage(page) {
     if (page === 'passwordPolicy') { loadExpireSettings(); previewExpireReminder({ silent: true }); loadExpireLogs(); }
     if (page === 'settings') loadSettings();
     if (page === 'adPrecreate') loadPrecreate();
+    if (page === 'adBulkDelete') loadBulkDelete();
 }
 
 function openDashboard() {
@@ -777,6 +810,213 @@ async function retryPrecreate() {
     } catch (error) { precreateStatus(error.message); return; }
     finally { precreateState.busy = false; updatePrecreateControls(); }
     await runPrecreate();
+}
+
+const bulkDeleteState = {config: null, preview: null, batch: null, selected: new Set(), busy: false, running: false};
+
+function bulkDeleteStatus(message) { document.getElementById('bulkDeleteStatus').textContent = message; }
+
+async function bulkDeleteApi(path, data) {
+    const options = data === undefined ? {cache: 'no-store'} : {method: 'POST', cache: 'no-store',
+        headers: {'Content-Type': 'application/json', 'X-CSRF-Token': bulkDeleteState.config?.csrf_token || ''}, body: JSON.stringify(data)};
+    const result = await apiFetch('/api/admin/ad-bulk-delete/' + path, options);
+    if (!result.success) throw new Error(result.message || '批量删除未完成');
+    return result;
+}
+
+function updateBulkDeleteControls() {
+    const {config, preview, batch, busy, running, selected} = bulkDeleteState;
+    const locked = busy || running, counts = batch?.counts || {};
+    const acknowledged = document.getElementById('bulkDeleteRecovery').checked;
+    document.getElementById('bulkDeleteFields').disabled = locked;
+    document.getElementById('bulkDeleteRecovery').disabled = locked;
+    document.getElementById('bulkDeleteScan').disabled = locked || !config?.enabled;
+    document.getElementById('bulkDeleteStart').disabled = locked || !config?.enabled || !preview || Boolean(batch) || !selected.size || !acknowledged;
+    document.getElementById('bulkDeleteContinue').hidden = !batch || running || !(counts.pending || counts.processing);
+    document.getElementById('bulkDeleteContinue').disabled = locked || !config?.enabled || !acknowledged;
+    document.getElementById('bulkDeletePause').hidden = !running;
+    document.getElementById('bulkDeleteRetry').hidden = !batch || running || !(counts.failed || counts.unknown);
+    document.getElementById('bulkDeleteRetry').disabled = locked || !config?.enabled || !acknowledged;
+    document.getElementById('bulkDeleteHistory').disabled = locked;
+    const checkboxes = [...document.querySelectorAll('#bulkDeleteRows input[type="checkbox"]')];
+    checkboxes.forEach(box => { box.disabled = locked || Boolean(batch) || box.dataset.eligible !== 'true'; });
+    const all = document.getElementById('bulkDeleteAll');
+    all.disabled = locked || Boolean(batch) || !checkboxes.some(box => box.dataset.eligible === 'true');
+    const eligibleCount = checkboxes.filter(box => box.dataset.eligible === 'true').length;
+    all.checked = selected.size > 0 && selected.size === eligibleCount;
+    all.indeterminate = selected.size > 0 && selected.size < eligibleCount;
+}
+
+function invalidateBulkDelete() {
+    bulkDeleteState.preview = null; bulkDeleteState.batch = null; bulkDeleteState.selected.clear();
+    document.getElementById('bulkDeleteRecovery').checked = false;
+    document.getElementById('bulkDeleteHistory').value = '';
+    document.getElementById('bulkDeleteRows').innerHTML = '<tr><td colspan="7" class="empty">条件已变化，请重新筛选</td></tr>';
+    bulkDeleteStatus('尚未执行删除；已建立的批次保留在历史记录中。');
+    updateBulkDeleteControls();
+}
+
+function selectBulkDelete(box) {
+    if (box.checked) bulkDeleteState.selected.add(box.dataset.account);
+    else bulkDeleteState.selected.delete(box.dataset.account);
+    updateBulkDeleteControls();
+}
+
+function selectAllBulkDelete(checked) {
+    document.querySelectorAll('#bulkDeleteRows input[data-eligible="true"]').forEach(box => {
+        box.checked = checked;
+        if (checked) bulkDeleteState.selected.add(box.dataset.account);
+        else bulkDeleteState.selected.delete(box.dataset.account);
+    });
+    updateBulkDeleteControls();
+}
+
+function bulkDeleteTime(value) {
+    return value ? new Date(value + 'Z').toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai', hour12: false}) : '-';
+}
+
+function renderBulkDeleteRows(items) {
+    const labels = {pending: '待删除', processing: '复查处理中', deleted: '已删除', absent: '已不存在', skipped: '已跳过', failed: '失败', unknown: '待核对'};
+    document.getElementById('bulkDeleteRows').innerHTML = items.length ? items.map(row => `<tr>
+        <td><input type="checkbox" data-account="${escAttr(row.employee_id)}" data-eligible="${Boolean(row.can_delete)}" aria-label="选择 ${escAttr(row.employee_id)}" onchange="selectBulkDelete(this)" ${bulkDeleteState.selected.has(row.employee_id) ? 'checked' : ''}></td>
+        <td>${escAttr(row.employee_id)}</td><td>${escAttr(row.name || '-')}</td><td>${escAttr(row.department || '-')}</td>
+        <td>${escAttr(bulkDeleteTime(row.created))}</td><td>${escAttr(row.created ? (row.last_logon ? bulkDeleteTime(row.last_logon) : '从未域登录') : '-')}</td>
+        <td>${escAttr(labels[row.status] || (row.can_delete ? '可选择' : '禁止删除'))}：${escAttr(row.message)}</td></tr>`).join('') : '<tr><td colspan="7" class="empty">没有符合当前条件的候选账号</td></tr>';
+    updateBulkDeleteControls();
+}
+
+function renderBulkDeleteBatch(batch) {
+    bulkDeleteState.batch = batch;
+    bulkDeleteState.selected = new Set(batch.items.map(row => row.employee_id));
+    renderBulkDeleteRows(batch.items);
+    const c = batch.counts;
+    bulkDeleteStatus(`批次 ${batch.id} | 已删除 ${c.deleted}，已不存在 ${c.absent}，跳过 ${c.skipped}，失败 ${c.failed}，待核对 ${c.unknown}，待处理 ${c.pending + c.processing}。所有计算机保留。`);
+    if (currentUser && batch.items.some(row => row.status === 'deleted' && row.employee_id === (currentUser.account_name || currentUser.employee_id))) {
+        const employeeId = currentUser.employee_id;
+        deletedUserComputers = [...(currentUser.computers || [])]; currentUser = null;
+        document.getElementById('matchBox').innerHTML = '';
+        document.getElementById('userInfo').textContent = `用户 ${employeeId} 已删除`;
+        document.getElementById('actionRow').innerHTML = '';
+        document.getElementById('computerCardTitle').textContent = '删除前关联计算机（页面记录）';
+        renderUserComputers(deletedUserComputers);
+    }
+}
+
+async function loadBulkDeleteHistory() {
+    const result = await bulkDeleteApi('batches');
+    const select = document.getElementById('bulkDeleteHistory');
+    select.replaceChildren(new Option('选择批次', ''));
+    result.batches.forEach(row => select.add(new Option(`${row.created_at} | ${row.spec.scope === 'precreated' ? '批量预建' : '普通员工'} | ${row.items.length} 个`, row.id)));
+    select.value = bulkDeleteState.batch?.id || '';
+}
+
+async function loadBulkDelete() {
+    if (bulkDeleteState.busy || bulkDeleteState.running) return;
+    bulkDeleteState.busy = true; updateBulkDeleteControls();
+    try {
+        bulkDeleteState.config = await bulkDeleteApi('config');
+        document.getElementById('bulkDeleteOu').value = bulkDeleteState.config.ou;
+        await loadBulkDeleteHistory();
+        if (bulkDeleteState.batch) await loadBulkDeleteBatch(bulkDeleteState.batch.id, true);
+        else bulkDeleteStatus(bulkDeleteState.config.enabled ? '默认筛选平台批量预建账号；不会自动选择或删除。' : '系统设置已关闭删除用户功能。');
+    } catch (error) { bulkDeleteStatus(error.message); }
+    finally { bulkDeleteState.busy = false; updateBulkDeleteControls(); }
+}
+
+async function scanBulkDelete() {
+    if (bulkDeleteState.busy || bulkDeleteState.running) return;
+    invalidateBulkDelete(); bulkDeleteState.busy = true; updateBulkDeleteControls();
+    bulkDeleteStatus('正在逐域控核对登录与保护状态，尚未删除任何账号。');
+    try {
+        const result = await bulkDeleteApi('scan', {scope: document.getElementById('bulkDeleteScope').value,
+            prefix: document.getElementById('bulkDeletePrefix').value.trim().toLowerCase() || 'wfq'});
+        bulkDeleteState.preview = {...result, request_key: precreateUuid()};
+        renderBulkDeleteRows(result.items);
+        bulkDeleteStatus(`已核对 ${result.controllers.length} 台域控，可选择 ${result.items.filter(row => row.can_delete).length} 个；未执行删除。${result.truncated ? '候选过多，本次最多核对 100 个，请缩小账号前缀继续筛选。' : ''}`);
+    } catch (error) { bulkDeleteStatus(error.message); }
+    finally { bulkDeleteState.busy = false; updateBulkDeleteControls(); }
+}
+
+async function startBulkDelete() {
+    const {preview, selected, busy, running, batch} = bulkDeleteState;
+    if (!preview || busy || running || batch || !selected.size || !document.getElementById('bulkDeleteRecovery').checked) return;
+    const names = [...selected].sort();
+    bulkDeleteState.busy = true; updateBulkDeleteControls();
+    try {
+        if (!(await bulkDeleteConfirm(`删除所选 ${names.length} 个用户`, `${names.join('、')}。将删除 AD 用户，可能中断登录及业务访问；计算机保留。本平台不提供一键撤销。请输入 YES 确认。`))) return;
+        const result = await bulkDeleteApi('batches', {preview_token: preview.preview_token, request_key: preview.request_key,
+            selected: names, confirm_count: names.length, confirm_text: 'YES', acknowledge_recovery: true});
+        renderBulkDeleteBatch(result.batch); await loadBulkDeleteHistory();
+    } catch (error) { bulkDeleteStatus(error.message); return; }
+    finally { bulkDeleteState.busy = false; updateBulkDeleteControls(); }
+    if (bulkDeleteState.batch) await runBulkDelete();
+}
+
+function pauseBulkDelete() { bulkDeleteState.running = false; updateBulkDeleteControls(); }
+document.addEventListener('visibilitychange', () => { if (document.hidden) pauseBulkDelete(); });
+
+async function bulkDeleteConfirm(title, detail) {
+    const modal = document.querySelector('#yesModal .modal');
+    modal.classList.add('bulk-delete-confirm');
+    try { return await confirmYes(title, detail); }
+    finally { modal.classList.remove('bulk-delete-confirm'); }
+}
+
+async function runBulkDelete() {
+    if (!bulkDeleteState.batch || bulkDeleteState.busy || bulkDeleteState.running || document.hidden ||
+            !document.getElementById('page-adBulkDelete').classList.contains('active')) return;
+    bulkDeleteState.busy = true; bulkDeleteState.running = true; updateBulkDeleteControls();
+    try {
+        while (bulkDeleteState.running) {
+            const batch = bulkDeleteState.batch, before = batch.counts;
+            if (!(before.pending || before.processing)) break;
+            const result = await bulkDeleteApi(`batches/${batch.id}/step`, {});
+            renderBulkDeleteBatch(result.batch);
+            if (result.waiting) { bulkDeleteStatus('已有请求正在处理，已暂停；请稍后查看批次。中断请求三分钟后需人工核对重试。'); break; }
+            if (result.batch.counts.unknown > before.unknown || result.batch.counts.failed > before.failed) {
+                bulkDeleteStatus('有账号复查或删除未完成，已暂停。请查看逐条结果，核对后再重试。'); break;
+            }
+        }
+    } catch (error) { bulkDeleteStatus(error.message + '；已暂停，请核对历史批次。'); }
+    finally {
+        bulkDeleteState.running = false; bulkDeleteState.busy = false; updateBulkDeleteControls();
+        if (bulkDeleteState.batch?.counts.deleted) loadStats();
+    }
+}
+
+async function resumeBulkDelete() {
+    if (!bulkDeleteState.batch || bulkDeleteState.busy || !document.getElementById('bulkDeleteRecovery').checked) return;
+    bulkDeleteState.busy = true; updateBulkDeleteControls();
+    let confirmed = false;
+    try { confirmed = await bulkDeleteConfirm('继续批量删除', '只继续本批次剩余账号，逐个重新复查，计算机保留。请输入 YES 确认。'); }
+    finally { bulkDeleteState.busy = false; updateBulkDeleteControls(); }
+    if (confirmed) await runBulkDelete();
+}
+
+async function loadBulkDeleteBatch(id, internal = false) {
+    if (!id || (!internal && bulkDeleteState.busy)) return;
+    if (!internal) { bulkDeleteState.busy = true; updateBulkDeleteControls(); }
+    try {
+        const result = await bulkDeleteApi('batches/' + encodeURIComponent(id));
+        bulkDeleteState.preview = null;
+        document.getElementById('bulkDeleteScope').value = result.batch.spec.scope;
+        document.getElementById('bulkDeleteRecovery').checked = false;
+        renderBulkDeleteBatch(result.batch);
+    } catch (error) { bulkDeleteStatus(error.message); }
+    finally { if (!internal) { bulkDeleteState.busy = false; updateBulkDeleteControls(); } }
+}
+
+async function retryBulkDelete() {
+    const batch = bulkDeleteState.batch;
+    if (!batch || bulkDeleteState.busy || !document.getElementById('bulkDeleteRecovery').checked) return;
+    bulkDeleteState.busy = true; updateBulkDeleteControls();
+    try {
+        if (!(await bulkDeleteConfirm('核对并重试', '仅重试失败或未确认项，按原对象唯一标识重新复查。已不存在的对象不会重复删除；计算机保留。请输入 YES 确认。'))) return;
+        const result = await bulkDeleteApi(`batches/${batch.id}/retry`, {confirm_text: 'YES', acknowledge_recovery: true});
+        renderBulkDeleteBatch(result.batch);
+    } catch (error) { bulkDeleteStatus(error.message); return; }
+    finally { bulkDeleteState.busy = false; updateBulkDeleteControls(); }
+    await runBulkDelete();
 }
 
 async function openCreateEmployeeModal() {

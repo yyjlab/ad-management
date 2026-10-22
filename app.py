@@ -46,6 +46,8 @@ from urllib.parse import urlencode, urlsplit
 from dingtalk_auth import DingTalkClient, DingTalkConfig, DingTalkError
 from gpo_password_policy import GpoPasswordPolicy, PolicyError, validate_changes as validate_gpo_changes
 from ad_precreate import PrecreateDirectory, PrecreateError, account_ids, build_user_attributes, validate_spec
+from ad_bulk_delete import (BulkDeleteDirectory, DAYS as BULK_DELETE_DAYS, LIMIT as BULK_DELETE_LIMIT,
+                            blocked_reason, snapshot, entry_text as bulk_delete_entry_text)
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 
 # ============================================================
@@ -244,6 +246,28 @@ class AdPrecreateItem(db.Model):
     finished_at = db.Column(db.DateTime)
     object_guid = db.Column(db.String(80))
     __table_args__ = (db.UniqueConstraint('batch_id', 'employee_id', name='uq_precreate_batch_account'),)
+
+
+class AdBulkDeleteBatch(db.Model):
+    id = db.Column(db.String(36), primary_key=True)
+    request_key = db.Column(db.String(36), nullable=False, unique=True)
+    spec = db.Column(db.Text, nullable=False)
+    created_by = db.Column(db.String(50), nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    items = db.relationship('AdBulkDeleteItem', backref='batch', order_by='AdBulkDeleteItem.employee_id')
+
+
+class AdBulkDeleteItem(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    batch_id = db.Column(db.String(36), db.ForeignKey('ad_bulk_delete_batch.id'), nullable=False, index=True)
+    employee_id = db.Column(db.String(20), nullable=False)
+    snapshot = db.Column(db.Text, nullable=False)
+    status = db.Column(db.String(20), nullable=False, default='pending')
+    message = db.Column(db.String(200), nullable=False, default='待复查后删除')
+    attempt_token = db.Column(db.String(32))
+    started_at = db.Column(db.DateTime)
+    finished_at = db.Column(db.DateTime)
+    __table_args__ = (db.UniqueConstraint('batch_id', 'employee_id', name='uq_bulk_delete_account'),)
 
 
 class AdminSessionAudit(db.Model):
@@ -2839,6 +2863,280 @@ def ad_precreate_step(batch_id):
     db.session.commit()
     db.session.expire_all()
     return precreate_response({'success': True, 'batch': precreate_batch_data(batch), 'waiting': False})
+
+
+def bulk_delete_required(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        if not session.get('admin_logged_in'):
+            return precreate_response({'success': False, 'message': '未登录，请重新登录'}, 401)
+        try:
+            user = current_admin_user()
+            if not user or user.role != 'super_admin' or not has_permission('delete_user'):
+                return precreate_response({'success': False, 'message': '只有超级管理员可以批量删除用户'}, 403)
+            touch_admin_session()
+            if request.method != 'GET':
+                if get_setting('allow_delete_user', 'true') != 'true':
+                    raise PrecreateError('系统设置已关闭删除 AD 用户功能', 403)
+                expected = session.get('ad_bulk_delete_csrf', '')
+                token = request.headers.get('X-CSRF-Token', '')
+                if not expected or not secrets.compare_digest(expected, token):
+                    raise PrecreateError('页面校验已失效，请重新进入批量删除页面', 403)
+                if not request.is_json or (request.content_length or 0) > 262144:
+                    raise PrecreateError('请求格式或大小不正确')
+            return fn(*args, **kwargs)
+        except PrecreateError as error:
+            db.session.rollback()
+            return precreate_response({'success': False, 'message': str(error)}, error.status)
+        except (IntegrityError, OperationalError):
+            db.session.rollback()
+            return precreate_response({'success': False, 'message': '批次记录暂未保存完成，请查看历史批次核对；不要重复删除'}, 503)
+        except Exception as error:
+            db.session.rollback()
+            app.logger.error('批量删除异常，类型:%s', type(error).__name__)
+            return precreate_response({'success': False, 'message': '操作结果未确认，已暂停，请查看批次核对'}, 500)
+    return wrapped
+
+
+def bulk_delete_directory(host=None):
+    return BulkDeleteDirectory(app.config, host=host or os.getenv('GPO_LDAP_SERVER') or None,
+                               ca_file=os.getenv('GPO_LDAP_CA_CERTS_FILE') or None)
+
+
+def bulk_delete_provenance(names):
+    records = AdPrecreateItem.query.filter(AdPrecreateItem.employee_id.in_(names),
+        AdPrecreateItem.status == 'created', AdPrecreateItem.object_guid.isnot(None)).all()
+    return {row.object_guid: row.employee_id for row in records}
+
+
+def bulk_delete_source(account, known):
+    if known.get(account['guid']) == account['employee_id']:
+        return 'precreated'
+    return 'unknown' if '预建批次:' in account['info'] else 'ordinary'
+
+
+def bulk_delete_protected_names():
+    bind = str(app.config.get('AD_BIND_USER', '')).lower()
+    return {current_admin_username().lower(), bind, bind.rsplit('\\', 1)[-1].split('@', 1)[0]}
+
+
+def bulk_delete_batch_data(batch):
+    items = [{**json.loads(row.snapshot), 'status': row.status, 'message': row.message} for row in batch.items]
+    counts = {key: 0 for key in ('pending', 'processing', 'deleted', 'absent', 'skipped', 'failed', 'unknown')}
+    counts.update(Counter(row['status'] for row in items))
+    return {'id': batch.id, 'spec': json.loads(batch.spec), 'created_by': batch.created_by,
+            'created_at': fmt_local_dt(batch.created_at), 'items': items, 'counts': counts}
+
+
+def get_bulk_delete_batch(batch_id):
+    batch = db.session.get(AdBulkDeleteBatch, batch_id)
+    if not batch or batch.created_by != current_admin_username():
+        raise PrecreateError('批次不存在或不属于当前操作人', 404)
+    spec = json.loads(batch.spec)
+    if spec['ou'] != app.config.get('AD_USER_OU') or spec['base_dn'] != app.config.get('AD_BASE_DN'):
+        raise PrecreateError('目标域或 OU 已变化，批次已暂停，请重新筛选', 409)
+    return batch
+
+
+@app.route('/api/admin/ad-bulk-delete/config', methods=['GET'])
+@limiter.exempt
+@bulk_delete_required
+def ad_bulk_delete_config():
+    session.setdefault('ad_bulk_delete_csrf', secrets.token_urlsafe(32))
+    return precreate_response({'success': True, 'csrf_token': session['ad_bulk_delete_csrf'],
+        'days': BULK_DELETE_DAYS, 'limit': BULK_DELETE_LIMIT, 'ou': app.config.get('AD_USER_OU', ''),
+        'enabled': get_setting('allow_delete_user', 'true') == 'true'})
+
+
+@app.route('/api/admin/ad-bulk-delete/scan', methods=['POST'])
+@limiter.limit('5 per minute')
+@bulk_delete_required
+def ad_bulk_delete_scan():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or set(data) - {'scope', 'prefix'} or data.get('scope') not in ('precreated', 'ordinary'):
+        raise PrecreateError('请选择批量预建账号或普通员工账号')
+    prefix = data.get('prefix', 'wfq')
+    if not isinstance(prefix, str) or not re.fullmatch(r'wfq[0-9]{0,6}', prefix.strip().lower()):
+        raise PrecreateError('筛选前缀应为 wfq 或 wfq 加数字')
+    if not app.config.get('AD_USER_OU'):
+        raise PrecreateError('未配置员工 OU，禁止扫描和删除', 503)
+    now = datetime.utcnow()
+    rows, permitted = [], []
+    with bulk_delete_directory() as directory:
+        entries, truncated = directory.candidates(prefix.strip().lower(), now)
+        names = [bulk_delete_entry_text(entry, 'sAMAccountName').lower() for entry in entries]
+        known = bulk_delete_provenance(names)
+        for entry in entries:
+            try:
+                initial = snapshot(entry)
+                source = bulk_delete_source(initial, known)
+                if source != data['scope']:
+                    if source == 'unknown' and data['scope'] == 'precreated':
+                        rows.append({'employee_id': initial['employee_id'], 'name': initial['name'],
+                            'can_delete': False, 'message': '存在预建标记但平台创建记录无法核对，禁止删除'})
+                    continue
+                account, peers = directory.inspect(initial['guid'])
+                if not account:
+                    continue
+                reason = blocked_reason(account, peers, app.config['AD_USER_OU'], bulk_delete_protected_names(), now, directory.protected_groups)
+                if bulk_delete_source(account, known) != source:
+                    reason = '账号来源发生变化，请重新筛选'
+                last = max((row['last_logon'] for row in peers if row['last_logon']), default=None)
+                row = {key: account[key] for key in ('employee_id', 'guid', 'dn', 'name', 'department', 'created', 'usn', 'uac')}
+                row.update(source=source, last_logon=last, can_delete=not bool(reason), message=reason or '满足 45 天规则，待人工勾选')
+                rows.append(row)
+                if not reason:
+                    permitted.append(row)
+            except (PrecreateError, ValueError, KeyError, TypeError, OverflowError) as error:
+                rows.append({'employee_id': bulk_delete_entry_text(entry, 'sAMAccountName') or '-',
+                    'can_delete': False, 'message': str(error) if isinstance(error, PrecreateError) else '登录记录、组权限或删除保护信息无法完整确认，禁止删除'})
+        spec = {'scope': data['scope'], 'ou': app.config['AD_USER_OU'], 'base_dn': app.config['AD_BASE_DN'],
+                'controllers': directory.controllers, 'write_host': directory.write_host, 'days': BULK_DELETE_DAYS}
+    token = URLSafeTimedSerializer(app.secret_key, salt='ad-bulk-delete-preview').dumps(
+        {'operator': current_admin_username(), 'spec': spec, 'items': permitted})
+    return precreate_response({'success': True, 'items': rows, 'preview_token': token, 'truncated': truncated,
+        'controllers': spec['controllers'], 'days': BULK_DELETE_DAYS})
+
+
+@app.route('/api/admin/ad-bulk-delete/batches', methods=['GET', 'POST'])
+@limiter.exempt
+@bulk_delete_required
+def ad_bulk_delete_batches():
+    if request.method == 'GET':
+        batches = AdBulkDeleteBatch.query.filter_by(created_by=current_admin_username()).order_by(AdBulkDeleteBatch.created_at.desc()).limit(20).all()
+        return precreate_response({'success': True, 'batches': [bulk_delete_batch_data(row) for row in batches]})
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or data.get('confirm_text') != 'YES' or data.get('acknowledge_recovery') is not True:
+        raise PrecreateError('请勾选、预览并输入 YES 确认删除')
+    selected = data.get('selected')
+    if (not isinstance(selected, list) or not 1 <= len(selected) <= BULK_DELETE_LIMIT or
+            any(not isinstance(value, str) for value in selected) or len(set(selected)) != len(selected) or
+            type(data.get('confirm_count')) is not int or data['confirm_count'] != len(selected)):
+        raise PrecreateError('勾选名单或确认数量不正确')
+    try:
+        key = data['request_key']
+        if not isinstance(key, str) or str(uuid.UUID(key)) != key:
+            raise ValueError()
+        signer = URLSafeTimedSerializer(app.secret_key, salt='ad-bulk-delete-preview')
+        payload = signer.loads(data.get('preview_token', ''))
+    except (KeyError, ValueError, TypeError, BadSignature):
+        raise PrecreateError('删除预览凭据无效') from None
+    if payload['operator'] != current_admin_username():
+        raise PrecreateError('预览不属于当前操作人', 403)
+    choices = {row['employee_id']: row for row in payload['items']}
+    if any(name not in choices for name in selected):
+        raise PrecreateError('只能删除预览中允许勾选的账号')
+    snapshots = [choices[name] for name in sorted(selected)]
+    existing = AdBulkDeleteBatch.query.filter_by(request_key=key).first()
+    spec = json.dumps(payload['spec'], sort_keys=True, ensure_ascii=False)
+    if existing:
+        if (existing.created_by != current_admin_username() or existing.spec != spec or
+                [json.loads(row.snapshot) for row in existing.items] != snapshots):
+            raise PrecreateError('相同请求标识不能用于不同删除名单', 409)
+        return precreate_response({'success': True, 'batch': bulk_delete_batch_data(existing)})
+    try:
+        signer.loads(data.get('preview_token', ''), max_age=600)
+    except SignatureExpired:
+        raise PrecreateError('筛选已超过十分钟，请重新筛选并确认', 409) from None
+    batch = AdBulkDeleteBatch(id=str(uuid.uuid4()), request_key=key, spec=spec, created_by=current_admin_username())
+    batch.items = [AdBulkDeleteItem(employee_id=row['employee_id'], snapshot=json.dumps(row, ensure_ascii=False)) for row in snapshots]
+    if payload['spec']['ou'] != app.config.get('AD_USER_OU') or payload['spec']['base_dn'] != app.config.get('AD_BASE_DN'):
+        raise PrecreateError('目标域或 OU 已变化，请重新筛选', 409)
+    db.session.add(batch)
+    precreate_audit('建立批量删除批次', 'BULK_DELETE', f'批次:{batch.id}；数量:{len(snapshots)}；45天未使用；仅删除用户，计算机保留')
+    db.session.commit()
+    return precreate_response({'success': True, 'batch': bulk_delete_batch_data(batch)})
+
+
+@app.route('/api/admin/ad-bulk-delete/batches/<batch_id>', methods=['GET'])
+@limiter.exempt
+@bulk_delete_required
+def ad_bulk_delete_batch(batch_id):
+    return precreate_response({'success': True, 'batch': bulk_delete_batch_data(get_bulk_delete_batch(batch_id))})
+
+
+@app.route('/api/admin/ad-bulk-delete/batches/<batch_id>/retry', methods=['POST'])
+@limiter.exempt
+@bulk_delete_required
+def ad_bulk_delete_retry(batch_id):
+    batch = get_bulk_delete_batch(batch_id)
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or data.get('confirm_text') != 'YES' or data.get('acknowledge_recovery') is not True:
+        raise PrecreateError('请确认核对后重试')
+    AdBulkDeleteItem.query.filter_by(batch_id=batch.id).filter(AdBulkDeleteItem.status.in_(['failed', 'unknown'])).update(
+        {'status': 'pending', 'message': '待重新核对', 'attempt_token': None, 'started_at': None}, synchronize_session=False)
+    precreate_audit('重试批量删除', 'BULK_DELETE', f'批次:{batch.id}；重新复查后才允许删除')
+    db.session.commit()
+    db.session.expire_all()
+    return precreate_response({'success': True, 'batch': bulk_delete_batch_data(batch)})
+
+
+@app.route('/api/admin/ad-bulk-delete/batches/<batch_id>/step', methods=['POST'])
+@limiter.exempt
+@bulk_delete_required
+def ad_bulk_delete_step(batch_id):
+    batch = get_bulk_delete_batch(batch_id)
+    expired = AdBulkDeleteItem.query.filter_by(batch_id=batch.id, status='processing').filter(
+        AdBulkDeleteItem.started_at < datetime.utcnow() - timedelta(seconds=180)).all()
+    for row in expired:
+        row.status, row.message = 'unknown', '上次请求已中断，请人工确认后点击核对重试'
+    if expired:
+        db.session.commit()
+        return precreate_response({'success': True, 'batch': bulk_delete_batch_data(batch), 'waiting': False})
+    item = next((row for row in batch.items if row.status == 'pending'), None)
+    if not item:
+        return precreate_response({'success': True, 'batch': bulk_delete_batch_data(batch),
+            'waiting': any(row.status == 'processing' for row in batch.items)})
+    token = uuid.uuid4().hex
+    claimed = AdBulkDeleteItem.query.filter_by(id=item.id, status='pending').update(
+        {'status': 'processing', 'message': '正在复查域登录与保护状态', 'attempt_token': token, 'started_at': datetime.utcnow()}, synchronize_session=False)
+    if claimed:
+        precreate_audit('批量删除前复查', item.employee_id, f'批次:{batch.id}；仅用户对象，计算机保留')
+    db.session.commit()
+    if not claimed:
+        db.session.expire_all()
+        return precreate_response({'success': True, 'batch': bulk_delete_batch_data(batch), 'waiting': True})
+    spec, original = json.loads(batch.spec), json.loads(item.snapshot)
+    sent = False
+    try:
+        with bulk_delete_directory(spec['write_host']) as directory:
+            if directory.controllers != spec['controllers'] or directory.write_host != spec['write_host']:
+                raise PrecreateError('域控列表已变化，请重新筛选', 409)
+            account, peers = directory.inspect(original['guid'])
+            if not account:
+                status, message = 'absent', '原对象已不存在；未发送删除，不认定为本批次删除成功'
+            else:
+                reason = blocked_reason(account, peers, spec['ou'], bulk_delete_protected_names(), datetime.utcnow(), directory.protected_groups)
+                source = bulk_delete_source(account, bulk_delete_provenance([item.employee_id]))
+                if source != spec['scope']:
+                    reason = '账号来源已变化，请重新筛选'
+                if any(account[key] != original[key] for key in ('employee_id', 'guid', 'dn', 'created', 'usn', 'uac')):
+                    reason = '账号自预览后发生变化，已跳过；请重新筛选'
+                if reason:
+                    status, message = 'skipped', reason
+                else:
+                    db.session.expire_all()
+                    if not is_super_admin_user() or get_setting('allow_delete_user', 'true') != 'true':
+                        raise PrecreateError('执行前权限或删除开关已变化，已停止', 403)
+                    sent = True
+                    removed = directory.delete(account)
+                    remaining, _ = directory.inspect(original['guid'])
+                    if remaining:
+                        status, message = 'unknown', '删除后仍查到原对象，已暂停，请人工核对'
+                    elif removed:
+                        status, message = 'deleted', '用户已删除并回读确认；所有计算机均保留'
+                    else:
+                        status, message = 'absent', '原对象已不存在；未重复删除'
+    except PrecreateError as error:
+        status = 'unknown' if sent and error.status != 400 else 'failed'
+        message = str(error)
+    finished = AdBulkDeleteItem.query.filter_by(id=item.id, attempt_token=token, status='processing').update(
+        {'status': status, 'message': message, 'finished_at': datetime.utcnow()}, synchronize_session=False)
+    if finished:
+        precreate_audit('批量删除用户', item.employee_id, f'批次:{batch.id}；{message}；姓名:{original["name"]}；部门:{original["department"]}')
+    db.session.commit()
+    db.session.expire_all()
+    return precreate_response({'success': True, 'batch': bulk_delete_batch_data(batch), 'waiting': False})
 
 
 @app.route('/api/admin/ad-users/reserve-id', methods=['POST'])
