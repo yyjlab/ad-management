@@ -64,6 +64,15 @@
         #domainPolicyDialog::backdrop { background: rgba(0,0,0,.45); }
         #domainPolicyDialog table { min-width: 0; table-layout: fixed; margin: 14px 0; }
         #domainPolicyDialog p { margin: 12px 0; }
+        #page-endpointPolicy .endpoint-form { display: grid; gap: 16px; max-width: 680px; }
+        #page-endpointPolicy .endpoint-form[hidden] { display: none; }
+        #page-endpointPolicy .endpoint-form label { display: grid; gap: 6px; }
+        #page-endpointPolicy .endpoint-form .endpoint-check { display: flex; align-items: flex-start; gap: 8px; }
+        #page-endpointPolicy input[type="checkbox"], #endpointPolicyDialog input[type="checkbox"] { width: auto; flex: none; margin-top: 4px; }
+        #endpointPolicyDialog { border: 1px solid #e5e7eb; border-radius: 8px; padding: 22px; margin: auto; width: min(680px, calc(100% - 24px)); max-height: 90vh; overflow-y: auto; }
+        #endpointPolicyDialog::backdrop { background: rgba(0,0,0,.45); }
+        #endpointPolicyDialog table { table-layout: fixed; min-width: 0; }
+        #endpointPolicyDialog td, #endpointPolicySource, #endpointPolicyCurrent { overflow-wrap: anywhere; white-space: pre-wrap; }
         .approval-table { min-width: 1120px; table-layout: fixed; }
         .approval-table th:nth-child(1) { width: 50px; }
         .approval-table th:nth-child(2) { width: 95px; }
@@ -170,6 +179,7 @@
         <button class="menu-item" data-page="adUsers" onclick="switchPage('adUsers')">AD用户管理</button>
         <button class="menu-item" data-page="computers" data-permission="view_computers" onclick="switchPage('computers')">计算机管理</button>
         <button class="menu-item" data-page="domainPasswordPolicy" data-permission="password_policy" onclick="switchPage('domainPasswordPolicy')">域密码策略</button>
+        <button class="menu-item" id="endpointPolicyMenu" data-page="endpointPolicy" data-permission="password_policy" style="display:none;" onclick="switchPage('endpointPolicy')">组策略管理</button>
         <button class="menu-item" data-page="passwordPolicy" data-permission="password_policy" onclick="switchPage('passwordPolicy')">密码到期提醒</button>
         <button class="menu-item" data-page="logs" data-permission="view_logs" onclick="switchPage('logs')">日志中心</button>
         <button class="menu-item" data-page="approvals" data-permission="view_logs" onclick="switchPage('approvals')">审批中心</button>
@@ -339,6 +349,43 @@
                 <label for="domainPolicyConfirm">输入 YES 确认保存</label>
                 <input id="domainPolicyConfirm" autocomplete="off">
                 <div class="modal-btns"><button class="btn btn-light" onclick="closeDomainPolicyPreview()">取消</button><button class="btn btn-danger" id="domainPolicyConfirmButton" onclick="saveDomainPolicy()">确认保存</button></div>
+            </dialog>
+        </section>
+
+        <section class="page" id="page-endpointPolicy">
+            <div class="page-head"><div><h1>组策略管理</h1><p>域根链接，覆盖全域办公电脑；排除域控和服务器。不等同于客户端最终生效结果。</p></div><button class="btn btn-primary" id="endpointPolicyRefresh" onclick="loadEndpointPolicy()">刷新</button></div>
+            <div class="card">
+                <label for="endpointPolicyKind">策略</label>
+                <select id="endpointPolicyKind" onchange="loadEndpointPolicy()"><option value="lock">电脑空闲自动锁屏</option><option value="usb">U盘存储限制</option><option value="software">绿色 EXE 下发</option></select>
+                <p class="hint" id="endpointPolicyStatus" role="status" aria-live="polite">打开后读取真实 GPO</p>
+                <p class="hint" id="endpointPolicySource"></p>
+                <p id="endpointPolicyCurrent"></p>
+                <fieldset id="endpointPolicyFields" disabled>
+                    <div class="endpoint-form" id="endpointLockFields">
+                        <label for="endpointLockMode">锁屏设置<select id="endpointLockMode" onchange="updateEndpointFields()"><option value="enabled">启用空闲锁屏</option><option value="disabled">关闭此 GPO 的空闲锁屏</option><option value="undefined">未配置</option></select></label>
+                        <label for="endpointLockMinutes">空闲时间（分钟）<input type="number" id="endpointLockMinutes" min="0.01" max="9999" step="any" value="15"></label>
+                        <p class="hint">只锁定桌面，不注销用户或锁定 AD 账号。其他屏保、电源策略可能更早锁屏；未配置不会主动清除已应用的安全设置。此策略可能需要电脑重启后生效，平台不会执行重启。</p>
+                    </div>
+                    <div class="endpoint-form" id="endpointUsbFields" hidden>
+                        <label for="endpointUsbMode">可移动磁盘读写<select id="endpointUsbMode"><option value="undefined">未配置</option><option value="allow">允许读写</option><option value="readonly">只读，禁止写入</option><option value="deny">禁止读写</option><option value="custom" disabled>现有自定义设置，请明确选择新模式</option></select></label>
+                        <p class="hint">针对可移动磁盘类别，不关闭 USB 接口。其他 GPO、BitLocker 或终端安全软件仍可能限制访问。</p>
+                    </div>
+                    <div class="endpoint-form" id="endpointSoftwareFields" hidden>
+                        <label class="endpoint-check"><input type="checkbox" id="endpointSoftwareEnabled" onchange="updateEndpointFields()">启用 EXE 复制和桌面快捷方式</label>
+                        <label for="endpointSoftwareName">软件名称<input id="endpointSoftwareName" maxlength="40" autocomplete="off"></label>
+                        <label for="endpointSoftwareSource">共享文件 UNC 路径<input id="endpointSoftwareSource" maxlength="240" placeholder="\\\\files.wfq.com\Software\app.exe" autocomplete="off"></label>
+                        <p class="hint">仅支持不依赖其他文件的单个绿色 EXE。域用户须能读取共享文件，且不能修改软件源。以当前用户身份复制到本地应用数据目录，不自动打开、不安装服务。停止下发只撤销本平台快捷方式，不删除电脑上的 EXE。</p>
+                    </div>
+                </fieldset>
+                <div class="action-row" style="margin-top:16px;"><button class="btn btn-primary" id="endpointPolicyPreview" onclick="previewEndpointPolicy()" disabled hidden>预览变更</button></div>
+            </div>
+            <dialog id="endpointPolicyDialog">
+                <h3>确认修改真实 GPO</h3><p class="hint" id="endpointPolicyPreviewSource"></p>
+                <table class="table"><thead><tr><th>保存前</th><th>保存后</th></tr></thead><tbody id="endpointPolicyDiff"></tbody></table>
+                <p>保存会更改域根链接的 GPO，影响范围由链接、继承、安全筛选和 WMI 决定。平台不会强制刷新、重启电脑，也无法据此判断客户端已应用。软件文件复制可能受共享权限、网络和正在运行的程序影响。</p>
+                <label><input type="checkbox" id="endpointPolicyScopeAck">已核对全域办公电脑范围及现有策略冲突，确认排除域控和服务器</label>
+                <label for="endpointPolicyConfirm">输入 YES 确认保存</label><input id="endpointPolicyConfirm" autocomplete="off">
+                <div class="modal-btns"><button class="btn btn-light" id="endpointPolicyCancel" onclick="closeEndpointPreview()">取消</button><button class="btn btn-danger" id="endpointPolicySave" onclick="saveEndpointPolicy()">确认保存</button></div>
             </dialog>
         </section>
 
@@ -527,6 +574,7 @@ function applyPermissions() {
     document.getElementById('createEmployeeButton').style.display = currentRole === 'super_admin' ? '' : 'none';
     document.getElementById('precreateEntryButton').style.display = currentRole === 'super_admin' ? '' : 'none';
     document.getElementById('bulkDeleteEntryButton').style.display = currentRole === 'super_admin' && hasPerm('delete_user') ? '' : 'none';
+    document.getElementById('endpointPolicyMenu').style.display = currentRole === 'super_admin' && hasPerm('password_policy') ? '' : 'none';
     if (currentRole === 'readonly') {
         document.querySelectorAll('.menu-item').forEach(btn => {
             if (!['dashboard', 'adUsers'].includes(btn.dataset.page)) btn.style.display = 'none';
@@ -536,6 +584,7 @@ function applyPermissions() {
 
 function switchPage(page) {
     if (['adPrecreate', 'adBulkDelete'].includes(page) && currentRole !== 'super_admin') return;
+    if (page === 'endpointPolicy' && (currentRole !== 'super_admin' || !hasPerm('password_policy'))) return;
     if (page !== 'adPrecreate') { pausePrecreate(); hidePrecreatePassword(true); }
     if (page !== 'adBulkDelete') pauseBulkDelete();
     document.querySelectorAll('.menu-item').forEach(btn => btn.classList.toggle('active', btn.dataset.page === (['adPrecreate', 'adBulkDelete'].includes(page) ? 'adUsers' : page)));
@@ -548,6 +597,7 @@ function switchPage(page) {
     if (page === 'admins') loadAdminUsers();
     if (page === 'logs') loadLogs();
     if (page === 'domainPasswordPolicy') loadDomainPasswordPolicy();
+    if (page === 'endpointPolicy') loadEndpointPolicy();
     if (page === 'passwordPolicy') { loadExpireSettings(); previewExpireReminder({ silent: true }); loadExpireLogs(); }
     if (page === 'settings') loadSettings();
     if (page === 'adPrecreate') loadPrecreate();
@@ -2016,6 +2066,142 @@ async function saveDomainPolicy() {
         button.disabled = false; dialog.oncancel = null; dialog.querySelector('.btn-light').disabled = false;
     }
 }
+
+const endpointPolicyState = {data: null, pending: null, busy: false};
+function endpointPolicyText(kind, policy) {
+    if (kind === 'lock') return policy.seconds === null ? '未配置' : policy.seconds === 0 ? '关闭此 GPO 的空闲锁屏' : `${policy.seconds / 60} 分钟（${policy.seconds} 秒）`;
+    if (kind === 'usb') return ({undefined: '未配置', allow: '允许读写', readonly: '只读', deny: '禁止读写', custom: '自定义设置'})[policy.mode] || '未知';
+    return policy.enabled ? `${policy.name}\n${policy.source}\n复制 EXE 并创建桌面快捷方式；不自动启动` : '停止下发；保留客户端已复制的 EXE';
+}
+function updateEndpointFields() {
+    const kind = document.getElementById('endpointPolicyKind').value;
+    ['lock', 'usb', 'software'].forEach(name => { document.getElementById(`endpoint${name[0].toUpperCase() + name.slice(1)}Fields`).hidden = name !== kind; });
+    document.getElementById('endpointPolicyFields').disabled = endpointPolicyState.busy || !endpointPolicyState.data?.writable;
+    document.getElementById('endpointLockMinutes').disabled = document.getElementById('endpointLockMode').value !== 'enabled';
+    const disabled = !document.getElementById('endpointSoftwareEnabled').checked;
+    document.getElementById('endpointSoftwareName').disabled = disabled;
+    document.getElementById('endpointSoftwareSource').disabled = disabled;
+    document.getElementById('endpointPolicyPreview').disabled = endpointPolicyState.busy || !endpointPolicyState.data?.writable;
+    document.getElementById('endpointPolicyKind').disabled = endpointPolicyState.busy;
+    document.getElementById('endpointPolicyRefresh').disabled = endpointPolicyState.busy;
+}
+async function endpointPolicyApi(kind, suffix = '', payload = null, csrf = '') {
+    const options = payload ? {method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrf}, body: JSON.stringify(payload)} : {};
+    const data = await apiFetch(`/api/admin/gpo-endpoint/${kind}${suffix}`, options);
+    if (!data.success) {
+        const error = new Error(`${data.message || '组策略操作失败'}${data.backup_id ? `；备份编号 ${data.backup_id}` : ''}`);
+        error.recoveryRequired = data.recovery_required;
+        throw error;
+    }
+    return data;
+}
+async function loadEndpointPolicy() {
+    if (endpointPolicyState.busy) return;
+    const kind = document.getElementById('endpointPolicyKind').value;
+    endpointPolicyState.busy = true; endpointPolicyState.data = null; endpointPolicyState.pending = null;
+    document.getElementById('endpointPolicyStatus').textContent = '正在读取真实 GPO';
+    document.getElementById('endpointPolicySource').textContent = '';
+    document.getElementById('endpointPolicyCurrent').textContent = '';
+    document.getElementById('endpointPolicyPreview').hidden = true; updateEndpointFields();
+    try {
+        const data = await endpointPolicyApi(kind);
+        if (!data.enabled) { document.getElementById('endpointPolicyStatus').textContent = data.message; return; }
+        endpointPolicyState.data = {...data, kind};
+        const {source, policy} = data;
+        document.getElementById('endpointPolicySource').textContent = `${source.name}\n${source.guid} | 版本 ${source.version} | ${source.dc}\n域根：${data.domain_dn}；仅办公电脑（WMI ProductType=1）`;
+        document.getElementById('endpointPolicyCurrent').textContent = '当前 GPO 设置：' + endpointPolicyText(kind, policy);
+        if (kind === 'lock') {
+            document.getElementById('endpointLockMode').value = policy.seconds === null ? 'undefined' : policy.seconds === 0 ? 'disabled' : 'enabled';
+            document.getElementById('endpointLockMinutes').value = policy.seconds > 0 ? policy.seconds / 60 : 15;
+        } else if (kind === 'usb') document.getElementById('endpointUsbMode').value = policy.mode;
+        else {
+            document.getElementById('endpointSoftwareEnabled').checked = policy.enabled;
+            document.getElementById('endpointSoftwareName').value = policy.name;
+            document.getElementById('endpointSoftwareSource').value = policy.source;
+        }
+        document.getElementById('endpointPolicyPreview').hidden = !data.writable;
+        document.getElementById('endpointPolicyStatus').textContent = data.writable ? '已读取真实 GPO；尚未修改' : '已读取真实 GPO；写入未启用';
+    } catch (error) { document.getElementById('endpointPolicyStatus').textContent = error.message; }
+    finally { endpointPolicyState.busy = false; updateEndpointFields(); }
+}
+function endpointPolicyInput(kind) {
+    if (kind === 'lock') {
+        const mode = document.getElementById('endpointLockMode').value;
+        const input = document.getElementById('endpointLockMinutes');
+        if (mode !== 'enabled') return {seconds: mode === 'undefined' ? null : 0};
+        if (!input.reportValidity() || input.value === '') throw new Error('请输入有效的空闲时间');
+        const seconds = Number(input.value) * 60;
+        if (seconds < 1 || seconds > 599940 || Math.abs(seconds - Math.round(seconds)) > 0.000001) throw new Error('空闲时间须精确到整数秒，最多 9999 分钟');
+        return {seconds: Math.round(seconds)};
+    }
+    if (kind === 'usb') {
+        const mode = document.getElementById('endpointUsbMode').value;
+        if (mode === 'custom') throw new Error('请选择明确的 U盘读写模式');
+        return {mode};
+    }
+    const enabled = document.getElementById('endpointSoftwareEnabled').checked;
+    return {enabled, name: enabled ? document.getElementById('endpointSoftwareName').value.trim() : '',
+        source: enabled ? document.getElementById('endpointSoftwareSource').value.trim() : ''};
+}
+async function previewEndpointPolicy() {
+    const state = endpointPolicyState, data = state.data;
+    if (state.busy || !data?.writable || state.pending) return;
+    state.busy = true; updateEndpointFields();
+    try {
+        const policy = endpointPolicyInput(data.kind);
+        if (JSON.stringify(policy) === JSON.stringify(data.policy)) throw new Error('没有需要保存的变更');
+        const payload = {revision: data.revision, policy};
+        const result = await endpointPolicyApi(data.kind, '/preview', payload, data.csrf_token);
+        state.pending = {...payload, kind: data.kind, domain_dn: data.domain_dn, csrf_token: data.csrf_token};
+        document.getElementById('endpointPolicyPreviewSource').textContent = `${result.source.name} | ${data.domain_dn} | 全域办公电脑，排除域控和服务器`;
+        const body = document.getElementById('endpointPolicyDiff'); body.replaceChildren();
+        const row = body.insertRow();
+        row.insertCell().textContent = endpointPolicyText(data.kind, result.policy);
+        row.insertCell().textContent = endpointPolicyText(data.kind, result.after);
+        document.getElementById('endpointPolicyScopeAck').checked = false;
+        document.getElementById('endpointPolicyConfirm').value = '';
+        document.getElementById('endpointPolicyDialog').showModal();
+    } catch (error) { showToast('error', error.message); }
+    finally { state.busy = false; updateEndpointFields(); }
+}
+function closeEndpointPreview() {
+    if (endpointPolicyState.busy) return;
+    endpointPolicyState.pending = null;
+    document.getElementById('endpointPolicyDialog').close();
+}
+async function saveEndpointPolicy() {
+    const state = endpointPolicyState, pending = state.pending;
+    if (state.busy || !pending) return;
+    if (!document.getElementById('endpointPolicyScopeAck').checked || document.getElementById('endpointPolicyConfirm').value !== 'YES') return showToast('error', '请确认全域范围并输入 YES');
+    state.busy = true; updateEndpointFields();
+    const dialog = document.getElementById('endpointPolicyDialog');
+    dialog.oncancel = event => event.preventDefault();
+    document.getElementById('endpointPolicySave').disabled = true;
+    document.getElementById('endpointPolicyCancel').disabled = true;
+    try {
+        const result = await endpointPolicyApi(pending.kind, '', {revision: pending.revision, policy: pending.policy,
+            confirm_text: 'YES', confirm_scope: pending.domain_dn}, pending.csrf_token);
+        document.getElementById('endpointPolicyCurrent').textContent = '当前 GPO 设置：' + endpointPolicyText(pending.kind, result.policy);
+        document.getElementById('endpointPolicyStatus').textContent = `${result.message}；备份编号 ${result.backup_id}`;
+        document.getElementById('endpointPolicySource').textContent = `${result.source.name} | ${result.source.guid} | 版本 ${result.source.version} | ${result.source.dc}\n域根：${pending.domain_dn}；仅办公电脑`;
+        state.data = {...result, kind: pending.kind, domain_dn: pending.domain_dn, csrf_token: pending.csrf_token};
+        showToast('success', 'GPO 已保存并回读；客户端应用状态未验证');
+    } catch (error) {
+        state.data = null;
+        document.getElementById('endpointPolicyStatus').textContent = error.message + '；已暂停写入，请刷新并核查 GPO 和备份，勿重复提交';
+        showToast('error', error.message);
+    } finally {
+        state.busy = false; state.pending = null;
+        dialog.close(); dialog.oncancel = null;
+        document.getElementById('endpointPolicySave').disabled = false;
+        document.getElementById('endpointPolicyCancel').disabled = false;
+        updateEndpointFields();
+    }
+}
+document.getElementById('endpointPolicyDialog').addEventListener('cancel', event => {
+    if (endpointPolicyState.busy) event.preventDefault();
+    else endpointPolicyState.pending = null;
+});
 
 async function loadExpireSettings() {
     const data = await apiFetch('/api/admin/password_expire/settings');

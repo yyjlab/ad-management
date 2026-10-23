@@ -45,6 +45,7 @@ from ldap3.core.exceptions import LDAPException
 from urllib.parse import urlencode, urlsplit
 from dingtalk_auth import DingTalkClient, DingTalkConfig, DingTalkError
 from gpo_password_policy import GpoPasswordPolicy, PolicyError, validate_changes as validate_gpo_changes
+from gpo_endpoint_policy import GpoEndpointPolicy, validate_policy as validate_endpoint_policy
 from ad_precreate import PrecreateDirectory, PrecreateError, account_ids, build_user_attributes, validate_spec
 from ad_bulk_delete import (BulkDeleteDirectory, DAYS as BULK_DELETE_DAYS, LIMIT as BULK_DELETE_LIMIT,
                             blocked_reason, snapshot, entry_text as bulk_delete_entry_text)
@@ -3889,6 +3890,102 @@ def domain_password_policy_gpo():
                 conn.unbind()
             except Exception:
                 app.logger.warning('GPO 操作后关闭 LDAP 连接失败')
+
+
+@app.route('/api/admin/gpo-endpoint/<kind>', methods=['GET', 'POST'])
+@app.route('/api/admin/gpo-endpoint/<kind>/preview', methods=['POST'])
+@admin_required
+@permission_required('password_policy')
+def gpo_endpoint_policy(kind):
+    if not is_super_admin_user():
+        return jsonify(success=False, message='仅超级管理员可管理设备组策略'), 403
+    if kind not in ('lock', 'usb', 'software'):
+        return jsonify(success=False, message='不支持的策略类型'), 404
+    enabled = os.getenv('GPO_ENDPOINT_POLICY_ENABLED', 'false').lower() == 'true'
+    writable = os.getenv('GPO_ENDPOINT_POLICY_WRITE_ENABLED', 'false').lower() == 'true'
+    if not enabled:
+        return jsonify(success=request.method == 'GET', enabled=False, writable=False,
+                       message='设备组策略接入未启用；尚未读取或修改 AD'), 200 if request.method == 'GET' else 403
+    conn = None
+    preview = request.path.endswith('/preview')
+    csrf_key, preview_key = 'endpoint_policy_csrf', 'endpoint_policy_preview_' + kind
+    try:
+        if request.method == 'GET':
+            session.setdefault(csrf_key, secrets.token_urlsafe(32))
+        else:
+            expected, token = session.get(csrf_key, ''), request.headers.get('X-CSRF-Token', '')
+            if not expected or not secrets.compare_digest(expected, token):
+                raise PolicyError('页面校验已失效，请刷新后重试', 403)
+            if not writable:
+                raise PolicyError('设备组策略写入未启用', 403)
+            if not request.is_json or (request.content_length or 0) > 65536:
+                raise PolicyError('请求格式或大小无效')
+            data = request.get_json(silent=True)
+            if not isinstance(data, dict) or set(data) - {'revision', 'policy', 'confirm_text', 'confirm_scope'}:
+                raise PolicyError('请求格式无效')
+            validate_endpoint_policy(kind, data.get('policy'), os.getenv('GPO_SOFTWARE_SOURCE_ROOT', ''))
+            if not isinstance(data.get('revision'), str) or not re.fullmatch('[a-f0-9]{64}', data['revision']):
+                raise PolicyError('缺少有效版本，请重新读取 GPO')
+            payload_hash = hashlib.sha256(json.dumps([kind, data['revision'], data['policy']],
+                sort_keys=True, allow_nan=False).encode()).hexdigest()
+            if not preview:
+                ticket = session.pop(preview_key, {})
+                if (ticket.get('hash') != payload_hash or not 0 <= time.time() - ticket.get('at', 0) <= 300 or
+                        data.get('confirm_text') != 'YES' or data.get('confirm_scope') != app.config['AD_BASE_DN']):
+                    raise PolicyError('请重新预览，确认全域影响范围并输入 YES', 409)
+        guids = {name: os.getenv('GPO_ENDPOINT_' + name.upper() + '_GUID', '').strip('{}').lower()
+                 for name in ('lock', 'usb', 'software')}
+        password_guid = os.getenv('GPO_PASSWORD_POLICY_GUID', '31b2f340-016d-11d2-945f-00c04fb984f9').strip('{}').lower()
+        if (not guids[kind] or guids[kind] == password_guid or
+                any(guids[kind] == value for name, value in guids.items() if name != kind)):
+            raise PolicyError('三项功能必须配置不同的独立 GPO GUID，不能复用密码策略 GPO', 503)
+        smb_username, smb_password = os.getenv('GPO_SMB_USERNAME', ''), os.getenv('GPO_SMB_PASSWORD', '')
+        if bool(smb_username) != bool(smb_password):
+            raise PolicyError('GPO SMB 账号和密码必须同时填写或同时留空', 503)
+        conn = get_gpo_ad_connection()
+        editor = GpoEndpointPolicy(conn, os.path.join(app.instance_path, 'gpo_endpoint_backups'),
+            kind=kind, guid=guids[kind], domain_dn=app.config['AD_BASE_DN'],
+            username=smb_username or app.config.get('AD_BIND_USER', ''),
+            password=smb_password or app.config.get('AD_BIND_PASSWORD', ''),
+            software_root=os.getenv('GPO_SOFTWARE_SOURCE_ROOT', ''))
+        if request.method == 'GET':
+            result = editor.read()
+        elif preview:
+            result = editor.preview(data['revision'], data['policy'])
+            session[preview_key] = {'hash': payload_hash, 'at': time.time()}
+        else:
+            if not is_super_admin_user() or os.getenv('GPO_ENDPOINT_POLICY_WRITE_ENABLED', 'false').lower() != 'true':
+                raise PolicyError('写入权限或开关已变化，已停止', 403)
+            write_admin_action('设备组策略保存开始', editor.guid,
+                json.dumps({'kind': kind, 'policy': data['policy'], 'domain': app.config['AD_BASE_DN']}, ensure_ascii=False), request.remote_addr)
+            result = editor.save(data['revision'], data['policy'])
+            result['message'] = '已写入真实 GPO 并回读校验；不代表客户端已应用，未执行远程刷新或重启'
+            try:
+                write_admin_action('设备组策略保存完成', editor.guid,
+                    f"类型:{kind} 版本:{result['source']['version']} 备份:{result['backup_id']}", request.remote_addr)
+            except Exception:
+                db.session.rollback()
+                app.logger.error('设备 GPO 已保存，但完成审计记录失败，备份:%s', result['backup_id'])
+                result['message'] += '；完成审计记录失败，请核查后台日志'
+        response = jsonify(success=True, enabled=True, writable=writable, csrf_token=session[csrf_key],
+            domain_dn=app.config['AD_BASE_DN'], **result)
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+    except PolicyError as error:
+        db.session.rollback()
+        app.logger.warning('设备 GPO 操作失败，类型:%s 备份:%s', kind, error.backup_id)
+        return jsonify(success=False, message=str(error), backup_id=error.backup_id,
+            recovery_required=error.recovery_required), error.status
+    except Exception as error:
+        db.session.rollback()
+        app.logger.warning('设备 GPO 操作失败，类型:%s 异常:%s', kind, type(error).__name__)
+        return jsonify(success=False, message='GPO 操作失败，请检查 LDAPS、加密 SMB(445)、独立 GPO、共享目录及备份权限；不要重复提交'), 503
+    finally:
+        if conn:
+            try:
+                conn.unbind()
+            except Exception:
+                app.logger.warning('设备 GPO 操作后关闭 LDAP 连接失败')
 
 
 @app.route('/api/admin/password_expire/settings', methods=['GET'])
