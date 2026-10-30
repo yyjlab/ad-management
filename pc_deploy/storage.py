@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -64,9 +65,18 @@ class Store:
     def connect(self, write=False):
         c = sqlite3.connect(self.path, timeout=15)
         c.row_factory = sqlite3.Row
-        c.execute('PRAGMA foreign_keys=ON')
-        c.execute('PRAGMA journal_mode=WAL')
         try:
+            c.execute('PRAGMA foreign_keys=ON')
+            deadline = time.monotonic() + 15
+            while True:
+                try:
+                    if c.execute('PRAGMA journal_mode').fetchone()[0] != 'wal':
+                        c.execute('PRAGMA journal_mode=WAL')
+                    break
+                except sqlite3.OperationalError as exc:
+                    if (exc.sqlite_errorcode & 0xff) not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED) or time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.05)
             if write:
                 c.execute('BEGIN IMMEDIATE')
             yield c

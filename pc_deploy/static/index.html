@@ -13,7 +13,7 @@
     <div class="auth-box">
       <div class="brand-mark">PD</div><h1>电脑装机</h1>
       <p id="auth-error" class="error" role="alert">请使用 AD 后台的超级管理员账号登录。</p>
-      <a class="button-link" href="/admin">前往 AD 后台登录</a>
+      <a class="button-link" href="/admin" target="_top">前往 AD 后台登录</a>
     </div>
   </section>
   <div id="workspace" class="workspace" hidden>
@@ -30,7 +30,7 @@
       <div class="sidebar-footer"><span class="status-dot"></span>设备需先进入 WinPE<small>未知设备仅登记，不自动清盘</small></div>
     </aside>
     <div class="main-column">
-      <header class="topbar"><span id="breadcrumb">部署管理 / 设备工作台</span><div class="top-actions"><span id="test-mode" class="badge warn" hidden>测试环境</span><span id="live-badge" class="badge muted">读取配置中</span><button id="refresh" class="icon-button" title="刷新数据" aria-label="刷新数据">↻</button><a class="button-link" href="/admin/manage">返回 AD 后台</a></div></header>
+      <header class="topbar"><span id="breadcrumb">部署管理 / 设备工作台</span><div class="top-actions"><span id="test-mode" class="badge warn" hidden>测试环境</span><span id="live-badge" class="badge muted">读取配置中</span><button id="refresh" class="icon-button" title="刷新数据" aria-label="刷新数据">↻</button><a class="button-link back-to-ad" href="/admin/manage" target="_top">返回 AD 后台</a></div></header>
       <main id="main">
         <div class="page-heading"><div><h1 id="page-title">设备工作台</h1><p id="page-subtitle">选择设备和目标系统硬盘，确认后自动完成 Windows 安装。</p></div><div id="page-actions"></div></div>
         <div id="connection-error" class="notice danger" role="alert" hidden></div>

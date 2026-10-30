@@ -309,10 +309,10 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(self.client.get('/pc-deploy/boot/wimboot').status_code,404)
         self.assertIn('#!ipxe',self.client.get('/pc-deploy/boot.ipxe').text)
 
-    def test_gate_cannot_enable_with_http(self):
-        r=self.post('/pc-deploy/api/settings',dict(public_url='http://127.0.0.1:8090',concurrency=2,
+    def test_gate_can_enable_http_with_existing_confirmations(self):
+        r=self.post('/pc-deploy/api/settings',dict(public_url='http://deploy.test',concurrency=2,
                    ca_pem='',enabled=True,confirmation='ENABLE',isolated_network_confirmed=True))
-        self.assertEqual(r.status_code,400)
+        self.assertEqual(r.status_code,200)
 
     def test_reconcile_does_not_send_retry(self):
         inv,reg,job=self.queued()
@@ -323,6 +323,7 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(self.preview(inv,profile).status_code,400)
 
     def test_https_required_outside_unit_mode(self):
+        self.app.config['PC_DEPLOY_ALLOW_HTTP'] = False
         self.app.testing=False
         try:
             r=self.post('/pc-deploy/api/agent/register',machine(),self.enrollment)
@@ -378,14 +379,78 @@ class PlatformTests(unittest.TestCase):
     def test_profile_invalid_id_is_reported(self):
         self.assertEqual(self.post('/pc-deploy/api/profiles',dict(source_id=['invalid'])).status_code,400)
 
-    def test_remote_admin_http_is_rejected(self):
+    def test_remote_admin_http_is_supported(self):
         self.app.testing=False
         try:
             r=self.client.get('/pc-deploy/api/session',environ_overrides={'REMOTE_ADDR':'192.0.2.15'})
-            self.assertEqual(r.status_code,403)
+            self.assertEqual(r.status_code,200)
         finally:
             self.app.testing=True
 
+
+    def test_http_full_flow_and_completion_config(self):
+        from unittest.mock import patch
+        import pc_deploy
+        self.app.testing = False
+        self.addCleanup(setattr, self.app, 'testing', True)
+        self.client.environ_base['REMOTE_ADDR'] = '192.0.2.15'
+        settings = dict(public_url='http://deploy.test/pc-deploy', concurrency=2, enabled=True,
+                        isolated_network_confirmed=True, confirmation='ENABLE', ca_pem='')
+        self.assertEqual(self.post('/pc-deploy/api/settings', settings).status_code, 200)
+        package = self.post('/pc-deploy/api/bootstrap')
+        self.assertEqual(package.status_code, 200)
+        with zipfile.ZipFile(io.BytesIO(package.data)) as archive:
+            config = json.loads(archive.read('config.json'))
+            self.assertEqual(config['server_url'], 'http://deploy.test/pc-deploy')
+            self.assertIs(config['allow_http'], True)
+        inv, reg, _, profile = self.fixtures()
+        pv = self.preview(inv, profile).json
+        commit = self.post('/pc-deploy/api/jobs/commit', dict(preview_id=pv['id'], confirmation='YES', physical_confirmed=True))
+        self.assertEqual(commit.status_code, 200)
+        job = commit.json['ids'][0]
+        self.assertEqual(self.post('/pc-deploy/api/agent/poll', inv, reg['token']).status_code, 200)
+        with patch('pc_deploy.answer_file', wraps=pc_deploy.answer_file) as generate:
+            result = self.post(f'/pc-deploy/api/agent/jobs/{job}/start', inv, reg['token'])
+            self.assertEqual(result.status_code, 200, result.json)
+            self.assertIs(generate.call_args.args[5]['allow_http'], True)
+            self.assertEqual(generate.call_args.args[5]['server_url'], 'http://deploy.test/pc-deploy')
+        with self.store.connect() as c:
+            token = self.store.decrypt(c.execute('SELECT secret FROM jobs WHERE id=?', (job,)).fetchone()['secret'])['finish_token']
+        report = dict(hardware_uuid=inv['hardware_uuid'], computer_name='TEST-'+digest(inv['hardware_uuid'])[:8].upper(),
+                      os_build=26100, image_state='IMAGE_STATE_COMPLETE', oobe_done=True)
+        self.assertEqual(self.post(f'/pc-deploy/api/agent/jobs/{job}/finish', report, token).status_code, 200)
+
+    def test_https_only_mode_is_optional_and_enforces_transport(self):
+        self.app.config['PC_DEPLOY_ALLOW_HTTP'] = False
+        self.app.testing = False
+        self.addCleanup(setattr, self.app, 'testing', True)
+        response = self.client.get('/pc-deploy/api/session', environ_overrides={'REMOTE_ADDR':'192.0.2.15'})
+        self.assertEqual(response.status_code, 403)
+        response = self.client.get('/pc-deploy/api/session', base_url='https://localhost', environ_overrides={'REMOTE_ADDR':'192.0.2.15'})
+        self.assertEqual(response.status_code, 200)
+        result = self.post('/pc-deploy/api/settings', dict(public_url='http://deploy.test', concurrency=2, enabled=False))
+        self.assertEqual(result.status_code, 400)
+
+    def test_https_bootstrap_does_not_allow_http_downgrade(self):
+        self.enable(False)
+        package = self.post('/pc-deploy/api/bootstrap')
+        with zipfile.ZipFile(io.BytesIO(package.data)) as archive:
+            config = json.loads(archive.read('config.json'))
+        self.assertIs(config['allow_http'], False)
+
+    def test_embedded_page_allows_only_same_origin_frames(self):
+        with self.client.get('/pc-deploy/?embedded=1&view=sources') as response:
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("frame-ancestors 'self'", response.headers['Content-Security-Policy'])
+            self.assertNotIn('frame-ancestors *', response.headers['Content-Security-Policy'])
+
+    def test_expired_embedded_session_keeps_top_level_login_link(self):
+        anonymous = self.app.test_client()
+        with anonymous.get('/pc-deploy/?embedded=1') as response:
+            self.assertEqual(response.status_code, 401)
+            self.assertIn('target="_top"', response.text)
+            self.assertEqual(response.mimetype, 'text/html')
+        self.assertEqual(anonymous.get('/pc-deploy/').headers['Location'], '/admin')
 
     def test_password_not_replaced_when_edit_field_blank(self):
         _,_,source,_=self.fixtures()
@@ -442,13 +507,14 @@ class PlatformTests(unittest.TestCase):
 
 class ValidationTests(unittest.TestCase):
     def test_dangerous_urls_rejected(self):
-        for url in ('http://deploy.test','https://user:pass@deploy.test','https://deploy.test/path',
+        for url in ('ftp://deploy.test','https://user:pass@deploy.test','https://deploy.test/path',
                     'https://deploy.test?x=1','file:///c:/windows','https://deploy.test\nreboot'):
             with self.subTest(url=url),self.assertRaises(Invalid): public_url(url)
 
     def test_local_preview_and_https(self):
         self.assertEqual(public_url('http://127.0.0.1:8090'),'http://127.0.0.1:8090/pc-deploy')
         self.assertEqual(public_url('https://deploy.test/'),'https://deploy.test/pc-deploy')
+        self.assertEqual(public_url('http://192.0.2.10:8080'), 'http://192.0.2.10:8080/pc-deploy')
 
     def test_unc_traversal_rejected(self):
         for value in ('C:\\Windows',r'\\host\share\..\other',r'\\host\share\test";reboot'):
@@ -609,6 +675,8 @@ class AdIntegrationTests(unittest.TestCase):
     def test_untrusted_proxy_header_cannot_bypass_https(self):
         self.platform.app.testing = False
         self.addCleanup(setattr, self.platform.app, 'testing', True)
+        self.platform.app.config['PC_DEPLOY_ALLOW_HTTP'] = False
+        self.addCleanup(self.platform.app.config.pop, 'PC_DEPLOY_ALLOW_HTTP', None)
         options = {'environ_overrides': {'REMOTE_ADDR': '192.0.2.10'},
                    'headers': {'X-Forwarded-Proto': 'https'}}
         self.assertEqual(self.client.get('/pc-deploy/api/session', **options).status_code, 403)

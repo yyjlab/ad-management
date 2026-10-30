@@ -8,6 +8,16 @@ function Assert-WinPE {
     if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') { throw 'Only x64 WinPE is supported.' }
 }
 
+function Assert-PlatformUrl {
+    param([string]$Url, [bool]$AllowHttp = $false)
+    $uri = [uri]$Url
+    if (-not $uri.IsAbsoluteUri -or $uri.Scheme -notin @('http', 'https') -or
+        ($uri.Scheme -eq 'http' -and -not $AllowHttp) -or $uri.UserInfo -or $uri.Query -or
+        $uri.Fragment -or $uri.AbsolutePath -cne '/pc-deploy') {
+        throw 'Use the approved HTTP/HTTPS deployment URL. HTTPS certificate validation remains enabled.'
+    }
+}
+
 function Invoke-Platform {
     param([string]$Route, [string]$Token, $Data)
     $json = ConvertTo-Json -InputObject $Data -Depth 16 -Compress
@@ -145,10 +155,7 @@ function Invoke-Deployment {
 if ($LibraryOnly) { return }
 Assert-WinPE
 $cfg = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
-$uri = [uri]$cfg.server_url
-if ($uri.Scheme -ne 'https' -or $uri.UserInfo -or $uri.Query -or $uri.Fragment -or $uri.AbsolutePath -cne '/pc-deploy') {
-    throw 'Use a trusted HTTPS origin. Certificate validation cannot be disabled.'
-}
+Assert-PlatformUrl -Url $cfg.server_url -AllowHttp ($cfg.allow_http -is [bool] -and $cfg.allow_http)
 $script:Server = $cfg.server_url.TrimEnd('/')
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 if (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'install-started.txt')) {

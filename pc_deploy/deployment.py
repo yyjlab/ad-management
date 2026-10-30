@@ -1,7 +1,6 @@
 """Validation and Windows Setup documents. This module never touches a disk."""
 import base64
 import hashlib
-import ipaddress
 import json
 import re
 import uuid
@@ -68,12 +67,8 @@ def public_url(value):
     p = urlsplit(value)
     if p.username or p.password or p.query or p.fragment or p.path not in ('', '/pc-deploy') or not p.hostname:
         raise Invalid('平台地址只能使用协议、主机、端口及 /pc-deploy，不能含其他路径或凭据')
-    try:
-        local = ipaddress.ip_address(p.hostname).is_loopback
-    except ValueError:
-        local = p.hostname == 'localhost'
-    if p.scheme != 'https' and not (p.scheme == 'http' and local):
-        raise Invalid('远程客户端必须使用 HTTPS；HTTP 只允许本机预览')
+    if p.scheme not in ('http', 'https'):
+        raise Invalid('平台地址只支持 HTTP 或 HTTPS')
     if not re.fullmatch(r'[A-Za-z0-9.:\[\]-]+', p.netloc):
         raise Invalid('平台地址包含不支持的字符')
     try:

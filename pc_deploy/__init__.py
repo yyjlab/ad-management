@@ -14,6 +14,7 @@ import uuid
 import zipfile
 from collections import defaultdict, deque
 from functools import wraps
+from ipaddress import ip_address
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -70,6 +71,9 @@ def register_pc_deploy(host_app, current_user, touch_session):
         g.pc_deploy_operator = user.username
         touch_session()
 
+    def http_allowed():
+        return host_app.config.get('PC_DEPLOY_ALLOW_HTTP', True) is True
+
     def secure_request():
         trust_proxy = host_app.config.get('PC_DEPLOY_TRUST_PROXY',
             os.getenv('DEPLOY_TRUST_PROXY') == 'true') is True
@@ -119,6 +123,8 @@ def register_pc_deploy(host_app, current_user, touch_session):
             denied = authorize()
             if denied:
                 if request.endpoint == 'pc_deploy.index' and denied[1] == 401:
+                    if request.args.get('embedded') == '1':
+                        return send_from_directory(ROOT / 'static', 'index.html'), 401
                     return redirect('/admin')
                 return denied
             if request.method not in ('GET', 'HEAD') and (not csrf() or not session.get('pc_deploy_session_id')):
@@ -127,7 +133,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
         return wrapper
 
     def tls_required():
-        if not secure_request() and not host_app.testing:
+        if not http_allowed() and not secure_request() and not host_app.testing:
             raise Invalid('客户端接口只接受 HTTPS；请先配置部署服务器证书')
 
     def bearer():
@@ -201,7 +207,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
     def remote_api_requires_https():
         if request.content_length is not None and request.content_length > 256 * 1024:
             return too_large(None)
-        if (request.path.startswith(PREFIX + '/api/') and not host_app.testing and not secure_request()
+        if (request.path.startswith(PREFIX + '/api/') and not host_app.testing and not http_allowed() and not secure_request()
                 and request.remote_addr not in ('127.0.0.1', '::1')):
             return jsonify(error='远程管理和客户端接口必须使用 HTTPS'), 403
 
@@ -209,7 +215,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
     def headers(response):
         response.headers['X-Content-Type-Options'] = 'nosniff'
         response.headers['Referrer-Policy'] = 'no-referrer'
-        response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+        response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'"
         response.headers['Cache-Control'] = 'no-store'
         return response
 
@@ -321,6 +327,8 @@ def register_pc_deploy(host_app, current_user, touch_session):
     def save_settings():
         data = body()
         url = public_url(data.get('public_url'))
+        if urlsplit(url).scheme == 'http' and not http_allowed():
+            raise Invalid('当前配置只允许 HTTPS 地址')
         parallel = integer(data.get('concurrency'), '并发数量', 1, 16)
         pem = data.get('ca_pem', '')
         if not isinstance(pem, str) or len(pem) > 4096 or 'PRIVATE KEY' in pem.upper():
@@ -335,8 +343,8 @@ def register_pc_deploy(host_app, current_user, touch_session):
             except (ValueError, x509.ExtensionNotFound, UnicodeEncodeError) as exc:
                 raise Invalid('CA 证书无效，请使用 Base-64 X.509 格式的根 CA 公共证书') from exc
         enabled = data.get('enabled') is True
-        if enabled and (data.get('confirmation') != 'ENABLE' or urlsplit(url).scheme != 'https'):
-            raise Invalid('开启真实下发必须使用 HTTPS，并输入 ENABLE 确认')
+        if enabled and data.get('confirmation') != 'ENABLE':
+            raise Invalid('开启真实下发必须输入 ENABLE 确认')
         with store.connect(write=True) as c:
             if (url != store.setting(c, 'public_url') or pem != store.setting(c, 'ca_pem', '')) and c.execute(
                     'SELECT id FROM jobs WHERE state IN (?,?,?,?) LIMIT 1', ACTIVE).fetchone():
@@ -441,12 +449,21 @@ def register_pc_deploy(host_app, current_user, touch_session):
     def bootstrap():
         with store.connect(write=True) as c:
             url = store.setting(c, 'public_url')
-            if urlsplit(url).scheme != 'https':
-                raise Invalid('先在启动设置填写客户端可访问的 HTTPS 地址')
+            if urlsplit(url).scheme == 'http' and not http_allowed():
+                raise Invalid('当前配置只允许 HTTPS 地址')
+            public_url(url)
+            hostname = urlsplit(url).hostname
+            try:
+                loopback = ip_address(hostname).is_loopback
+            except ValueError:
+                loopback = hostname == 'localhost'
+            if loopback:
+                raise Invalid('先填写目标电脑可访问的平台地址，不能使用本机回环地址')
             token = secrets.token_urlsafe(40)
             c.execute('DELETE FROM enrollments WHERE expires<?', (time.time(),))
             c.execute('INSERT INTO enrollments VALUES(?,?,0)', (token_hash(token), time.time()+24*3600))
-            cfg = dict(server_url=url, enrollment_token=token, expires_at=time.time()+24*3600,
+            cfg = dict(server_url=url, allow_http=http_allowed() and urlsplit(url).scheme == 'http',
+                       enrollment_token=token, expires_at=time.time()+24*3600,
                        ca_pem=store.setting(c, 'ca_pem', ''))
             event(c, 'bootstrap', '已生成有效期 24 小时的客户端登记包；不含管理员或安装源密码')
         buf = io.BytesIO()
@@ -551,6 +568,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
                 raise Invalid('启动安装前硬件复核不一致')
             secret = store.decrypt(row['secret'])
             finalizer = dict(server_url=store.setting(c, 'public_url'), job_id=identity,
+                             allow_http=http_allowed() and urlsplit(store.setting(c, 'public_url')).scheme == 'http',
                              hardware_uuid=dev['id'], token=secret['finish_token'],
                              ca_pem=store.setting(c, 'ca_pem', ''))
             xml = answer_file(inv, data['target']['disk'], data['profile'], data['source'],

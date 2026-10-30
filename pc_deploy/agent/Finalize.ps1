@@ -1,9 +1,13 @@
 $ErrorActionPreference = 'Stop'
 $cfg = Get-Content -LiteralPath "$PSScriptRoot\config.json" -Raw -Encoding UTF8 | ConvertFrom-Json
 $server = [uri]$cfg.server_url
-if ($server.Scheme -ne 'https') { throw 'HTTPS is required.' }
+if (-not $server.IsAbsoluteUri -or $server.Scheme -notin @('http', 'https') -or
+    ($server.Scheme -eq 'http' -and -not ($cfg.allow_http -is [bool] -and $cfg.allow_http)) -or $server.UserInfo -or
+    $server.Query -or $server.Fragment -or $server.AbsolutePath -cne '/pc-deploy') {
+    throw 'An approved HTTP/HTTPS deployment URL is required.'
+}
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-if ($cfg.ca_pem) {
+if ($server.Scheme -eq 'https' -and $cfg.ca_pem) {
     $encoded = $cfg.ca_pem -replace '-----BEGIN CERTIFICATE-----|-----END CERTIFICATE-----|\s',''
     $bytes = [Convert]::FromBase64String($encoded)
     $cert = New-Object Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList (,$bytes)
