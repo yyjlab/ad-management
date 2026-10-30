@@ -16,3 +16,5 @@
 !admin_manage.html
 !reset.html
 !reset_confirm.html
+!pc_deploy/
+!pc_deploy/**

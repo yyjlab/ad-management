@@ -9,3 +9,4 @@ config.py
 *.log
 __pycache__/
 *.py[cod]
+instance/pc-deploy/

@@ -5298,6 +5298,13 @@ def run_password_expire_auto_once(force=False):
         return 0 if result.get('success') else 1
 
 
+# 电脑装机独立模块：复用后台登录，仅超级管理员可用。
+from pc_deploy import register_pc_deploy
+
+pc_deploy_blueprint = register_pc_deploy(app, current_admin_user, touch_admin_session)
+limiter.exempt(pc_deploy_blueprint)
+
+
 if os.environ.get('DISABLE_INTERNAL_PASSWORD_SCHEDULER', '').lower() not in ('1', 'true', 'yes'):
     start_password_reminder_scheduler()
 # ============================================================

@@ -187,6 +187,7 @@
         <button class="menu-item" data-page="audit" data-permission="manage_admins" onclick="switchPage('audit')">登录审计</button>
         <button class="menu-item" data-page="settings" data-permission="system_settings" onclick="switchPage('settings')">系统设置</button>
         <button class="menu-item" data-page="backup" data-permission="system_settings" onclick="switchPage('backup')">备份恢复</button>
+        <button class="menu-item" id="pcDeployMenu" data-page="pcDeploy" style="display:none;" onclick="if(currentRole==='super_admin') location.href='/pc-deploy/'">电脑装机</button>
     </aside>
 
     <main class="content">
@@ -575,6 +576,7 @@ function applyPermissions() {
     document.getElementById('precreateEntryButton').style.display = currentRole === 'super_admin' ? '' : 'none';
     document.getElementById('bulkDeleteEntryButton').style.display = currentRole === 'super_admin' && hasPerm('delete_user') ? '' : 'none';
     document.getElementById('endpointPolicyMenu').style.display = currentRole === 'super_admin' && hasPerm('password_policy') ? '' : 'none';
+    document.getElementById('pcDeployMenu').style.display = currentRole === 'super_admin' ? '' : 'none';
     if (currentRole === 'readonly') {
         document.querySelectorAll('.menu-item').forEach(btn => {
             if (!['dashboard', 'adUsers'].includes(btn.dataset.page)) btn.style.display = 'none';

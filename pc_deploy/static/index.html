@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>PC Deploy · 装机工作台</title>
+  <link rel="stylesheet" href="/pc-deploy/static/app.css">
+  <script defer src="/pc-deploy/static/app.js"></script>
+</head>
+<body>
+  <section id="auth" class="auth-wrap" hidden>
+    <div class="auth-box">
+      <div class="brand-mark">PD</div><h1>电脑装机</h1>
+      <p id="auth-error" class="error" role="alert">请使用 AD 后台的超级管理员账号登录。</p>
+      <a class="button-link" href="/admin">前往 AD 后台登录</a>
+    </div>
+  </section>
+  <div id="workspace" class="workspace" hidden>
+    <aside class="sidebar">
+      <a class="brand" href="/admin/manage"><span class="brand-mark">PD</span><span>PC Deploy<small>网络装机平台</small></span></a>
+      <p class="nav-label">部署管理</p>
+      <nav aria-label="主菜单">
+        <button class="nav-item active" data-view="devices"><span aria-hidden="true">▦</span>设备工作台</button>
+        <button class="nav-item" data-view="sources"><span aria-hidden="true">▤</span>安装源</button>
+        <button class="nav-item" data-view="profiles"><span aria-hidden="true">☷</span>装机方案</button>
+        <button class="nav-item" data-view="jobs"><span aria-hidden="true">≡</span>任务记录</button>
+        <button class="nav-item" data-view="settings"><span aria-hidden="true">⚙</span>启动与设置</button>
+      </nav>
+      <div class="sidebar-footer"><span class="status-dot"></span>设备需先进入 WinPE<small>未知设备仅登记，不自动清盘</small></div>
+    </aside>
+    <div class="main-column">
+      <header class="topbar"><span id="breadcrumb">部署管理 / 设备工作台</span><div class="top-actions"><span id="test-mode" class="badge warn" hidden>测试环境</span><span id="live-badge" class="badge muted">读取配置中</span><button id="refresh" class="icon-button" title="刷新数据" aria-label="刷新数据">↻</button><a class="button-link" href="/admin/manage">返回 AD 后台</a></div></header>
+      <main id="main">
+        <div class="page-heading"><div><h1 id="page-title">设备工作台</h1><p id="page-subtitle">选择设备和目标系统硬盘，确认后自动完成 Windows 安装。</p></div><div id="page-actions"></div></div>
+        <div id="connection-error" class="notice danger" role="alert" hidden></div>
+        <div id="page-content" aria-live="polite"><div class="empty">正在读取平台数据…</div></div>
+      </main>
+      <footer>只处理确认过的物理硬盘 · 清空分区不等于隐私安全擦除 <span id="last-updated"></span></footer>
+    </div>
+  </div>
+  <dialog id="modal"><div class="modal-heading"><h2 id="modal-title"></h2><button id="close-modal" class="icon-button" aria-label="关闭对话框" title="关闭">×</button></div><div id="modal-body"></div></dialog>
+  <div id="toast" role="status" hidden></div>
+</body>
+</html>

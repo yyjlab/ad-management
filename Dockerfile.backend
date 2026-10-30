@@ -13,6 +13,8 @@ RUN pip install --no-cache-dir --timeout 120 --retries 10 \
 
 COPY app.py dingtalk_auth.py gpo_password_policy.py gpo_endpoint_policy.py ad_precreate.py ad_bulk_delete.py ./
 
+COPY pc_deploy ./pc_deploy
+
 EXPOSE 5000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \

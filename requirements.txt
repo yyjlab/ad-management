@@ -7,3 +7,4 @@ flask-limiter==3.7.0      # 接口限速，防止刷验证码
 ldap3==2.9.1              # 连接Windows AD的LDAP库，核心依赖
 smbprotocol==1.17.0       # 加密 SMB3 读写 SYSVOL 中的密码策略 GPO
 gunicorn==26.2.0
+cryptography==48.0.1       # 装机模块凭据加密及公共 CA 校验
