@@ -1,4 +1,4 @@
-param([Parameter(Mandatory)][string]$WorkDirectory, [string]$DriverDirectory)
+param([Parameter(Mandatory)][string]$WorkDirectory, [string]$DriverDirectory, [switch]$RegistrationOnly)
 $ErrorActionPreference = 'Stop'
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Run in an elevated Deployment and Imaging Tools Environment.' }
@@ -46,6 +46,12 @@ try {
     New-Item -ItemType Directory -Path $dest | Out-Null
     foreach ($name in @('config.json', 'Deploy-Agent.ps1', 'Start.ps1')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $dest $name)
+    }
+    if ($RegistrationOnly) {
+        $configPath = Join-Path $dest 'config.json'
+        $config = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $config | Add-Member -NotePropertyName registration_only -NotePropertyValue $true -Force
+        [IO.File]::WriteAllText($configPath, ($config | ConvertTo-Json -Depth 8), [Text.Encoding]::UTF8)
     }
     $startup = "@echo off`r`nwpeinit`r`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File X:\PCDeploy\Start.ps1`r`npause`r`n"
     [IO.File]::WriteAllText((Join-Path $mount 'Windows\System32\startnet.cmd'), $startup, [Text.Encoding]::ASCII)

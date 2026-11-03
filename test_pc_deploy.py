@@ -151,6 +151,30 @@ class PlatformTests(unittest.TestCase):
         self.enable()
         self.assertIsNone(self.post('/pc-deploy/api/agent/poll', inv, reg['token']).json['job'])
 
+    def test_registration_only_heartbeat_does_not_claim_queued_job(self):
+        inv, reg, job = self.queued()
+        with self.store.connect(write=True) as c:
+            c.execute('UPDATE devices SET last_seen=0 WHERE id=?', (inv['hardware_uuid'],))
+        r = self.post('/pc-deploy/api/agent/poll', dict(inv, registration_only=True), reg['token'])
+        self.assertEqual(r.status_code, 200, r.json)
+        self.assertEqual(r.json, dict(job=None, registration_only=True))
+        with self.store.connect() as c:
+            self.assertEqual(c.execute('SELECT state FROM jobs WHERE id=?', (job,)).fetchone()['state'], 'queued')
+            self.assertGreater(c.execute('SELECT last_seen FROM devices WHERE id=?', (inv['hardware_uuid'],)).fetchone()['last_seen'], time.time()-10)
+
+    def test_registration_only_still_requires_valid_device_identity(self):
+        inv, reg = self.register()
+        r = self.post('/pc-deploy/api/agent/poll', dict(inv, registration_only=True), 'invalid-token')
+        self.assertIn(r.status_code, (400, 401))
+        bad = dict(inv, hardware_uuid=str(uuid.uuid4()), registration_only=True)
+        self.assertEqual(self.post('/pc-deploy/api/agent/poll', bad, reg['token']).status_code, 400)
+
+    def test_registration_only_flag_requires_boolean_true(self):
+        inv, reg, job = self.queued()
+        r = self.post('/pc-deploy/api/agent/poll', dict(inv, registration_only='true'), reg['token'])
+        self.assertEqual(r.status_code, 200, r.json)
+        self.assertEqual(r.json['job']['id'], job)
+
     def test_preview_does_not_queue(self):
         inv, _, _, profile = self.fixtures()
         self.assertEqual(self.preview(inv, profile).status_code, 200)
@@ -503,6 +527,185 @@ class PlatformTests(unittest.TestCase):
         values.update(product_key='',clear_product_key=True)
         self.assertEqual(self.post('/pc-deploy/api/profiles/'+profile,values,method='PUT').status_code,200)
         self.assertFalse(self.client.get('/pc-deploy/api/dashboard').json['profiles'][0]['has_product_key'])
+
+
+    def wim_fixtures(self, mode='wipe_disk', capable=True):
+        inv = machine()
+        if capable:
+            inv['wim_apply_v1'] = True
+        inv['disks'][0]['partitions'] = [
+            dict(number=1, guid=str(uuid.uuid4()), gpt_type='c12a7328-f81f-11d2-ba4b-00a0c93ec93b',
+                 offset=1024**2, size_bytes=260*1024**2, filesystem='FAT32', windows=False),
+            dict(number=3, guid=str(uuid.uuid4()), gpt_type='ebd0a0a2-b9e5-4433-87c0-68b6b72699c7',
+                 offset=1024**3, size_bytes=128*1024**3, filesystem='NTFS', windows=True),
+            dict(number=5, guid=str(uuid.uuid4()), gpt_type='ebd0a0a2-b9e5-4433-87c0-68b6b72699c7',
+                 offset=130*1024**3, size_bytes=256*1024**3, filesystem='NTFS', windows=False)]
+        inv, reg = self.register(inv)
+        source = install_source()
+        source.update(kind='wim', image_file='win11.wim', path=r'\\test-fileserver\reminst')
+        source.pop('setup_sha256')
+        sr = self.post('/pc-deploy/api/sources', source)
+        self.assertEqual(sr.status_code, 200, sr.json)
+        pr = self.post('/pc-deploy/api/profiles', dict(name='Custom WIM', source_id=sr.json['id'],
+                       image_index=6, system_gib=0, disk_mode=mode))
+        self.assertEqual(pr.status_code, 200, pr.json)
+        return inv, reg, sr.json['id'], pr.json['id']
+
+    def wim_preview(self, inv, profile, partition=3):
+        disk = inventory(inv)['disks'][0]
+        target = dict(device_id=inv['hardware_uuid'], disk_key=disk['key'])
+        if partition is not None:
+            target['partition_key'] = next(p['key'] for p in disk['partitions'] if p['number'] == partition)
+        return self.post('/pc-deploy/api/jobs/preview', dict(profile_id=profile, targets=[target]))
+
+    def wim_queued(self, mode='wipe_disk'):
+        inv, reg, _, profile = self.wim_fixtures(mode)
+        pv = self.wim_preview(inv, profile)
+        self.assertEqual(pv.status_code, 200, pv.json)
+        self.enable()
+        result = self.post('/pc-deploy/api/jobs/commit', dict(
+            preview_id=pv.json['id'], confirmation='YES', physical_confirmed=True))
+        self.assertEqual(result.status_code, 200, result.json)
+        return inv, reg, result.json['ids'][0]
+
+    def test_wim_preserve_settings_does_not_require_new_local_password(self):
+        self.wim_fixtures()
+        d = self.client.get('/pc-deploy/api/dashboard').json
+        self.assertEqual(d['sources'][0]['kind'], 'wim')
+        self.assertEqual(d['sources'][0]['setup_sha256'], '')
+        p = d['profiles'][0]
+        self.assertTrue(p['preserve_image_settings'])
+        self.assertEqual(p['username'], '')
+        self.assertFalse(d['settings']['enabled'])
+
+    def test_wim_blocks_legacy_pe_before_task_creation(self):
+        inv, _, _, profile = self.wim_fixtures(capable=False)
+        result = self.wim_preview(inv, profile)
+        self.assertEqual(result.status_code, 400)
+        self.assertIn('PE', result.json['error'])
+        self.assertEqual(self.client.get('/pc-deploy/api/dashboard').json['jobs'], [])
+
+    def test_wim_preserve_requires_explicit_system_partition(self):
+        inv, _, _, profile = self.wim_fixtures('system_partition')
+        self.assertEqual(self.wim_preview(inv, profile, partition=None).status_code, 400)
+        self.assertEqual(self.wim_preview(inv, profile, partition=5).status_code, 400)
+        result = self.wim_preview(inv, profile)
+        self.assertEqual(result.status_code, 200, result.json)
+        self.assertEqual(result.json['targets'][0]['partitions']['windows']['number'], 3)
+        self.assertEqual(result.json['targets'][0]['partitions']['efi']['number'], 1)
+        self.assertIn('保留其他分区', result.json['warning'])
+
+    def test_wim_preserve_rejects_ambiguous_efi(self):
+        inv, reg, _, profile = self.wim_fixtures('system_partition')
+        extra = copy.deepcopy(inv['disks'][0]['partitions'][0])
+        extra.update(number=2, guid=str(uuid.uuid4()), offset=300*1024**2)
+        inv['disks'][0]['partitions'].append(extra)
+        self.assertEqual(self.post('/pc-deploy/api/agent/poll', inv, reg['token']).status_code, 200)
+        self.assertEqual(self.wim_preview(inv, profile).status_code, 400)
+
+    def test_wim_partition_change_invalidates_preview(self):
+        inv, reg, _, profile = self.wim_fixtures('system_partition')
+        pv = self.wim_preview(inv, profile)
+        inv['disks'][0]['partitions'][1]['guid'] = str(uuid.uuid4())
+        self.post('/pc-deploy/api/agent/poll', inv, reg['token'])
+        self.enable()
+        result = self.post('/pc-deploy/api/jobs/commit', dict(preview_id=pv.json['id'],
+            confirmation='YES', physical_confirmed=True))
+        self.assertEqual(result.status_code, 400)
+
+    def test_wim_full_flow_has_no_setup_answer_or_new_account(self):
+        inv, reg, identity = self.wim_queued()
+        job = self.post('/pc-deploy/api/agent/poll', inv, reg['token']).json['job']
+        self.assertEqual(job['source']['kind'], 'wim')
+        result = self.post(f'/pc-deploy/api/agent/jobs/{identity}/start', inv, reg['token'])
+        self.assertEqual(result.status_code, 200, result.json)
+        self.assertEqual(result.json['kind'], 'wim')
+        self.assertNotIn('answer_xml', result.json)
+        self.assertNotIn('Test-only-share-secret', json.dumps(result.json))
+        for stage in ('applying', 'boot_files', 'awaiting_report'):
+            r = self.post(f'/pc-deploy/api/agent/jobs/{identity}/event', dict(stage=stage), reg['token'])
+            self.assertEqual(r.status_code, 200, r.json)
+        self.assertEqual(self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]['state'], 'awaiting_report')
+        with self.store.connect() as c:
+            row = c.execute('SELECT secret FROM jobs WHERE id=?', (identity,)).fetchone()
+            token = self.store.decrypt(row['secret'])['finish_token']
+        body = dict(hardware_uuid=inv['hardware_uuid'], computer_name='PRESERVED-NAME',
+                    os_build=26100, image_state='IMAGE_STATE_COMPLETE', oobe_done=True)
+        r = self.post(f'/pc-deploy/api/agent/jobs/{identity}/finish', body, token)
+        self.assertEqual(r.status_code, 200, r.json)
+        self.assertEqual(self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]['state'], 'completed')
+
+    def test_wim_preserve_start_is_scoped_and_one_time(self):
+        inv, reg, identity = self.wim_queued('system_partition')
+        self.post('/pc-deploy/api/agent/poll', inv, reg['token'])
+        route = f'/pc-deploy/api/agent/jobs/{identity}/start'
+        self.assertEqual(self.post(route, inv, reg['token']).status_code, 200)
+        self.assertEqual(self.post(route, inv, reg['token']).status_code, 400)
+
+    def test_wim_finish_checks_actual_image_build_and_uuid(self):
+        inv, reg, identity = self.wim_queued()
+        self.post('/pc-deploy/api/agent/poll', inv, reg['token'])
+        self.post(f'/pc-deploy/api/agent/jobs/{identity}/start', inv, reg['token'])
+        with self.store.connect() as c:
+            row = c.execute('SELECT secret FROM jobs WHERE id=?', (identity,)).fetchone()
+            token = self.store.decrypt(row['secret'])['finish_token']
+        body = dict(hardware_uuid=inv['hardware_uuid'], computer_name='EXISTING',
+                    os_build=22631, image_state='IMAGE_STATE_COMPLETE', oobe_done=True)
+        self.assertEqual(self.post(f'/pc-deploy/api/agent/jobs/{identity}/finish', body, token).status_code, 400)
+        body.update(os_build=26100, hardware_uuid=str(uuid.uuid4()))
+        self.assertEqual(self.post(f'/pc-deploy/api/agent/jobs/{identity}/finish', body, token).status_code, 400)
+
+    def test_wim_cannot_start_when_real_dispatch_disabled(self):
+        inv, reg, identity = self.wim_queued()
+        self.post('/pc-deploy/api/agent/poll', inv, reg['token'])
+        self.enable(False)
+        result = self.post(f'/pc-deploy/api/agent/jobs/{identity}/start', inv, reg['token'])
+        self.assertEqual(result.status_code, 400)
+
+    def test_existing_setup_source_cannot_be_silently_converted(self):
+        _, _, source, _ = self.fixtures()
+        value = install_source()
+        value.update(kind='wim', image_file='win11.wim')
+        result = self.post('/pc-deploy/api/sources/'+source, value, method='PUT')
+        self.assertEqual(result.status_code, 400)
+        self.assertEqual(self.client.get('/pc-deploy/api/dashboard').json['sources'][0]['kind'], 'setup')
+
+    def test_wim_profile_rejects_unknown_mode_password_and_resize_preserve(self):
+        _, _, source, _ = self.wim_fixtures()
+        base = dict(name='Bad', source_id=source, image_index=6)
+        for change in (dict(disk_mode='auto'), dict(password='Test-password-123'),
+                       dict(disk_mode='system_partition', system_gib=128)):
+            with self.subTest(change=change):
+                self.assertEqual(self.post('/pc-deploy/api/profiles', dict(base, **change)).status_code, 400)
+
+    def test_switching_wim_profile_to_setup_requires_valid_password(self):
+        _, _, _, profile = self.wim_fixtures()
+        source = self.post('/pc-deploy/api/sources', install_source()).json['id']
+        value = dict(name='Original again', source_id=source, image_index=6, system_gib=128,
+                     username='ITSetup', computer_prefix='TEST')
+        result = self.post('/pc-deploy/api/profiles/'+profile, value, method='PUT')
+        self.assertEqual(result.status_code, 400)
+        value['password'] = 'Test-only-password-123'
+        self.assertEqual(self.post('/pc-deploy/api/profiles/'+profile, value, method='PUT').status_code, 200)
+
+    def test_wim_filename_rejects_path_and_shell_syntax(self):
+        for filename in (r'..\win11.wim', r'C:\win11.wim', r'folder\win11.wim', 'win11.wim:stream',
+                         'a".wim', 'a;test.wim', 'a.wim\n'):
+            with self.subTest(filename=filename):
+                source = install_source()
+                source.update(kind='wim', image_file=filename)
+                with self.assertRaises(Invalid):
+                    source_record(source)
+
+    def test_wim_partition_inventory_rejects_overlap_and_duplicate_guid(self):
+        inv, _, _, _ = self.wim_fixtures()
+        overlap = copy.deepcopy(inv)
+        overlap['disks'][0]['partitions'][1]['offset'] = 100*1024**2
+        with self.assertRaises(Invalid):
+            inventory(overlap)
+        inv['disks'][0]['partitions'][1]['guid'] = inv['disks'][0]['partitions'][0]['guid']
+        with self.assertRaises(Invalid):
+            inventory(inv)
 
 
 class ValidationTests(unittest.TestCase):

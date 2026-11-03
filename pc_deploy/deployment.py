@@ -21,6 +21,7 @@ STATES = {
     'failed': '失败，需核对', 'cancelled': '已取消',
 }
 ERRORS = {
+    'WIM': '封装 WIM 还原或引导配置失败，请保留日志并现场核对；不会自动重试',
     'PREFLIGHT': '安装前检查未通过，未启动安装程序',
     'SOURCE': '安装源、凭据或文件校验失败，未启动安装程序',
     'DISK_CHANGED': '硬盘信息发生变化，已停止',
@@ -90,9 +91,14 @@ def unc_path(value):
 def source_record(data):
     if not isinstance(data, dict):
         raise Invalid('安装源清单必须是 JSON 对象')
+    kind = data.get('kind', 'setup')
+    if kind not in ('setup', 'wim'):
+        raise Invalid('安装方式必须是 setup 或 wim')
     filename = data.get('image_file', 'sources\\install.wim')
-    if filename not in ('sources\\install.wim', 'sources\\install.esd'):
-        raise Invalid('首版只支持原版安装源中的 install.wim 或 install.esd')
+    if kind == 'setup' and filename not in ('sources\\install.wim', 'sources\\install.esd'):
+        raise Invalid('原版安装源需要 sources\\install.wim 或 install.esd')
+    if kind == 'wim' and (not isinstance(filename, str) or not re.fullmatch(r'[A-Za-z0-9_-][A-Za-z0-9_. -]{0,119}\.wim', filename, re.I)):
+        raise Invalid('封装镜像必须是共享目录中的 WIM 文件名，不能包含路径或命令字符')
     family = data.get('family')
     if family not in ('windows11', 'windows10'):
         raise Invalid('仅支持 Windows 11 / Windows 10')
@@ -123,15 +129,29 @@ def source_record(data):
     if '@' not in user and '\\' not in user:
         raise Invalid('安装源账号必须包含域或文件服务器名称')
     return dict(name=text(data.get('name'), '安装源名称'), path=unc_path(data.get('path')),
-                family=family, image_file=filename, images=cleaned,
+                family=family, image_file=filename, images=cleaned, kind=kind,
                 image_sha256=sha256(data.get('image_sha256')),
-                setup_sha256=sha256(data.get('setup_sha256')), smb_user=user)
+                setup_sha256=sha256(data.get('setup_sha256')) if kind == 'setup' else '', smb_user=user)
 
 
 def profile_record(data, source):
     index = integer(data.get('image_index'), '镜像索引', 1, 100)
     if index not in {v['index'] for v in source['images']}:
         raise Invalid('所选镜像索引不在安装源中')
+    if source.get('kind') == 'wim':
+        mode = data.get('disk_mode', 'wipe_disk')
+        if mode not in ('wipe_disk', 'system_partition'):
+            raise Invalid('请选择重建整盘或仅还原指定系统分区')
+        size = integer(data.get('system_gib', 0), '系统盘容量', 0, 4096)
+        if size and size < 80:
+            raise Invalid('独立 C 盘至少 80 GiB')
+        if mode == 'system_partition' and size:
+            raise Invalid('保留分区时不能调整 C 盘容量')
+        return dict(name=text(data.get('name'), '方案名称'), source_id=source['id'],
+                    image_index=index, username='', computer_prefix='', system_gib=size,
+                    disk_mode=mode, preserve_image_settings=True)
+    if data.get('disk_mode', 'wipe_disk') != 'wipe_disk':
+        raise Invalid('原版 Setup 方式保持原有整盘安装流程')
     username = text(data.get('username'), '本地管理员名称', maximum=20)
     reserved = {'administrator', 'guest', 'defaultaccount', 'wdagutilityaccount', 'system', 'krbtgt'}
     if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]{0,19}', username) or username.lower() in reserved:
@@ -179,14 +199,48 @@ def inventory(data):
         bus = str(d.get('bus') or 'Unknown')
         allowed = bus in SAFE_BUSES and bool(serial or unique) and size >= 64 * 1024**3
         allowed = allowed and d.get('read_only') is False and d.get('offline') is False
-        clean.append(dict(key=key, number=number, serial=serial, unique_id=unique,
-                          size_bytes=size, bus=bus, model=str(d.get('model') or '')[:120],
-                          read_only=d.get('read_only') is not False,
-                          offline=d.get('offline') is not False, eligible=allowed))
+        disk = dict(key=key, number=number, serial=serial, unique_id=unique,
+                    size_bytes=size, bus=bus, model=str(d.get('model') or '')[:120],
+                    read_only=d.get('read_only') is not False,
+                    offline=d.get('offline') is not False, eligible=allowed)
+        if 'partitions' in d:
+            parts = d['partitions']
+            if not isinstance(parts, list) or len(parts) > 128:
+                raise Invalid('分区清单无效')
+            normalized, part_numbers, part_guids = [], set(), set()
+            for p in parts:
+                if not isinstance(p, dict):
+                    raise Invalid('分区清单无效')
+                pn = integer(p.get('number'), '分区编号', 1, 128)
+                offset = integer(p.get('offset'), '分区偏移', 1, size)
+                length = integer(p.get('size_bytes'), '分区容量', 1, size)
+                try:
+                    guid = str(uuid.UUID(str(p.get('guid', ''))))
+                    gpt_type = str(uuid.UUID(str(p.get('gpt_type', ''))))
+                    if uuid.UUID(guid).int == 0:
+                        raise ValueError()
+                except ValueError as exc:
+                    raise Invalid('分区必须有有效 GPT 标识') from exc
+                if pn in part_numbers or guid in part_guids or offset + length > size:
+                    raise Invalid('分区重复或超出硬盘范围')
+                part_numbers.add(pn)
+                part_guids.add(guid)
+                filesystem = p.get('filesystem', '')
+                if filesystem not in ('NTFS', 'FAT32', ''):
+                    filesystem = ''
+                item = dict(number=pn, guid=guid, gpt_type=gpt_type, offset=offset,
+                            size_bytes=length, filesystem=filesystem, windows=p.get('windows') is True)
+                item['key'] = digest(item)
+                normalized.append(item)
+            ordered = sorted(normalized, key=lambda p: p['offset'])
+            if any(a['offset'] + a['size_bytes'] > b['offset'] for a, b in zip(ordered, ordered[1:])):
+                raise Invalid('分区范围重叠')
+            disk['partitions'] = sorted(normalized, key=lambda p: p['number'])
+        clean.append(disk)
     macs = data.get('macs', [])
     if not isinstance(macs, list) or len(macs) > 8 or not all(isinstance(m, str) and re.fullmatch(r'[0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}){5}', m) for m in macs):
         raise Invalid('网卡 MAC 清单格式错误')
-    return dict(hardware_uuid=identity, boot_id=boot, model=text(data.get('model', 'Unknown'), '机型'),
+    result = dict(hardware_uuid=identity, boot_id=boot, model=text(data.get('model', 'Unknown'), '机型'),
                 serial=text(data.get('serial', 'Unknown'), '整机序列号'),
                 firmware=data.get('firmware') if data.get('firmware') in ('UEFI', 'BIOS') else 'Unknown',
                 architecture=data.get('architecture') if data.get('architecture') == 'amd64' else 'unsupported',
@@ -194,6 +248,22 @@ def inventory(data):
                 secure_boot=data.get('secure_boot') is True, tpm2=data.get('tpm2') is True,
                 macs=sorted(macs),
                 disks=sorted(clean, key=lambda d: d['number']))
+    if data.get('wim_apply_v1') is True:
+        result['wim_apply_v1'] = True
+    return result
+
+
+def partition_target(disk, partition_key):
+    parts = disk.get('partitions', [])
+    selected = [p for p in parts if p['key'] == partition_key]
+    efi = [p for p in parts if p['gpt_type'] == 'c12a7328-f81f-11d2-ba4b-00a0c93ec93b'
+           and p['filesystem'] == 'FAT32' and p['size_bytes'] >= 100 * 1024**2]
+    if (len(selected) != 1 or len(efi) != 1
+            or selected[0]['gpt_type'] != 'ebd0a0a2-b9e5-4433-87c0-68b6b72699c7'
+            or selected[0]['filesystem'] != 'NTFS' or not selected[0]['windows']
+            or selected[0]['size_bytes'] < 60 * 1024**3):
+        raise Invalid('必须明确选择已有 Windows 的 NTFS 系统分区，同盘须有唯一可用 EFI 分区')
+    return dict(windows=selected[0], efi=efi[0])
 
 
 def target_check(device, disk_key, profile):
@@ -205,6 +275,8 @@ def target_check(device, disk_key, profile):
     if len(matches) != 1 or not matches[0]['eligible']:
         raise Invalid('目标盘无效：外置盘、未知总线、只读盘或身份不明确的盘禁止下发')
     disk = matches[0]
+    if profile.get('disk_mode') == 'system_partition':
+        return disk
     available = disk['size_bytes'] // 1024**2 - 260 - 16 - 1100 - 32
     if available < 60 * 1024 or (profile['system_gib'] and available < profile['system_gib'] * 1024 + 1024):
         raise Invalid('目标盘容量不足以创建所选分区方案')

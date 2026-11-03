@@ -1,3 +1,4 @@
+param([switch]$RegistrationOnly)
 $ErrorActionPreference = 'Stop'
 $cfg = Get-Content -LiteralPath "$PSScriptRoot\config.json" -Raw -Encoding UTF8 | ConvertFrom-Json
 if (-not (Test-Path 'HKLM:\SYSTEM\CurrentControlSet\Control\MiniNT')) { throw 'Windows PE is required.' }
@@ -10,4 +11,4 @@ if (([uri]$cfg.server_url).Scheme -eq 'https' -and $cfg.ca_pem) {
 }
 & wpeutil.exe UpdateBootInfo
 if ($LASTEXITCODE -ne 0) { throw 'Could not detect firmware mode.' }
-& "$PSScriptRoot\Deploy-Agent.ps1" -ConfigPath "$PSScriptRoot\config.json"
+& "$PSScriptRoot\Deploy-Agent.ps1" -ConfigPath "$PSScriptRoot\config.json" -RegistrationOnly:$RegistrationOnly

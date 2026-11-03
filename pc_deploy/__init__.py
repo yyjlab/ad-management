@@ -25,7 +25,7 @@ from werkzeug.exceptions import RequestEntityTooLarge
 
 from .deployment import (ACTIVE, ERRORS, STATES, Invalid, answer_file, canonical, digest,
                         integer, inventory, profile_record, public_url, source_record,
-                        target_check, text)
+                        target_check, text, partition_target, finalizer_command)
 from .storage import Store
 
 ROOT = Path(__file__).parent
@@ -187,9 +187,16 @@ def register_pc_deploy(host_app, current_user, touch_session):
         disk = target_check(inv, target.get('disk_key'), profile)
         if source['family'] == 'windows11' and not (inv['secure_boot'] and inv['tpm2']):
             raise Invalid('Windows 11 方案要求客户端确认 TPM 2.0 和已启用的 Secure Boot')
-        return dict(device_id=row['id'], boot_id=row['boot_id'], inventory_hash=row['inventory_hash'],
-                    disk_key=disk['key'], disk=disk, serial=inv['serial'], model=inv['model'],
-                    boot_code=row['boot_code'], inventory=inv)
+        result = dict(device_id=row['id'], boot_id=row['boot_id'], inventory_hash=row['inventory_hash'],
+                      disk_key=disk['key'], disk=disk, serial=inv['serial'], model=inv['model'],
+                      boot_code=row['boot_code'], inventory=inv)
+        if source.get('kind') == 'wim':
+            if inv.get('wim_apply_v1') is not True:
+                raise Invalid('该 PE 版本只支持登记或原版安装，请用更新后的装机 ISO 启动')
+            if profile.get('disk_mode') == 'system_partition':
+                result['partition_key'] = target.get('partition_key')
+                result['partitions'] = partition_target(disk, result['partition_key'])
+        return result
 
     @app.errorhandler(Invalid)
     def invalid(exc):
@@ -271,6 +278,11 @@ def register_pc_deploy(host_app, current_user, touch_session):
         value = source_record(data)
         with store.connect(write=True) as c:
             old = load(c, 'sources', identity)[0] if identity else None
+            if old and json.loads(old['data']).get('kind', 'setup') != value['kind']:
+                referenced = any(json.loads(r['data'])['source_id'] == identity
+                                 for r in c.execute('SELECT data FROM profiles'))
+                if referenced:
+                    raise Invalid('该安装源已有装机方案，不能切换安装方式；请另建安装源以保留原有流程')
             password = data.get('password', '')
             if password:
                 if not isinstance(password, str) or not 1 <= len(password) <= 128 or '\x00' in password:
@@ -300,15 +312,21 @@ def register_pc_deploy(host_app, current_user, touch_session):
             if isinstance(old_secret, str):
                 old_secret = dict(password=old_secret)
             password = data.get('password', '')
-            if password:
+            if source.get('kind') == 'wim':
+                saved_password = ''
+            elif password:
                 if not isinstance(password, str) or not 12 <= len(password) <= 64 or any(ord(ch) < 32 for ch in password):
                     raise Invalid('临时本地管理员密码需要 12–64 个字符')
                 saved_password = password
-            elif old:
+            elif old and isinstance(old_secret.get('password'), str) and 12 <= len(old_secret['password']) <= 64:
                 saved_password = old_secret['password']
             else:
                 raise Invalid('请设置装机后的临时本地管理员密码')
+            if source.get('kind') == 'wim' and (data.get('password') or data.get('product_key')):
+                raise Invalid('封装 WIM 沿用镜像内账号与授权配置，不填写原版安装账号或密钥')
             product_key = data.get('product_key') or old_secret.get('product_key', '')
+            if source.get('kind') == 'wim':
+                product_key = ''
             if data.get('clear_product_key') is True:
                 product_key = ''
             if not isinstance(product_key, str) or (product_key and not re.fullmatch(r'(?:[A-Za-z0-9]{5}-){4}[A-Za-z0-9]{5}', product_key)):
@@ -376,7 +394,10 @@ def register_pc_deploy(host_app, current_user, touch_session):
             c.execute('INSERT INTO previews VALUES(?,?,?,?,0)',
                       (identity, canonical(value), time.time()+180, session['pc_deploy_session_id']))
         return jsonify(id=identity, profile=profile['name'], source=source['name'], targets=chosen,
-                       expires_in=180, warning='仅清空所选物理硬盘上的全部分区，不是隐私安全擦除；其他硬盘不处理。')
+                       expires_in=180, warning=(
+                           '只格式化明确选中的 Windows 分区，其数据将丢失；保留其他分区，更新同盘 EFI 引导文件。'
+                           if profile.get('disk_mode') == 'system_partition' else
+                           '仅清空所选物理硬盘上的全部分区，不是隐私安全擦除；其他硬盘不处理。'))
 
     @app.post('/api/jobs/commit')
     @admin
@@ -529,13 +550,16 @@ def register_pc_deploy(host_app, current_user, touch_session):
 
     @app.post('/api/agent/poll')
     def poll():
-        inv = inventory(body())
+        payload = body()
+        inv = inventory(payload)
         with store.connect(write=True) as c:
             dev = agent(c)
             if inv['hardware_uuid'] != dev['id'] or inv['boot_id'] != dev['boot_id']:
                 raise Invalid('设备身份不匹配')
             c.execute('UPDATE devices SET data=?,inventory_hash=?,last_seen=? WHERE id=?',
                       (canonical(inv), digest(inv), time.time(), dev['id']))
+            if payload.get('registration_only') is True:
+                return jsonify(job=None, registration_only=True)
             row = c.execute('SELECT * FROM jobs WHERE device_id=? AND state IN (?,?,?,?)', (dev['id'], *ACTIVE)).fetchone()
             if not row or not store.setting(c, 'enabled', False):
                 return jsonify(job=None)
@@ -571,25 +595,44 @@ def register_pc_deploy(host_app, current_user, touch_session):
                              allow_http=http_allowed() and urlsplit(store.setting(c, 'public_url')).scheme == 'http',
                              hardware_uuid=dev['id'], token=secret['finish_token'],
                              ca_pem=store.setting(c, 'ca_pem', ''))
-            xml = answer_file(inv, data['target']['disk'], data['profile'], data['source'],
-                              secret['local_password'], finalizer, secret.get('product_key'))
+            if data['source'].get('kind') == 'wim':
+                if inv.get('wim_apply_v1') is not True:
+                    raise Invalid('客户端不支持封装 WIM 还原')
+                target_check(inv, data['target']['disk_key'], data['profile'])
+                if data['profile'].get('disk_mode') == 'system_partition':
+                    current_parts = partition_target(data['target']['disk'], data['target']['partition_key'])
+                    if current_parts != data['target']['partitions']:
+                        raise Invalid('分区与已确认目标不一致')
+                authorization = dict(kind='wim', finalizer_command=finalizer_command(finalizer))
+            else:
+                xml = answer_file(inv, data['target']['disk'], data['profile'], data['source'],
+                                  secret['local_password'], finalizer, secret.get('product_key'))
+                authorization = dict(answer_xml=xml)
             c.execute('UPDATE jobs SET state=?,updated=? WHERE id=?', ('installing', time.time(), identity))
             c.execute('UPDATE devices SET consumed=1,last_seen=? WHERE id=?', (time.time(), dev['id']))
-            event(c, 'installing', '最终硬件复核通过，已授权启动 Windows Setup；之后不可远程取消', identity)
-        return jsonify(answer_xml=xml)
+            event(c, 'installing', '最终硬件复核通过，已授权启动' +
+                  (' WIM 还原' if data['source'].get('kind') == 'wim' else ' Windows Setup') +
+                  '；之后不可远程取消', identity)
+        return jsonify(authorization)
 
     @app.post('/api/agent/jobs/<identity>/event')
     def report(identity):
         value = body()
         with store.connect(write=True) as c:
             dev = agent(c)
-            row, _ = agent_job(c, dev, identity, ('preflight', 'installing', 'awaiting_report'))
+            row, job_data = agent_job(c, dev, identity, ('preflight', 'installing', 'awaiting_report'))
             if value.get('code') in ERRORS:
                 state, message = 'failed', ERRORS[value['code']]
             elif value.get('stage') == 'verifying' and row['state'] == 'preflight':
                 state, message = 'preflight', '正在核对安装源 SHA-256，尚未启动安装'
+            elif (value.get('stage') in ('applying', 'boot_files') and row['state'] == 'installing'
+                  and job_data['source'].get('kind') == 'wim'):
+                state = 'installing'
+                message = '正在还原封装 WIM' if value['stage'] == 'applying' else '正在配置系统引导与安装后回报'
             elif value.get('stage') == 'awaiting_report' and row['state'] == 'installing':
-                state, message = 'awaiting_report', 'Windows Setup 已返回，等待安装后系统回报'
+                state, message = 'awaiting_report', (
+                    'WIM 已还原并配置引导，等待新系统回报；非封装 OOBE 镜像需首次管理员登录'
+                    if job_data['source'].get('kind') == 'wim' else 'Windows Setup 已返回，等待安装后系统回报')
             else:
                 raise Invalid('不允许的任务状态变更')
             c.execute('UPDATE jobs SET state=?,updated=? WHERE id=?', (state, time.time(), identity))
@@ -613,9 +656,15 @@ def register_pc_deploy(host_app, current_user, touch_session):
                 raise Invalid('任务状态不允许报告完成')
             build = integer(value.get('os_build'), '系统版本', 19041, 99999)
             expected = data['profile']['computer_prefix'] + '-' + digest(data['target']['inventory']['hardware_uuid'])[:8].upper()
-            if (value.get('hardware_uuid') != row['device_id'] or value.get('computer_name') != expected
+            preserved_name = data['source'].get('kind') == 'wim'
+            if (value.get('hardware_uuid') != row['device_id']
+                    or (not preserved_name and value.get('computer_name') != expected)
+                    or (preserved_name and (not isinstance(value.get('computer_name'), str)
+                                            or not re.fullmatch(r'[A-Za-z0-9_-]{1,63}', value['computer_name'])))
                     or value.get('image_state') != 'IMAGE_STATE_COMPLETE' or value.get('oobe_done') is not True
-                    or (data['source']['family'] == 'windows11') != (build >= 22000)):
+                    or (data['source']['family'] == 'windows11') != (build >= 22000)
+                    or (preserved_name and build != next(i['build'] for i in data['source']['images']
+                                                        if i['index'] == data['profile']['image_index']))):
                 raise Invalid('安装后系统、设备身份或 OOBE 状态未通过核对')
             c.execute('UPDATE jobs SET state=?,updated=? WHERE id=?', ('completed', time.time(), identity))
             event(c, 'completed', '安装后客户端报告 OOBE 已结束，系统版本与设备身份匹配；不等于驱动/业务验收', identity)

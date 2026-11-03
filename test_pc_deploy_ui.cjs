@@ -11,7 +11,7 @@ async function run() {
     const page=await browser.newPage({viewport:{width:1440,height:1000}});
     const errors=[], requests=[];
     page.on('pageerror',error=>errors.push(error.message));
-    let role='super_admin',expired=false,saves=0;
+    let role='super_admin',expired=false,saves=0,fixture=null,profilePayload=null,previewPayload=null;
     const settings={public_url:'http://ad-menu.test/pc-deploy',enabled:false,concurrency:2,ca_pem:''};
     const adHtml=fs.readFileSync(path.join(__dirname,'admin_manage.html'),'utf8');
     await page.route('**/*',async route=>{
@@ -29,7 +29,17 @@ async function run() {
       if(url.pathname==='/api/admin/check') return route.fulfill({json:{logged_in:true,username:'test-admin',role,
         permissions:['view_user','view_dashboard','view_computers','view_logs','manage_admins','system_settings','password_policy']}});
       if(url.pathname==='/pc-deploy/api/session') return route.fulfill(expired ? {status:401,json:{error:'请先登录 AD 管理后台'}} : {json:{authenticated:true,username:'test-admin',csrf:'fixture-csrf',test_mode:true}});
-      if(url.pathname==='/pc-deploy/api/dashboard') return route.fulfill({json:{devices:[],sources:[],profiles:[],jobs:[],events:[],settings,
+      if(url.pathname==='/pc-deploy/api/profiles' && request.method()==='POST') {
+        profilePayload=request.postDataJSON();
+        return route.fulfill({json:{ok:true,id:'new-profile'}});
+      }
+      if(url.pathname==='/pc-deploy/api/jobs/preview') {
+        previewPayload=request.postDataJSON();
+        const disk=fixture.devices[0].disks[0];
+        return route.fulfill({json:{id:'preview-1',profile:'WIM preserve',source:'Custom WIM',warning:'只格式化所选 Windows 分区，保留其他分区，更新同盘 EFI。',
+          targets:[{serial:'TEST-LAPTOP',boot_code:'ABC123',disk,partitions:{windows:disk.partitions[0]}}]}});
+      }
+      if(url.pathname==='/pc-deploy/api/dashboard') return route.fulfill({json:fixture||{devices:[],sources:[],profiles:[],jobs:[],events:[],settings,
         boot_files:{wimboot:false,'boot.wim':false,BCD:false,'boot.sdi':false},server_time:1793347200}});
       if(url.pathname==='/pc-deploy/api/settings'){
         assert.equal(request.headers()['x-csrf-token'],'fixture-csrf');
@@ -112,8 +122,64 @@ async function run() {
     await page.goto('http://ad-menu.test/pc-deploy/');
     await page.locator('#workspace:not([hidden])').waitFor();
     assert.ok(await page.locator('.sidebar').isVisible());checks++;
+
+    // WIM form/device fixtures; still intercept every request and keep real dispatch disabled.
+    const sourceBase={images:[{index:1,name:'Windows 11 Pro',build:26100}],family:'windows11',
+      path:'\\\\fixture-files\\reminst',image_sha256:'a'.repeat(64),smb_user:'FIXTURE\\read'};
+    const disk={number:7,key:'disk-7',serial:'SSD-7',unique_id:'HW-7',model:'Fixture SSD',bus:'NVMe',
+      size_bytes:512*1024**3,eligible:true,partitions:[{number:3,key:'partition-3',guid:'33333333-3333-3333-3333-333333333333',
+        gpt_type:'ebd0a0a2-b9e5-4433-87c0-68b6b72699c7',filesystem:'NTFS',windows:true,offset:1024**3,size_bytes:128*1024**3}]};
+    fixture={devices:[{id:'laptop-1',serial:'TEST-LAPTOP',model:'Fixture Laptop',firmware:'UEFI',architecture:'amd64',
+      online:true,consumed:false,tpm2:true,secure_boot:true,macs:['02:00:00:00:00:01'],disks:[disk],
+      boot_code:'ABC123',last_seen:1793347200}],sources:[{...sourceBase,id:'setup-source',kind:'setup',name:'Original Setup'},
+      {...sourceBase,id:'wim-source',kind:'wim',name:'Custom WIM',image_file:'win11.wim'}],
+      profiles:[{id:'setup-profile',name:'Original Setup profile',source_id:'setup-source',image_index:1,
+        system_gib:128,username:'ITSetup',computer_prefix:'PC'},
+        {id:'wim-profile',name:'WIM preserve',source_id:'wim-source',image_index:1,system_gib:0,
+          disk_mode:'system_partition',preserve_image_settings:true,username:'',computer_prefix:''}],
+      jobs:[],events:[],settings,boot_files:{},server_time:1793347200};
+    await page.setViewportSize({width:1440,height:1000});
+    await page.reload();
+    await page.locator('#workspace:not([hidden])').waitFor();
+    await page.locator('[data-view=profiles]').click();
+    await page.locator('[data-action=new-profile]').click();
+    assert.ok(await page.locator('#profile-form [name=username]').isVisible());checks++;
+    assert.ok(await page.locator('#profile-form [name=password]').evaluate(e=>e.required));checks++;
+    await page.locator('#source-choice').selectOption('wim-source');
+    assert.ok(await page.locator('#profile-form [name=username]').isDisabled());checks++;
+    assert.ok(await page.locator('#profile-form [name=password]').isHidden());checks++;
+    assert.ok(await page.locator('#wim-profile-help').isVisible());checks++;
+    await page.locator('#disk-mode').selectOption('system_partition');
+    assert.ok(await page.locator('#profile-form [name=system_gib]').isDisabled());checks++;
+    await page.locator('#profile-form [name=name]').fill('Custom restore');
+    await page.locator('#profile-form [type=submit]').click();
+    await page.locator('#modal').waitFor({state:'hidden'});
+    assert.equal(profilePayload.disk_mode,'system_partition');checks++;
+    assert.equal(profilePayload.system_gib,0);checks++;
+    assert.ok(!('password' in profilePayload)&&!('username' in profilePayload)&&!('product_key' in profilePayload));checks++;
+    await page.locator('[data-view=devices]').click();
+    await page.locator('#profile-choice').selectOption('wim-profile');
+    await page.locator('[data-disk=laptop-1]').selectOption('disk-7');
+    await page.locator('[data-partition=laptop-1]').selectOption('partition-3');
+    await page.locator('[data-device=laptop-1]').check();
+    await page.locator('#preview-button').click();
+    await page.locator('#modal[open]').waitFor();
+    assert.equal(previewPayload.targets[0].partition_key,'partition-3');checks++;
+    assert.equal(previewPayload.targets[0].disk_key,'disk-7');checks++;
+    assert.ok((await page.locator('#modal-body').textContent()).includes('只格式化分区 3'));checks++;
+    assert.ok((await page.locator('#modal-body').textContent()).includes('所选 Windows 分区数据可删除'));checks++;
+    assert.ok(await page.locator('#commit-form [type=submit]').isDisabled());checks++;
+    await page.locator('#commit-form [data-action=close]').click();
+    await page.locator('#profile-choice').selectOption('setup-profile');
+    assert.equal(await page.locator('[data-partition]').count(),0);checks++;
+    await page.locator('[data-view=profiles]').click();
+    await page.locator('[data-action=edit-profile][data-id=setup-profile]').click();
+    assert.ok(await page.locator('#profile-form [name=username]').isEnabled());checks++;
+    assert.ok(await page.locator('#disk-mode').isHidden());checks++;
+    await page.locator('#profile-form [data-action=close]').click();
+
     assert.deepEqual(errors,[]);checks++;
-    console.log(`${checks} nested menu, embedded page, HTTP form, role, message origin, lifecycle and mobile checks passed. No live system contacted.`);
+    console.log(`${checks} nested menu, embedded page, HTTP form, role, message origin, lifecycle, mobile and WIM restore UI checks passed. No live system contacted.`);
   }finally{await browser.close();}
 }
 run().catch(error=>{console.error(error);process.exitCode=1;});
