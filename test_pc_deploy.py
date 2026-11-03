@@ -324,9 +324,67 @@ class PlatformTests(unittest.TestCase):
         with zipfile.ZipFile(io.BytesIO(response.data)) as z:
             cfg=json.loads(z.read('config.json'))
             self.assertTrue(cfg['server_url'].startswith('https://'))
-            self.assertLess(cfg['expires_at']-time.time(),86401)
+            self.assertGreater(cfg['expires_at']-time.time(),604790)
+            self.assertLessEqual(cfg['expires_at']-time.time(),604800)
+            with self.store.connect() as c:
+                row=c.execute('SELECT * FROM enrollments WHERE token_hash=?',
+                              (token_hash(cfg['enrollment_token']),)).fetchone()
+            self.assertEqual(row['expires'],cfg['expires_at'])
             self.assertIn('Build-WinPE.ps1',z.namelist())
             self.assertNotIn('admin_password',cfg)
+
+    def test_enrollment_extension_preserves_existing_iso_token_and_jobs(self):
+        inv,reg,job=self.queued()
+        identity=token_hash(self.enrollment)
+        with self.store.connect() as c:
+            before=dict(c.execute('SELECT * FROM enrollments WHERE token_hash=?',(identity,)).fetchone())
+            device=dict(c.execute('SELECT * FROM devices').fetchone())
+            task=dict(c.execute('SELECT * FROM jobs WHERE id=?',(job,)).fetchone())
+        response=self.post(f'/pc-deploy/api/enrollments/{identity}/extend')
+        self.assertEqual(response.status_code,200,response.json)
+        self.assertGreater(response.json['expires_at']-time.time(),604790)
+        with self.store.connect() as c:
+            after=dict(c.execute('SELECT * FROM enrollments WHERE token_hash=?',(identity,)).fetchone())
+            self.assertEqual(dict(c.execute('SELECT * FROM devices').fetchone()),device)
+            self.assertEqual(dict(c.execute('SELECT * FROM jobs WHERE id=?',(job,)).fetchone()),task)
+        self.assertEqual(after['uses'],before['uses'])
+        self.assertEqual(after['token_hash'],before['token_hash'])
+        self.assertEqual(self.post('/pc-deploy/api/agent/register',inv,self.enrollment).status_code,200)
+
+    def test_enrollment_extension_rejects_expired_exhausted_missing_and_untrusted_calls(self):
+        identity=token_hash(self.enrollment)
+        path=f'/pc-deploy/api/enrollments/{identity}/extend'
+        self.assertEqual(self.app.test_client().post(path,json={}).status_code,401)
+        self.assertEqual(self.client.post(path,json={}).status_code,403)
+        with self.client.session_transaction() as session_data:
+            session_data['admin_role']='admin'
+        self.assertEqual(self.post(path).status_code,403)
+        with self.client.session_transaction() as session_data:
+            session_data['admin_role']='super_admin'
+        for expires,uses in [(time.time()-1,0),(time.time()+3600,500)]:
+            with self.store.connect(write=True) as c:
+                c.execute('UPDATE enrollments SET expires=?,uses=? WHERE token_hash=?',(expires,uses,identity))
+            self.assertEqual(self.post(path).status_code,400)
+        self.assertEqual(self.post('/pc-deploy/api/enrollments/'+'a'*64+'/extend').status_code,400)
+        self.assertEqual(self.post('/pc-deploy/api/enrollments/invalid/extend').status_code,400)
+
+    def test_enrollment_extension_never_shortens_validity(self):
+        identity=token_hash(self.enrollment)
+        expires=time.time()+14*86400
+        with self.store.connect(write=True) as c:
+            c.execute('UPDATE enrollments SET expires=? WHERE token_hash=?',(expires,identity))
+        response=self.post(f'/pc-deploy/api/enrollments/{identity}/extend')
+        self.assertEqual(response.json['expires_at'],expires)
+        items=self.client.get('/pc-deploy/api/dashboard').json['enrollments']
+        self.assertEqual(items,[dict(id=identity,expires_at=expires,uses=0)])
+
+    def test_enrollment_expiry_does_not_end_established_polling(self):
+        inv,reg=self.register()
+        with self.store.connect(write=True) as c:
+            c.execute('UPDATE enrollments SET expires=?',(time.time()-1,))
+        self.assertEqual(self.post('/pc-deploy/api/agent/poll',inv,reg['token']).status_code,200)
+        self.assertEqual(self.post('/pc-deploy/api/agent/register',inv,self.enrollment).status_code,400)
+        self.assertEqual(self.client.get('/pc-deploy/api/dashboard').json['enrollments'],[])
 
     def test_boot_file_allowlist(self):
         self.assertEqual(self.client.get('/pc-deploy/boot/secret.key').status_code,404)

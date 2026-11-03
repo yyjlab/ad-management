@@ -32,7 +32,7 @@
 
 仅验证设备报到时，在构建命令后加 `-RegistrationOnly`。该模式持续登记和保活，不领取安装任务、不返回安装源密码；客户端也阻止执行安装。后台需包含此模式支持，旧后端若返回任务，客户端会停止而不执行。
 
-脚本只创建 ISO，不格式化 U 盘。将 `pc-deploy-winpe.iso` 复制到已有 Ventoy U 盘，再从目标电脑启动。登记凭据有效期 24 小时，过期需重新下载并构建介质。
+脚本只创建 ISO，不格式化 U 盘。将 `pc-deploy-winpe.iso` 复制到已有 Ventoy U 盘，再从目标电脑启动。登记凭据有效期 7 天，用于 PE 启动时向后台报到；到期不会关闭电脑，也不会中断已登记客户端的正常等待。在“启动与设置”按登记包编号和到期时间找到现有包，点击“续期至至少 7 天后”，现有 ISO 无需重做。后台更新不会自动延长旧包；必须在到期前续期。过期、撤销或达到 500 次登记上限后需重新下载并构建介质。
 
 纯网络启动可将 ADK 构建目录中的 `media/sources/boot.wim`、`media/Boot/BCD`、`media/Boot/boot.sdi` 及官方 `wimboot` 放到后端 `instance/pc-deploy/boot/`，由现有受控 iPXE 服务引导至 `/pc-deploy/boot.ipxe`。必须先验证所选协议的访问、使用 HTTPS 时的证书信任、Secure Boot 及退出 iPXE 后的本地系统启动回退；平台不接管初始 DHCP / TFTP。
 

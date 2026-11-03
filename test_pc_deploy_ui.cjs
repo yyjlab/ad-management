@@ -11,7 +11,7 @@ async function run() {
     const page=await browser.newPage({viewport:{width:1440,height:1000}});
     const errors=[], requests=[];
     page.on('pageerror',error=>errors.push(error.message));
-    let role='super_admin',expired=false,saves=0,fixture=null,profilePayload=null,previewPayload=null;
+    let role='super_admin',expired=false,saves=0,extensions=0,fixture=null,profilePayload=null,previewPayload=null;
     const settings={public_url:'http://ad-menu.test/pc-deploy',enabled:false,concurrency:2,ca_pem:''};
     const adHtml=fs.readFileSync(path.join(__dirname,'admin_manage.html'),'utf8');
     await page.route('**/*',async route=>{
@@ -39,8 +39,14 @@ async function run() {
         return route.fulfill({json:{id:'preview-1',profile:'WIM preserve',source:'Custom WIM',warning:'只格式化所选 Windows 分区，保留其他分区，更新同盘 EFI。',
           targets:[{serial:'TEST-LAPTOP',boot_code:'ABC123',disk,partitions:{windows:disk.partitions[0]}}]}});
       }
+      if(url.pathname==='/pc-deploy/api/enrollments/'+'a'.repeat(64)+'/extend'){
+        assert.equal(request.method(),'POST');
+        assert.equal(request.headers()['x-csrf-token'],'fixture-csrf');
+        extensions++;
+        return route.fulfill({json:{ok:true,expires_at:1793952000}});
+      }
       if(url.pathname==='/pc-deploy/api/dashboard') return route.fulfill({json:fixture||{devices:[],sources:[],profiles:[],jobs:[],events:[],settings,
-        boot_files:{wimboot:false,'boot.wim':false,BCD:false,'boot.sdi':false},server_time:1793347200}});
+        boot_files:{wimboot:false,'boot.wim':false,BCD:false,'boot.sdi':false},enrollments:[{id:'a'.repeat(64),expires_at:1793433600,uses:1}],server_time:1793347200}});
       if(url.pathname==='/pc-deploy/api/settings'){
         assert.equal(request.headers()['x-csrf-token'],'fixture-csrf');
         const payload=request.postDataJSON();
@@ -76,6 +82,10 @@ async function run() {
       assert.equal(page.url(),'http://ad-menu.test/admin/manage');checks++;
       assert.ok(await page.locator(`[data-deploy-view=${view}]`).evaluate(e=>e.classList.contains('active')));checks++;
     }
+    assert.ok((await frame.locator('#page-content').textContent()).includes('登记凭据有效期 7 天'));checks++;
+    await frame.locator('[data-action=extend-enrollment]').click();
+    await page.waitForFunction(()=>document.getElementById('pcDeployFrame').contentDocument?.getElementById('toast')?.textContent.startsWith('登记包已续期至'));
+    assert.equal(extensions,1);checks++;
     await frame.locator('#public-url').fill('http://192.0.2.10/pc-deploy');
     await frame.locator('#settings-form [type=submit]').click();
     await page.waitForFunction(()=>document.getElementById('pcDeployFrame').contentDocument?.getElementById('toast')?.textContent==='设置已保存');

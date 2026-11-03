@@ -29,6 +29,7 @@ from .deployment import (ACTIVE, ERRORS, STATES, Invalid, answer_file, canonical
 from .storage import Store
 
 ROOT = Path(__file__).parent
+ENROLLMENT_TTL = 7 * 24 * 3600
 
 
 def token_hash(value):
@@ -264,11 +265,14 @@ def register_pc_deploy(host_app, current_user, touch_session):
                                  state=r['state'], state_name=STATES[r['state']], created=r['created'],
                                  updated=r['updated'], stale=r['state'] in ACTIVE and now-r['updated'] > 600))
             settings = {k: store.setting(c, k) for k in ('public_url', 'enabled', 'concurrency', 'ca_pem')}
+            enrollments = [dict(id=r['token_hash'], expires_at=r['expires'], uses=r['uses'])
+                           for r in c.execute('SELECT * FROM enrollments WHERE expires>? AND uses<500 '
+                                              'ORDER BY expires DESC', (now,))]
             logs = [dict(r) for r in c.execute('SELECT * FROM events ORDER BY id DESC LIMIT 100')]
         boot = store.root / 'boot'
         files = {n: (boot / n).is_file() for n in ('wimboot', 'boot.wim', 'BCD', 'boot.sdi')}
         return jsonify(devices=devices, sources=sources, profiles=profiles, jobs=jobs, settings=settings,
-                       events=logs, boot_files=files, server_time=now)
+                       events=logs, boot_files=files, server_time=now, enrollments=enrollments)
 
     @app.post('/api/sources')
     @app.put('/api/sources/<identity>')
@@ -481,12 +485,14 @@ def register_pc_deploy(host_app, current_user, touch_session):
             if loopback:
                 raise Invalid('先填写目标电脑可访问的平台地址，不能使用本机回环地址')
             token = secrets.token_urlsafe(40)
-            c.execute('DELETE FROM enrollments WHERE expires<?', (time.time(),))
-            c.execute('INSERT INTO enrollments VALUES(?,?,0)', (token_hash(token), time.time()+24*3600))
+            now = time.time()
+            expires = now + ENROLLMENT_TTL
+            c.execute('DELETE FROM enrollments WHERE expires<?', (now,))
+            c.execute('INSERT INTO enrollments VALUES(?,?,0)', (token_hash(token), expires))
             cfg = dict(server_url=url, allow_http=http_allowed() and urlsplit(url).scheme == 'http',
-                       enrollment_token=token, expires_at=time.time()+24*3600,
+                       enrollment_token=token, expires_at=expires,
                        ca_pem=store.setting(c, 'ca_pem', ''))
-            event(c, 'bootstrap', '已生成有效期 24 小时的客户端登记包；不含管理员或安装源密码')
+            event(c, 'bootstrap', '已生成有效期 7 天的客户端登记包；不含管理员或安装源密码')
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
             z.writestr('config.json', json.dumps(cfg, indent=2))
@@ -495,6 +501,21 @@ def register_pc_deploy(host_app, current_user, touch_session):
             z.write(ROOT / 'scripts' / 'Build-WinPE.ps1', 'Build-WinPE.ps1')
         buf.seek(0)
         return send_file(buf, mimetype='application/zip', as_attachment=True, download_name='pc-deploy-bootstrap.zip')
+
+    @app.post('/api/enrollments/<identity>/extend')
+    @admin
+    def extend_enrollment(identity):
+        if not re.fullmatch(r'[0-9a-f]{64}', identity):
+            raise Invalid('登记包编号无效')
+        now = time.time()
+        with store.connect(write=True) as c:
+            row = c.execute('SELECT * FROM enrollments WHERE token_hash=?', (identity,)).fetchone()
+            if not row or row['expires'] <= now or row['uses'] >= 500:
+                raise Invalid('登记包已过期、被撤销或达到登记上限，请重新下载')
+            expires = max(row['expires'], now + ENROLLMENT_TTL)
+            c.execute('UPDATE enrollments SET expires=? WHERE token_hash=?', (expires, identity))
+            event(c, 'bootstrap', '登记包 ' + identity[:12] + ' 已续期至至少 7 天后；现有 ISO 可继续使用')
+        return jsonify(ok=True, expires_at=expires)
 
     @app.post('/api/devices/<identity>/rearm')
     @admin
