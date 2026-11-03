@@ -243,4 +243,113 @@ if(-not $blocked) {throw 'Registration-only guard missing from WIM executor.'}
 $RegistrationOnly=$false
 $count++
 
+
+# Reconnect classification: distinguish transport outages from security/protocol/local failures.
+foreach ($case in @(
+    @{exception=[Net.WebException]::new('timeout',[Net.WebExceptionStatus]::Timeout);retry=$true},
+    @{exception=[Net.WebException]::new('dns',[Net.WebExceptionStatus]::NameResolutionFailure);retry=$true},
+    @{exception=[Net.WebException]::new('connect',[Net.WebExceptionStatus]::ConnectFailure);retry=$true},
+    @{exception=[Threading.Tasks.TaskCanceledException]::new('timeout');retry=$true},
+    @{exception=[Exception]::new('wrapper',[TimeoutException]::new('timeout'));retry=$true},
+    @{exception=[Net.WebException]::new('certificate',[Net.WebExceptionStatus]::TrustFailure);retry=$false},
+    @{exception=[Net.WebException]::new('tls',[Net.WebExceptionStatus]::SecureChannelFailure);retry=$false},
+    @{exception=[Exception]::new('outer',[Security.Authentication.AuthenticationException]::new('tls'));retry=$false},
+    @{exception=[IO.FileNotFoundException]::new('local failure');retry=$false},
+    @{exception=[FormatException]::new('invalid response');retry=$false}
+)) {
+    $record=[Management.Automation.ErrorRecord]::new($case.exception,'fixture',[Management.Automation.ErrorCategory]::NotSpecified,$null)
+    if((Test-TransientPlatformFailure $record) -ne $case.retry){throw 'Incorrect reconnect exception classification.'}
+    $count++
+}
+if($PSVersionTable.PSVersion.Major -ge 7) {
+    foreach($case in @(
+        @{exception=[Net.Http.HttpRequestException]::new('response ended');retry=$true},
+        @{exception=[Net.Http.HttpRequestException]::new('tls',[Security.Authentication.AuthenticationException]::new('certificate'));retry=$false}
+    )) {
+        $record=[Management.Automation.ErrorRecord]::new($case.exception,'http-client-fixture',[Management.Automation.ErrorCategory]::NotSpecified,$null)
+        if((Test-TransientPlatformFailure $record) -ne $case.retry){throw 'Incorrect PowerShell 7 transport classification.'}
+        $count++
+    }
+}
+foreach($status in @(400,401,403,404,408,409,410,422,429,500,502,503,504)) {
+    $exception=[Exception]::new('mock HTTP error')
+    $exception | Add-Member -NotePropertyName Response -NotePropertyValue ([pscustomobject]@{StatusCode=$status})
+    $record=[Management.Automation.ErrorRecord]::new($exception,'http-fixture',[Management.Automation.ErrorCategory]::NotSpecified,$null)
+    $expected=$status -in @(408,429,500,502,503,504)
+    if((Test-TransientPlatformFailure $record) -ne $expected){throw "Incorrect reconnect HTTP status: $status"}
+    $count++
+}
+foreach($route in @('/api/agent/register','/api/agent/poll')) {
+    & {
+        param($route)
+        $script:retryCalls=0;$script:payloadCalls=0
+        $delays=[Collections.Generic.List[int]]::new()
+        function Invoke-Platform {
+            param($Route,$Token,$Data)
+            if($Route -cne $route -or $Token -cne 'same-token' -or $Data.boot_id -cne 'same-boot' -or
+                $Data.sequence -ne ($script:retryCalls+1)) { throw 'Reconnect changed credentials or reused stale inventory.' }
+            $script:retryCalls++
+            if($script:retryCalls -le 5){throw [Net.WebException]::new('offline',[Net.WebExceptionStatus]::ConnectFailure)}
+            @{job=@{id='approved-once'}}
+        }
+        function Start-Sleep {param($Seconds) $delays.Add([int]$Seconds)}
+        $result=Invoke-WaitingPlatform $route 'same-token' {
+            $script:payloadCalls++
+            @{boot_id='same-boot';sequence=$script:payloadCalls}
+        }
+        if($result.job.id -cne 'approved-once' -or $script:retryCalls -ne 6 -or $script:payloadCalls -ne 6 -or
+            ($delays -join ',') -cne '5,10,20,30,30'){throw 'Reconnect/backoff did not recover correctly.'}
+        # A later outage starts at 5 seconds again.
+        $script:retryCalls=4;$script:payloadCalls=4;$delays.Clear()
+        $null=Invoke-WaitingPlatform $route 'same-token' {
+            $script:payloadCalls++
+            @{boot_id='same-boot';sequence=$script:payloadCalls}
+        }
+        if(($delays -join ',') -cne '5'){throw 'Reconnect delay did not reset after recovery.'}
+    } $route
+    $count++
+}
+# Non-transient authorization errors never sleep, re-register, or retry.
+& {
+    $script:fatalCalls=0;$script:fatalSleeps=0
+    function Invoke-Platform {
+        $script:fatalCalls++
+        $e=[Exception]::new('session revoked')
+        $e | Add-Member -NotePropertyName Response -NotePropertyValue ([pscustomobject]@{StatusCode=403})
+        throw $e
+    }
+    function Start-Sleep {$script:fatalSleeps++;throw 'Security error attempted automatic retry.'}
+    $stopped=$false
+    try {Invoke-WaitingPlatform '/api/agent/poll' 'token' {@{}} | Out-Null} catch {$stopped=$true}
+    if(-not $stopped -or $script:fatalCalls -ne 1 -or $script:fatalSleeps -ne 0){throw 'Authorization failure did not stop immediately.'}
+}
+$count++
+# Unsafe routes are rejected before any request. Inventory failures are not retried.
+& {
+    function Invoke-Platform {throw 'Unexpected request.'}
+    function Start-Sleep {throw 'Unexpected retry.'}
+    foreach($route in @('/api/agent/jobs/x/start','/api/agent/jobs/x/event','/api/agent/jobs/x/finish')) {
+        $stopped=$false
+        try {Invoke-WaitingPlatform $route 'token' {@{}} | Out-Null}
+        catch {$stopped=$_.Exception.Message -like 'Automatic reconnect is allowed only*'}
+        if(-not $stopped){throw 'An installation endpoint entered automatic retry.'}
+    }
+    $stopped=$false
+    try {Invoke-WaitingPlatform '/api/agent/poll' 'token' {throw [TimeoutException]::new('inventory failure')} | Out-Null}
+    catch {$stopped=$_.Exception.Message -eq 'inventory failure'}
+    if(-not $stopped){throw 'A local inventory failure was incorrectly retried.'}
+}
+$count+=4
+# Ctrl+C/cancellation during reconnect must remain effective.
+& {
+    $script:cancelCalls=0
+    function Invoke-Platform {$script:cancelCalls++;throw [TimeoutException]::new('offline')}
+    function Start-Sleep {throw [OperationCanceledException]::new('cancelled')}
+    $stopped=$false
+    try {Invoke-WaitingPlatform '/api/agent/poll' 'token' {@{}} | Out-Null}
+    catch {$stopped=$_.Exception -is [OperationCanceledException]}
+    if(-not $stopped -or $script:cancelCalls -ne 1){throw 'Cancellation was swallowed by the reconnect loop.'}
+}
+$count++
+
 Write-Output "$count PowerShell protection and parser checks passed. No disk command was executed."

@@ -25,6 +25,67 @@ function Invoke-Platform {
         -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($json)) -TimeoutSec 30
 }
 
+function Test-TransientPlatformFailure {
+    param([Management.Automation.ErrorRecord]$Failure)
+    $exception = $Failure.Exception
+    $retry = $false
+    $httpStatus = $null
+    # Windows PE uses Windows PowerShell 5.1; development also tests PowerShell 7.
+    for ($depth = 0; $exception -and $depth -lt 16; $depth++) {
+        if ($exception -is [Security.Authentication.AuthenticationException]) { return $false }
+        if ($exception.Response -and $exception.Response.StatusCode) {
+            $httpStatus = [int]$exception.Response.StatusCode
+        }
+        if ($exception -is [Net.WebException]) {
+            if ($exception.Status -in @([Net.WebExceptionStatus]::TrustFailure,
+                                      [Net.WebExceptionStatus]::SecureChannelFailure)) { return $false }
+            if ($exception.Status -in @([Net.WebExceptionStatus]::Timeout,
+                    [Net.WebExceptionStatus]::ConnectFailure, [Net.WebExceptionStatus]::ConnectionClosed,
+                    [Net.WebExceptionStatus]::NameResolutionFailure, [Net.WebExceptionStatus]::ProxyNameResolutionFailure,
+                    [Net.WebExceptionStatus]::ReceiveFailure, [Net.WebExceptionStatus]::SendFailure,
+                    [Net.WebExceptionStatus]::KeepAliveFailure)) { $retry = $true }
+        }
+        if ($exception.GetType().FullName -eq 'System.Net.Http.HttpRequestException') {
+            if ([string]$exception.HttpRequestError -in @('SecureConnectionError','UserAuthenticationError','VersionNegotiationError')) {
+                return $false
+            }
+            $retry = $true
+        }
+        if ($exception -is [TimeoutException] -or
+            $exception -is [Net.Sockets.SocketException] -or
+            $exception -is [Threading.Tasks.TaskCanceledException]) { $retry = $true }
+        $exception = $exception.InnerException
+    }
+    if ($null -ne $httpStatus) { return $httpStatus -in @(408, 429, 500, 502, 503, 504) }
+    return $retry
+}
+
+function Invoke-WaitingPlatform {
+    param([string]$Route, [string]$Token, [scriptblock]$DataFactory)
+    # Explicitly exclude installation authorization, events, completion, and every disk operation.
+    if ($Route -cnotin @('/api/agent/register', '/api/agent/poll')) {
+        throw 'Automatic reconnect is allowed only while registering or waiting for a task.'
+    }
+    $delay = 5
+    $reconnecting = $false
+    while ($true) {
+        # Re-read hardware before each attempt; inventory errors are not network errors.
+        $payload = & $DataFactory
+        try {
+            $response = Invoke-Platform $Route $Token $payload
+            if ($reconnecting) { Write-Host 'Connection restored. Continuing to wait for operator approval.' -ForegroundColor Green }
+            return $response
+        } catch {
+            if (-not (Test-TransientPlatformFailure $_)) { throw }
+            Write-Host ("Platform temporarily unreachable. Reconnecting in {0}s; no installation is being retried. Ctrl+C to stop." -f $delay) -ForegroundColor Yellow
+        }
+        # Cancellation interrupts the wait. Keep it outside the request catch.
+        Start-Sleep -Seconds $delay
+        $reconnecting = $true
+        $delay = [int][Math]::Min(30, $delay * 2)
+    }
+}
+
 function Get-Inventory {
     param([string]$BootId)
     $computer = Get-CimInstance Win32_ComputerSystem
@@ -454,7 +515,7 @@ $bootFile = Join-Path $PSScriptRoot 'boot-id.txt'
 if (-not (Test-Path -LiteralPath $bootFile)) { [IO.File]::WriteAllText($bootFile, [guid]::NewGuid().ToString()) }
 $bootId = [IO.File]::ReadAllText($bootFile).Trim()
 $RegistrationOnly = $RegistrationOnly -or ($cfg.registration_only -is [bool] -and $cfg.registration_only)
-$registration = Invoke-Platform '/api/agent/register' $cfg.enrollment_token (Get-Inventory $bootId)
+$registration = Invoke-WaitingPlatform '/api/agent/register' $cfg.enrollment_token { Get-Inventory $bootId }
 $token = $registration.token
 Write-Host ''
 Write-Host 'PC DEPLOY / Waiting for operator approval' -ForegroundColor Cyan
@@ -468,9 +529,11 @@ if ($RegistrationOnly) {
 $job = $null
 try {
     while ($true) {
-        $status = Get-Inventory $bootId
-        if ($RegistrationOnly) { $status.registration_only = $true }
-        $result = Invoke-Platform '/api/agent/poll' $token $status
+        $result = Invoke-WaitingPlatform '/api/agent/poll' $token {
+            $status = Get-Inventory $bootId
+            if ($RegistrationOnly) { $status.registration_only = $true }
+            $status
+        }
         if ($RegistrationOnly) {
             if ($result.job) {
                 throw 'Server returned an installation task to a registration-only client. Update the server; installation is blocked.'
