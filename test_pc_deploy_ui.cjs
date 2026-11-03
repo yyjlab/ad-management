@@ -11,8 +11,9 @@ async function run() {
     const page=await browser.newPage({viewport:{width:1440,height:1000}});
     const errors=[], requests=[];
     page.on('pageerror',error=>errors.push(error.message));
-    let role='super_admin',expired=false,saves=0,extensions=0,fixture=null,profilePayload=null,previewPayload=null;
+    let role='super_admin',expired=false,saves=0,extensions=0,policyPayload=null,validityPayload=null,mediaPayload=null,enrollmentExpires=1793433600,fixture=null,profilePayload=null,previewPayload=null;
     const settings={public_url:'http://ad-menu.test/pc-deploy',enabled:false,concurrency:2,ca_pem:''};
+    const media={builders:[{id:'test-builder',name:'测试制作电脑',online:true,template_name:'WinPE',driver_name:'ASIX'}],builds:[]};
     const adHtml=fs.readFileSync(path.join(__dirname,'admin_manage.html'),'utf8');
     await page.route('**/*',async route=>{
       const request=route.request(),url=new URL(request.url());
@@ -45,8 +46,25 @@ async function run() {
         extensions++;
         return route.fulfill({json:{ok:true,expires_at:1793952000}});
       }
+      if(url.pathname==='/pc-deploy/api/enrollment-policy'){
+        assert.equal(request.headers()['x-csrf-token'],'fixture-csrf');
+        policyPayload=request.postDataJSON();settings.enrollment_days=policyPayload.days;
+        return route.fulfill({json:{ok:true}});
+      }
+      if(url.pathname==='/pc-deploy/api/enrollments/'+'a'.repeat(64)+'/validity'){
+        validityPayload=request.postDataJSON();
+        enrollmentExpires=validityPayload.days===null?null:1793347200+validityPayload.days*86400;
+        return route.fulfill({json:{ok:true,expires_at:enrollmentExpires}});
+      }
+      if(url.pathname==='/pc-deploy/api/media'){
+        assert.equal(request.headers()['x-csrf-token'],'fixture-csrf');
+        mediaPayload=request.postDataJSON();
+        media.builds=[{id:'test-media',builder_id:'test-builder',state:'ready',registration_only:mediaPayload.registration_only,
+          created:1793347200,updated:1793347200,stage:'制作完成',enrollment_id:'a'.repeat(64),sha256:'b'.repeat(64)}];
+        return route.fulfill({json:{ok:true,id:'test-media'}});
+      }
       if(url.pathname==='/pc-deploy/api/dashboard') return route.fulfill({json:fixture||{devices:[],sources:[],profiles:[],jobs:[],events:[],settings,
-        boot_files:{wimboot:false,'boot.wim':false,BCD:false,'boot.sdi':false},enrollments:[{id:'a'.repeat(64),expires_at:1793433600,uses:1}],server_time:1793347200}});
+        boot_files:{wimboot:false,'boot.wim':false,BCD:false,'boot.sdi':false},enrollments:[{id:'a'.repeat(64),expires_at:enrollmentExpires,uses:1}],media,server_time:1793347200}});
       if(url.pathname==='/pc-deploy/api/settings'){
         assert.equal(request.headers()['x-csrf-token'],'fixture-csrf');
         const payload=request.postDataJSON();
@@ -84,12 +102,36 @@ async function run() {
     }
     assert.ok((await frame.locator('#page-content').textContent()).includes('登记凭据有效期 7 天'));checks++;
     await frame.locator('[data-action=extend-enrollment]').click();
-    await page.waitForFunction(()=>document.getElementById('pcDeployFrame').contentDocument?.getElementById('toast')?.textContent.startsWith('登记包已续期至'));
+    await page.waitForFunction(()=>document.getElementById('pcDeployFrame').contentDocument?.getElementById('toast')?.textContent.startsWith('登记包有效期：'));
     assert.equal(extensions,1);checks++;
     await frame.locator('#public-url').fill('http://192.0.2.10/pc-deploy');
     await frame.locator('#settings-form [type=submit]').click();
     await page.waitForFunction(()=>document.getElementById('pcDeployFrame').contentDocument?.getElementById('toast')?.textContent==='设置已保存');
     assert.equal(saves,1);checks++;
+    await frame.locator('#enrollment-policy-form [name=validity_mode]').selectOption('never');
+    assert.ok(await frame.locator('#enrollment-policy-form [name=days]').isDisabled());checks++;
+    await frame.locator('#enrollment-policy-form [type=submit]').click();
+    await page.waitForFunction(()=>document.getElementById('pcDeployFrame').contentDocument?.querySelector('#enrollment-policy-form [name=validity_mode]')?.value==='never');
+    assert.deepEqual(policyPayload,{days:null});checks++;
+    await frame.locator('[data-action=edit-enrollment]').click();
+    await frame.locator('#enrollment-validity-form [name=days]').fill('21');
+    await frame.locator('#enrollment-validity-form [type=submit]').click();
+    await frame.locator('#modal').waitFor({state:'hidden'});
+    assert.deepEqual(validityPayload,{days:21});checks++;
+    await frame.locator('[data-action=edit-enrollment]').click();
+    await frame.locator('#enrollment-validity-form [name=validity_mode]').selectOption('never');
+    await frame.locator('#enrollment-validity-form [type=submit]').click();
+    await frame.locator('#modal').waitFor({state:'hidden'});
+    assert.deepEqual(validityPayload,{days:null});checks++;
+    assert.ok((await frame.locator('#page-content').textContent()).includes('永不过期'));checks++;
+    await frame.locator('#media-form [name=builder_id]').selectOption('test-builder');
+    await frame.locator('#media-form [name=mode]').selectOption('registration');
+    await frame.locator('#media-form [name=include_drivers]').uncheck();
+    await frame.locator('#media-form [type=submit]').click();
+    await frame.locator('a[href="/pc-deploy/api/media/test-media/download"]').waitFor();
+    assert.deepEqual(mediaPayload,{builder_id:'test-builder',registration_only:true,include_drivers:false});checks++;
+    assert.ok((await frame.locator('#media-status').textContent()).includes('SHA256: '+'b'.repeat(64)));checks++;
+
     await page.evaluate(()=>window.dispatchEvent(new MessageEvent('message',{origin:location.origin,source:window,data:{type:'pc-deploy:view',view:'jobs'}})));
     assert.ok(await page.locator('[data-deploy-view=settings]').evaluate(e=>e.classList.contains('active')));checks++;
     await page.evaluate(()=>document.getElementById('pcDeployFrame').contentWindow.dispatchEvent(new MessageEvent('message',{origin:'https://untrusted.test',source:window,data:{type:'pc-deploy:navigate',view:'jobs'}})));

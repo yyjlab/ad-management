@@ -384,7 +384,7 @@ class PlatformTests(unittest.TestCase):
             c.execute('UPDATE enrollments SET expires=?',(time.time()-1,))
         self.assertEqual(self.post('/pc-deploy/api/agent/poll',inv,reg['token']).status_code,200)
         self.assertEqual(self.post('/pc-deploy/api/agent/register',inv,self.enrollment).status_code,400)
-        self.assertEqual(self.client.get('/pc-deploy/api/dashboard').json['enrollments'],[])
+        self.assertLess(self.client.get('/pc-deploy/api/dashboard').json['enrollments'][0]['expires_at'],time.time())
 
     def test_boot_file_allowlist(self):
         self.assertEqual(self.client.get('/pc-deploy/boot/secret.key').status_code,404)

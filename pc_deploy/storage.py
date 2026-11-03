@@ -31,6 +31,15 @@ CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, job_id TEXT, kind TEX
  message TEXT NOT NULL, created REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS enrollments (token_hash TEXT PRIMARY KEY, expires REAL NOT NULL,
  uses INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS media_builders (
+ id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE,
+ seen REAL NOT NULL, data TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS media_builds (
+ id TEXT PRIMARY KEY, builder_id TEXT NOT NULL REFERENCES media_builders(id),
+ state TEXT NOT NULL, data TEXT NOT NULL, secret TEXT NOT NULL,
+ created REAL NOT NULL, updated REAL NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS one_active_media_build ON media_builds(builder_id)
+ WHERE state IN ('queued','building','uploading');
 '''
 
 

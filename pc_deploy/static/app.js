@@ -40,6 +40,7 @@ async function refresh() {
     $('#live-badge').className = `badge ${data.settings.enabled ? 'good' : 'muted'}`;
     $('#last-updated').textContent = '更新于 ' + date(data.server_time);
     if (!(view === 'settings' && settingsDirty)) render();
+    else if ($('#media-status')) $('#media-status').innerHTML=renderMediaStatus();
   } catch (e) { $('#connection-error').textContent = '数据读取失败：' + e.message; $('#connection-error').hidden = false; }
   finally { busy = false; }
 }
@@ -93,13 +94,34 @@ function renderProfiles() {
 function renderJobs() {
   $('#page-content').innerHTML = `<div class="table-wrap">${data.jobs.length?`<table><thead><tr><th>设备</th><th>方案 / 目标盘</th><th>任务状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody>${data.jobs.map(j=>`<tr><td><span class="cell-title">${h(j.model)}</span><span class="cell-sub mono">${h(j.serial)}</span></td><td>${h(j.profile)}<span class="cell-sub">磁盘 ${j.disk.number} · ${h(size(j.disk.size_bytes))}</span></td><td>${badge(j.state)}${j.stale?'<span class="cell-sub error">长时间未回报，需现场核对</span>':''}</td><td>${h(date(j.created))}</td><td>${['queued','preflight'].includes(j.state)?`<button class="small" data-action="cancel-job" data-id="${h(j.id)}">取消任务</button>`:activeStates.includes(j.state)?`<button class="small" data-action="reconcile-job" data-id="${h(j.id)}">现场核对</button>`:'—'}</td></tr>`).join('')}</tbody></table>`:empty('暂无安装任务')}</div><div class="subheading"><h3>操作记录</h3><small>最近 100 条</small></div><div class="log-list">${data.events.map(e=>`<div class="log"><time>${h(date(e.created))}</time><span>${h(e.message)}</span></div>`).join('') || empty('暂无操作记录')}</div>`;
 }
+
+function validityLabel(days) { return days === null ? '永不过期' : (days ?? 7) + ' 天'; }
+function validityFields(days=7) {
+  return '<div class="field"><label>登记有效期</label><select name="validity_mode"><option value="limited" '+(days===null?'':'selected')+'>有限期（自定义天数）</option><option value="never" '+(days===null?'selected':'')+'>永不过期</option></select></div><div class="field"><label>有效天数</label><input name="days" type="number" min="1" max="3650" value="'+h(days??7)+'" '+(days===null?'disabled':'required')+'></div>';
+}
+function chosenValidity(f) { return {days:f.validity_mode==='never'?null:Number(f.days)}; }
 function renderEnrollments() {
   const items = data.enrollments || [];
-  return '<p class="modal-help">现有 ISO 可在到期前续期，无需重做；续期从点击时起至少保留 7 天。过期或达到 500 次登记上限需重新下载。</p>' + (items.length ? '<div class="table-wrap"><table><thead><tr><th>登记包编号</th><th>到期时间</th><th>已登记次数</th><th>操作</th></tr></thead><tbody>' + items.map(e=>'<tr><td class="mono">'+h(e.id.slice(0,12))+'</td><td>'+h(date(e.expires_at))+'</td><td>'+h(e.uses)+'</td><td><button class="small" data-action="extend-enrollment" data-id="'+h(e.id)+'">续期至至少 7 天后</button></td></tr>').join('')+'</tbody></table></div>' : '');
+  return '<form id="enrollment-policy-form">'+validityFields(data.settings.enrollment_days)+'<p class="modal-help">保存后用于新登记包和新 ISO。已有 ISO 在下方单独修改，无需重做。仅控制 PE 报到，不会自动装机或到期关机。</p><button type="submit">保存新包有效期</button></form>' +
+    (items.length ? '<div class="table-wrap"><table><thead><tr><th>登记包编号</th><th>到期时间</th><th>已登记次数</th><th>操作</th></tr></thead><tbody>' + items.map(e=>'<tr><td class="mono">'+h(e.id.slice(0,12))+'</td><td>'+h(e.expires_at===null?'永不过期':date(e.expires_at))+'</td><td>'+h(e.uses)+'</td><td><button class="small" data-action="edit-enrollment" data-id="'+h(e.id)+'">修改有效期</button> <button class="small" data-action="extend-enrollment" data-id="'+h(e.id)+'">续期至至少 7 天后</button> <button class="small" data-action="revoke-enrollment" data-id="'+h(e.id)+'">撤销</button></td></tr>').join('')+'</tbody></table></div>' : '');
+}
+function renderMediaStatus() {
+  const media=data.media||{builders:[],builds:[]}, labels={queued:'等待领取',building:'制作中',uploading:'上传中',ready:'可下载',failed:'失败 / 已结束'};
+  return '<div class="log-list">'+media.builders.map(b=>'<div class="log"><span>'+h(b.name)+' · '+(b.online?'在线':'离线 / 尚未安装')+'</span><span>'+h(b.template_name||'等待首次连接')+' · '+h(b.driver_name||'')+'</span><button class="small" data-action="revoke-builder" data-id="'+h(b.id)+'">停用制作端</button></div>').join('')+'</div>'+
+    (media.builds.length?'<div class="table-wrap"><table><thead><tr><th>制作任务</th><th>状态</th><th>操作</th></tr></thead><tbody>'+media.builds.map(j=>'<tr><td>'+h(j.id.slice(0,8))+' · '+(j.registration_only?'仅登记测试':'正常装机')+'<span class="cell-sub">'+h(date(j.created))+' · 登记包 '+h(j.enrollment_id.slice(0,12))+'</span></td><td>'+h(labels[j.state]||j.state)+'<span class="cell-sub">'+h(j.stage)+(j.stale?' · 长时间未回报，请检查制作电脑':'')+'</span></td><td>'+(j.state==='ready'?'<a class="button-link" href="'+API_BASE+'/api/media/'+encodeURIComponent(j.id)+'/download">下载 ISO</a><span class="cell-sub mono">SHA256: '+h(j.sha256)+'</span>':['queued','building','uploading'].includes(j.state)?'<button class="small" data-action="cancel-media" data-id="'+h(j.id)+'">结束制作记录</button>':'查看制作电脑的任务目录与 DISM 日志')+'</td></tr>').join('')+'</tbody></table></div>':'<p class="modal-help">暂无 ISO 制作任务。</p>');
+}
+function renderMedia() {
+  const builders=(data.media||{}).builders||[];
+  return '<section class="section" id="media-panel"><h3>一键制作 ISO</h3><button data-action="builder-package">首次使用：下载 Windows 制作端</button><p class="modal-help">首次在 Windows 电脑安装一次制作程序，选择已验证的 PE 模板和签名驱动。之后在这里点击制作即可，制作电脑需开机并已登录。制作不写入 U 盘。</p><form id="media-form"><div class="field"><label>Windows 制作电脑</label><select name="builder_id" required><option value="">选择在线制作电脑</option>'+builders.map(b=>'<option value="'+h(b.id)+'" '+(b.online?'':'disabled')+'>'+h(b.name)+(b.online?' · 在线':' · 离线')+'</option>').join('')+'</select></div><div class="field"><label>启动模式</label><select name="mode"><option value="install">正常装机（仍需选盘并确认任务）</option><option value="registration">仅登记测试</option></select></div><label class="check-label"><input name="include_drivers" type="checkbox" checked>额外注入制作端保存的签名驱动（PE 模板原有驱动始终保留）</label><p class="modal-help">本次使用已保存的登记有效期：'+h(validityLabel(data.settings.enrollment_days))+'。修改后先保存，再制作。</p><button type="submit" class="primary">一键制作 ISO</button></form><div id="media-status">'+renderMediaStatus()+'</div></section>';
+}
+async function downloadPackage(route,filename) {
+  const r=await fetch(API_BASE+route,{method:'POST',credentials:'same-origin',headers:{'X-CSRF-Token':csrf,'Content-Type':'application/json'},body:JSON.stringify({name:$('#field-builder_name')?.value||'Windows 制作电脑'})});
+  if(!r.ok)throw new Error((await r.json()).error||'下载失败');
+  const url=URL.createObjectURL(await r.blob()),a=document.createElement('a');a.href=url;a.download=filename;a.click();setTimeout(()=>URL.revokeObjectURL(url),3000);
 }
 function renderSettings() {
   const s = data.settings;
-  $('#page-content').innerHTML = `<div class="settings-layout"><div><form id="settings-form"><section class="section"><h3>部署服务器</h3><div class="field"><label for="public-url">客户端访问地址</label><input id="public-url" name="public_url" value="${h(s.public_url)}" type="url" required><small>内网支持 HTTP，也支持 HTTPS。填写客户端能够访问的完整平台地址。</small></div><div class="field"><label for="ca-pem">HTTPS 内部根 CA 公共证书（可选，PEM）</label><textarea id="ca-pem" name="ca_pem" placeholder="-----BEGIN CERTIFICATE-----">${h(s.ca_pem)}</textarea><small>使用公开信任证书可留空。不要上传私钥、PFX 或域管理员凭据。</small></div><div class="field"><label for="concurrency">同时安装上限</label><input id="concurrency" name="concurrency" type="number" min="1" max="16" value="${s.concurrency}" required></div></section><section class="section"><h3>执行保护</h3><label class="check-label"><input type="checkbox" name="enabled" ${s.enabled?'checked':''}>启用真实任务下发</label><p class="modal-help">关闭后不再授权新安装；已经启动的 Windows Setup 不会被强行中断。</p><label class="check-label"><input name="isolated_network_confirmed" type="checkbox">已确认是隔离的装机网络，安装源账号仅有读取权限</label><div class="field"><label for="enable-confirm">开启时输入 ENABLE</label><input id="enable-confirm" name="confirmation" autocomplete="off" placeholder="ENABLE"></div></section><div class="error" id="settings-error" role="alert"></div><button type="submit" class="primary">保存设置</button></form><section class="section"><h3>准备客户端</h3><button data-action="bootstrap">下载 WinPE 登记与构建包 ↓</button><p class="modal-help">登记凭据有效期 7 天；仅用于 PE 报到，不是装机倒计时。只构建 ISO，不格式化 U 盘；已有 Ventoy 可直接存放该 ISO。</p>${renderEnrollments()}</section></div><aside><h3>引导环境</h3><ul class="requirements"><li><span>支持架构</span><span>UEFI x64</span></li><li><span>网络模式</span><span>现有 iPXE / 备用 Ventoy</span></li><li><span>DHCP</span><span>不托管、不修改</span></li><li><span>Windows 安装</span><span>原版 Setup / 封装 WIM 还原</span></li>${Object.entries(data.boot_files).map(([k,v])=>`<li><span class="mono">${h(k)}</span><span>${v?'已准备':'尚未准备'}</span></li>`).join('')}</ul><p class="modal-help">启动文件需由你授权的 ADK / iPXE 环境准备，平台不自动下载或运行未知二进制。</p><a href="/boot.ipxe" download="boot.ipxe">下载网络启动脚本 ↓</a></aside></div>`;
+  $('#page-content').innerHTML = `<div class="settings-layout"><div><form id="settings-form"><section class="section"><h3>部署服务器</h3><div class="field"><label for="public-url">客户端访问地址</label><input id="public-url" name="public_url" value="${h(s.public_url)}" type="url" required><small>内网支持 HTTP，也支持 HTTPS。填写客户端能够访问的完整平台地址。</small></div><div class="field"><label for="ca-pem">HTTPS 内部根 CA 公共证书（可选，PEM）</label><textarea id="ca-pem" name="ca_pem" placeholder="-----BEGIN CERTIFICATE-----">${h(s.ca_pem)}</textarea><small>使用公开信任证书可留空。不要上传私钥、PFX 或域管理员凭据。</small></div><div class="field"><label for="concurrency">同时安装上限</label><input id="concurrency" name="concurrency" type="number" min="1" max="16" value="${s.concurrency}" required></div></section><section class="section"><h3>执行保护</h3><label class="check-label"><input type="checkbox" name="enabled" ${s.enabled?'checked':''}>启用真实任务下发</label><p class="modal-help">关闭后不再授权新安装；已经启动的 Windows Setup 不会被强行中断。</p><label class="check-label"><input name="isolated_network_confirmed" type="checkbox">已确认是隔离的装机网络，安装源账号仅有读取权限</label><div class="field"><label for="enable-confirm">开启时输入 ENABLE</label><input id="enable-confirm" name="confirmation" autocomplete="off" placeholder="ENABLE"></div></section><div class="error" id="settings-error" role="alert"></div><button type="submit" class="primary">保存设置</button></form><section class="section"><h3>准备客户端</h3><button data-action="bootstrap">下载 WinPE 登记与构建包 ↓</button><p class="modal-help">登记凭据有效期 ${h(validityLabel(s.enrollment_days))}；仅用于 PE 报到，不是装机倒计时。只构建 ISO，不格式化 U 盘；已有 Ventoy 可直接存放该 ISO。</p>${renderEnrollments()}</section>${renderMedia()}</div><aside><h3>引导环境</h3><ul class="requirements"><li><span>支持架构</span><span>UEFI x64</span></li><li><span>网络模式</span><span>现有 iPXE / 备用 Ventoy</span></li><li><span>DHCP</span><span>不托管、不修改</span></li><li><span>Windows 安装</span><span>原版 Setup / 封装 WIM 还原</span></li>${Object.entries(data.boot_files).map(([k,v])=>`<li><span class="mono">${h(k)}</span><span>${v?'已准备':'尚未准备'}</span></li>`).join('')}</ul><p class="modal-help">启动文件需由你授权的 ADK / iPXE 环境准备，平台不自动下载或运行未知二进制。</p><a href="/boot.ipxe" download="boot.ipxe">下载网络启动脚本 ↓</a></aside></div>`;
 }
 function modal(title, html) { $('#modal-title').textContent = title; $('#modal-body').innerHTML = html; $('#modal').showModal(); }
 function field(label, name, type='text', value='', extra='') { const id = `field-${name}`; return `<div class="field"><label for="${id}">${h(label)}</label><input id="${id}" name="${name}" type="${type}" value="${h(value)}" ${extra}></div>`; }
@@ -158,7 +180,7 @@ function deviceDetail(id) {
 async function downloadBootstrap() {
   const r = await fetch(API_BASE + '/api/bootstrap',{method:'POST',credentials:'same-origin',headers:{'X-CSRF-Token':csrf,'Content-Type':'application/json'},body:'{}'});
   if(!r.ok) throw new Error((await r.json()).error || '下载失败');
-  const url = URL.createObjectURL(await r.blob()), a = document.createElement('a'); a.href=url; a.download='pc-deploy-bootstrap.zip'; a.click(); setTimeout(()=>URL.revokeObjectURL(url),3000); toast('已下载登记包，有效期 7 天'); await refresh();
+  const url = URL.createObjectURL(await r.blob()), a = document.createElement('a'); a.href=url; a.download='pc-deploy-bootstrap.zip'; a.click(); setTimeout(()=>URL.revokeObjectURL(url),3000); toast('已下载登记包，有效期：'+validityLabel(data.settings.enrollment_days)); await refresh();
 }
 document.addEventListener('click', async e=>{
   const b=e.target.closest('[data-action],[data-view]'); if(!b)return;
@@ -173,17 +195,30 @@ document.addEventListener('click', async e=>{
     else if(a==='preview')await preview();
     else if(a==='view-jobs'){view='jobs';render();}
     else if(a==='bootstrap')await downloadBootstrap();
+    else if(a==='edit-enrollment'){
+      const entry=data.enrollments.find(item=>item.id===id);
+      const days=entry.expires_at===null?null:Math.max(1,Math.ceil((entry.expires_at-data.server_time)/86400));
+      modal('修改现有登记包有效期','<form id="enrollment-validity-form" data-id="'+h(id)+'"><p>仅修改此登记包，现有 ISO 无需重做。有限期从保存时重新计算。</p>'+validityFields(days)+'<button type="submit" class="primary">保存此包有效期</button></form>');
+    }
+    else if(a==='revoke-enrollment')modal('撤销登记包','<form id="revoke-enrollment-form" data-id="'+h(id)+'"><p>此包不能再用于新 PE 报到，已登记客户端不受影响。</p><button type="submit" class="primary">确认撤销此包</button></form>');
+    else if(a==='builder-package')modal('安装 Windows 制作端','<form id="builder-package-form">'+field('制作电脑名称','builder_name','text','','required maxlength="80"')+'<p>下载后解压，在 Windows 管理员 PowerShell 7 中运行 Install-Builder.ps1，完成一次性设置。</p><button type="submit" class="primary">下载安装包</button></form>');
+    else if(a==='revoke-builder'||a==='cancel-media')modal(a==='revoke-builder'?'停用制作端':'结束制作记录','<form id="media-action-form" data-id="'+h(id)+'" data-kind="'+h(a)+'"><p>停止发布该任务产物，不关机、不删除文件，也不修改其他任务。</p><button type="submit" class="primary">确认</button></form>');
+
     else if(a==='extend-enrollment'){
       b.disabled=true;
-      try { const result=await api('/api/enrollments/'+encodeURIComponent(id)+'/extend','POST',{}); toast('登记包已续期至 '+date(result.expires_at)+'，现有 ISO 可继续使用'); await refresh(); }
+      try { const result=await api('/api/enrollments/'+encodeURIComponent(id)+'/extend','POST',{}); toast('登记包有效期：'+(result.expires_at===null?'永不过期':date(result.expires_at))+'，现有 ISO 可继续使用'); await refresh(); }
       finally { b.disabled=false; }
     }
     else if(a==='cancel-job'||a==='reconcile-job')modal(a==='cancel-job'?'取消安装前任务':'现场核对后结束记录',`<form id="job-action-form" data-id="${h(id)}" data-kind="${a}"><p>${a==='cancel-job'?'仅允许取消尚未启动安装或还原的任务。':'请现场确认电脑状态。此操作只结束平台记录，不会停止电脑、恢复数据或重新安装。'}</p>${a==='reconcile-job'?field('输入 CHECKED','confirmation','text','','required pattern="CHECKED" autocomplete="off"'):''}<div id="form-error" class="error" role="alert"></div><div class="form-actions"><button type="button" data-action="close">返回</button><button class="primary" type="submit">确认</button></div></form>`);
   } catch(err){toast(err.message);}
 });
-document.addEventListener('input',e=>{if(e.target.closest('#settings-form'))settingsDirty=true;if(e.target.id==='search'){search=e.target.value;renderDeviceRows();}});
+document.addEventListener('input',e=>{if(e.target.closest('#settings-form,#enrollment-policy-form,#media-form'))settingsDirty=true;if(e.target.id==='search'){search=e.target.value;renderDeviceRows();}});
 document.addEventListener('change',async e=>{
   const el=e.target;
+  if(el.name==='validity_mode'){
+    const input=el.closest('form').querySelector('[name=days]');
+    input.disabled=el.value==='never';input.required=!input.disabled;
+  }
   if(el.dataset.device){el.checked?chosen.add(el.dataset.device):chosen.delete(el.dataset.device);el.closest('tr').classList.toggle('selected',el.checked);updateSelection();}
   if(el.dataset.disk){disks.set(el.dataset.disk,el.value);partitions.delete(el.dataset.disk);renderDeviceRows();}
   if(el.dataset.partition)partitions.set(el.dataset.partition,el.value);
@@ -201,6 +236,12 @@ document.addEventListener('submit',async e=>{
     if(form.id==='source-form'){const m=JSON.parse(f.manifest);m.password=f.password;await api('/api/sources'+(form.dataset.id?'/'+form.dataset.id:''),form.dataset.id?'PUT':'POST',m);}
     else if(form.id==='profile-form'){f.image_index=Number(f.image_index);f.system_gib=Number(f.system_gib||0);f.clear_product_key=!!f.clear_product_key;await api('/api/profiles'+(form.dataset.id?'/'+form.dataset.id:''),form.dataset.id?'PUT':'POST',f);}
     else if(form.id==='commit-form'){await api('/api/jobs/commit','POST',{preview_id:previewId,confirmation:f.confirmation,physical_confirmed:!!f.physical_confirmed});chosen.clear();view='jobs';}
+    else if(form.id==='enrollment-policy-form'){await api('/api/enrollment-policy','POST',chosenValidity(f));settingsDirty=false;}
+    else if(form.id==='enrollment-validity-form')await api('/api/enrollments/'+encodeURIComponent(form.dataset.id)+'/validity','POST',chosenValidity(f));
+    else if(form.id==='revoke-enrollment-form')await api('/api/enrollments/'+encodeURIComponent(form.dataset.id)+'/revoke','POST',{});
+    else if(form.id==='media-form'){await api('/api/media','POST',{builder_id:f.builder_id,registration_only:f.mode==='registration',include_drivers:!!f.include_drivers});settingsDirty=false;}
+    else if(form.id==='builder-package-form'){await downloadPackage('/api/builders/package','pc-deploy-builder.zip');}
+    else if(form.id==='media-action-form')await api(form.dataset.kind==='revoke-builder'?'/api/builders/'+encodeURIComponent(form.dataset.id)+'/revoke':'/api/media/'+encodeURIComponent(form.dataset.id)+'/cancel','POST',{});
     else if(form.id==='settings-form'){await api('/api/settings','POST',{...f,concurrency:Number(f.concurrency),enabled:!!f.enabled,isolated_network_confirmed:!!f.isolated_network_confirmed});settingsDirty=false;toast('设置已保存');await refresh();return;}
     else if(form.id==='job-action-form'){await api(`/api/jobs/${form.dataset.id}/${form.dataset.kind==='cancel-job'?'cancel':'reconcile'}`,'POST',f);}
     else if(form.id==='rearm-form'){await api(`/api/devices/${form.dataset.id}/rearm`,'POST',f);}
