@@ -314,9 +314,11 @@ function editProfile(id) {
     field('AD 域 DNS 名称','join_domain','text',join?.domain || defaults.domain || '','maxlength="253" placeholder="例如 corp.example.com"')+
     field('目标 OU（可选）','join_ou','text',join?.ou_path || defaults.ou_path || '','maxlength="500" placeholder="留空使用域默认的电脑位置"')+
     field('AD 加域账号','join_user','text',join?.username || '','maxlength="120" autocomplete="off"')+
-    field('加域密码'+(p?.has_domain_join_password?'（留空保留）':''),'join_password','password','','maxlength="128" autocomplete="new-password"')+
+    '<div class="field"><label for="field-join_password">加域密码 <span id="domain-join-password-status" class="badge muted"></span></label><input id="field-join_password" name="join_password" type="password" maxlength="128" autocomplete="new-password" aria-describedby="domain-join-password-help"><small id="domain-join-password-help" aria-live="polite"></small></div>'+
     '</div></section>');
   $('#profile-form').dataset.joinPassword=String(p?.has_domain_join_password===true);
+  $('#profile-form').dataset.joinDomain=join?.domain || '';
+  $('#profile-form').dataset.joinUser=join?.username || '';
   updateDomainJoinMode();
   updateImages(p?.image_index);
 }
@@ -334,8 +336,23 @@ function updateDomainJoinMode() {
   $('#domain-join-fields').hidden=!enabled;
   $('#domain-join-fields').querySelectorAll('input').forEach(input=>{
     input.disabled=!enabled||!ready;
-    input.required=enabled && ready && (input.name==='join_domain'||input.name==='join_user'||(input.name==='join_password'&&form.dataset.joinPassword!=='true'));
+    input.required=enabled && ready && (input.name==='join_domain'||input.name==='join_user');
   });
+  updateDomainJoinPassword();
+}
+function updateDomainJoinPassword() {
+  const form=$('#profile-form'); if(!form)return;
+  const password=form.elements.join_password, saved=form.dataset.joinPassword==='true';
+  const reusable=saved && form.elements.join_domain.value.trim().toLowerCase()===form.dataset.joinDomain && form.elements.join_user.value.trim()===form.dataset.joinUser;
+  password.required=!password.disabled&&!reusable;
+  password.placeholder=reusable?'留空使用已保存的密码':'请输入加域密码';
+  const state=password.value?['blue',saved?'待更新':'待保存','已输入新密码，保存方案后生效。']:
+    reusable?['good','已保存','已保存密码，无需再次填写；留空继续使用。更换域名或加域账号后需重新填写，修改 OU 无需重填。']:
+    saved?['warn','需重新填写','域名或加域账号已更改，请重新填写密码后保存；修改 OU 无需重填。']:
+    ['muted','未设置','请填写该 AD 加域账号的密码，保存后无需重复填写。'];
+  $('#domain-join-password-status').className='badge '+state[0];
+  $('#domain-join-password-status').textContent=state[1];
+  $('#domain-join-password-help').textContent=state[2];
 }
 
 function updateImages(index) { const s = data.sources.find(s=>s.id===$('#source-choice').value); $('#image-choice').innerHTML=(s?.images||[]).map(i=>`<option value="${i.index}">${h(i.name)} · 索引 ${i.index} · ${i.build}</option>`).join(''); if(index) $('#image-choice').value=index; updateProfileMode(); }
@@ -415,7 +432,7 @@ document.addEventListener('click', async e=>{
     else if(a==='cancel-job'||a==='reconcile-job')modal(a==='cancel-job'?'取消安装前任务':'人工结束异常记录',`<form id="job-action-form" data-id="${h(id)}" data-kind="${a}"><p>${a==='cancel-job'?'仅允许取消尚未启动安装或还原的任务。':'客户端长时间未回报。请先现场确认电脑已停止安装，再结束这条记录。结束后将不再接受此任务的自动成功回报；不会停止电脑或重新安装。'}</p>${a==='reconcile-job'?field('输入 CHECKED','confirmation','text','','required pattern="CHECKED" autocomplete="off"'):''}<div id="form-error" class="error" role="alert"></div><div class="form-actions"><button type="button" data-action="close">返回</button><button class="primary" type="submit">确认</button></div></form>`);
   } catch(err){toast(err.message);}
 });
-document.addEventListener('input',e=>{if(e.target.closest('#settings-form,#enrollment-policy-form,#media-form'))settingsDirty=true;if(e.target.dataset.employee)employeeIds.set(e.target.dataset.employee,e.target.value.toUpperCase());if(e.target.id==='search'){search=e.target.value;renderDeviceRows();}});
+document.addEventListener('input',e=>{if(e.target.closest('#settings-form,#enrollment-policy-form,#media-form'))settingsDirty=true;if(e.target.dataset.employee)employeeIds.set(e.target.dataset.employee,e.target.value.toUpperCase());if(e.target.closest('#profile-form')&&['join_domain','join_user','join_password'].includes(e.target.name))updateDomainJoinPassword();if(e.target.id==='search'){search=e.target.value;renderDeviceRows();}});
 document.addEventListener('change',async e=>{
   const el=e.target;
   if(el.name==='validity_mode'){
@@ -428,6 +445,7 @@ document.addEventListener('change',async e=>{
   if(el.id==='filter'){filter=el.value;renderDeviceRows();}
   if(el.id==='profile-choice'){profileId=el.value;partitions.clear();renderDevices();}
   if(el.id==='domain-join-enabled'||el.id==='domain-join-http')updateDomainJoinMode();
+  if(el.closest('#profile-form')&&['join_domain','join_user','join_password'].includes(el.name))updateDomainJoinPassword();
   if(el.id==='select-all'){filteredDevices().filter(selectable).forEach(d=>el.checked?chosen.add(d.id):chosen.delete(d.id));renderDeviceRows();}
   if(el.id==='source-choice')updateImages();
   if(el.id==='disk-mode')updateProfileMode();
