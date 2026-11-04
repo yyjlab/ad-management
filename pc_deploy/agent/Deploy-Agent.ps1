@@ -19,17 +19,19 @@ function Assert-PlatformUrl {
 }
 
 function Invoke-Platform {
-    param([string]$Route, [string]$Token, $Data)
+    param([string]$Route, [string]$Token, $Data, [int]$TimeoutSec = 30)
     $json = ConvertTo-Json -InputObject $Data -Depth 16 -Compress
     Invoke-RestMethod -Uri ($script:Server + $Route) -Method Post -Headers @{Authorization="Bearer $Token"} `
-        -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($json)) -TimeoutSec 30
+        -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($json)) -TimeoutSec $TimeoutSec
 }
 
 function Send-DeploymentProgress {
-    param($Job, [string]$Token, [string]$Stage)
+    param($Job, [string]$Token, [string]$Stage, [Nullable[int]]$Percent)
     # After one-time authorization, reporting must not interrupt local recovery of the target disk.
+    $payload=@{stage=$Stage}
+    if ($null -ne $Percent) { $payload.percent=[int]$Percent }
     try {
-        Invoke-Platform "/api/agent/jobs/$($Job.id)/event" $Token @{stage=$Stage} | Out-Null
+        Invoke-Platform "/api/agent/jobs/$($Job.id)/event" $Token $payload -TimeoutSec 3 | Out-Null
     } catch {
         # Do not expose the HTTP exception, which may contain credentials.
         Write-Host ("Progress report unavailable at {0}. Continuing the authorized local installation." -f $Stage) -ForegroundColor Yellow
@@ -292,15 +294,74 @@ function Assert-PartitionBinding {
     }
 }
 
+function Get-DeploymentNativePercent {
+    param([string]$Path)
+    $stream=$null
+    try {
+        $stream=[IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+        # DISM redraws with carriage returns. Read only the recent output, including UTF-16 redirects.
+        $length=[int][Math]::Min(8192, $stream.Length)
+        if ($length -eq 0) { return $null }
+        $null=$stream.Seek(-$length, [IO.SeekOrigin]::End)
+        $buffer=New-Object byte[] $length
+        $read=$stream.Read($buffer, 0, $length)
+        $text=[Text.Encoding]::UTF8.GetString($buffer, 0, $read).Replace([string][char]0, '')
+        $values=[regex]::Matches($text, '\[[=\s]*(\d{1,3}(?:[.,]\d+)?)%[=\s]*\]')
+        for ($index=$values.Count-1; $index -ge 0; $index--) {
+            $percent=[double]::Parse($values[$index].Groups[1].Value.Replace(',', '.'), [Globalization.CultureInfo]::InvariantCulture)
+            if ($percent -ge 0 -and $percent -le 100) { return [int][Math]::Floor($percent) }
+        }
+    } catch { return $null }
+    finally { if ($stream) { $stream.Dispose() } }
+    return $null
+}
+
+function Write-DeploymentProgress {
+    param([Nullable[int]]$Percent)
+    if ($null -eq $Percent) {
+        $line='WIM restore [------------------------------] waiting for progress...'
+    } else {
+        $filled=[int][Math]::Floor([int]$Percent * 30 / 100)
+        $line='WIM restore [{0}{1}] {2,3}%' -f ('#' * $filled), ('-' * (30-$filled)), $Percent
+    }
+    Write-Host ([string][char]13 + $line.PadRight(72)) -NoNewline
+}
+
 function Invoke-DeploymentNative {
     param([string]$File, [string[]]$Arguments, [string]$Stage, $Job, [string]$Token)
     $log = Join-Path $PSScriptRoot ($Job.id + '-' + $Stage + '-' + [guid]::NewGuid().ToString('N'))
     $process = Start-Process -FilePath $File -ArgumentList $Arguments -PassThru -NoNewWindow `
         -RedirectStandardOutput ($log + '.log') -RedirectStandardError ($log + '.err')
-    while (-not $process.WaitForExit(10000)) {
-        try { Invoke-Platform "/api/agent/jobs/$($Job.id)/event" $Token @{stage=$Stage} | Out-Null } catch { }
+    # Cache before exit: PowerShell 5.1 otherwise returns a null ExitCode for redirected processes.
+    $null=$process.Handle
+    $percent=$null
+    $lastReported=$null
+    $reportClock=[Diagnostics.Stopwatch]::StartNew()
+    if ($Stage -eq 'applying') { Write-DeploymentProgress $null }
+    while (-not $process.WaitForExit(500)) {
+        if ($Stage -eq 'applying') {
+            $current=Get-DeploymentNativePercent ($log + '.log')
+            if ($null -ne $current -and ($null -eq $percent -or $current -gt $percent)) {
+                $percent=$current
+                Write-DeploymentProgress $percent
+            }
+        }
+        # Heartbeats remain useful when DISM pauses; only stage changes become operation logs.
+        if ($reportClock.ElapsedMilliseconds -ge 10000 -or
+            ($percent -ne $lastReported -and $reportClock.ElapsedMilliseconds -ge 5000)) {
+            Send-DeploymentProgress $Job $Token $Stage -Percent $percent
+            $lastReported=$percent
+            $reportClock.Restart()
+        }
     }
     $process.WaitForExit()
+    if ($Stage -eq 'applying') {
+        if ($process.ExitCode -eq 0) {
+            Write-DeploymentProgress 100
+            Send-DeploymentProgress $Job $Token $Stage -Percent 100
+        }
+        Write-Host ''
+    }
     if ($process.ExitCode -ne 0) {
         $failure = [Management.Automation.ErrorRecord]::new(
             [InvalidOperationException]::new("Deployment tool failed at $Stage (exit code $($process.ExitCode)). No automatic retry."),

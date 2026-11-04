@@ -91,8 +91,20 @@ function renderSources() {
 function renderProfiles() {
   $('#page-content').innerHTML = data.profiles.length ? `<div class="record-grid">${data.profiles.map(p=>`<article class="record"><div class="record-top"><h3>${h(p.name)}</h3><span class="badge good">UEFI / GPT</span></div><dl><dt>安装源</dt><dd>${h(data.sources.find(s=>s.id===p.source_id)?.name || '安装源不存在')}</dd><dt>镜像索引</dt><dd>${p.image_index}</dd><dt>分区方案</dt><dd>${p.disk_mode==='system_partition'?'保留分区布局，仅还原所选 Windows 分区':(p.system_gib?`C 盘 ${p.system_gib} GiB + D 盘剩余空间`:'单 C 盘，使用可用空间')}<br><small>${p.disk_mode==='system_partition'?'更新同盘 EFI 引导':'重建 EFI / MSR / 恢复分区'}</small></dd><dt>本地账号</dt><dd>${p.preserve_image_settings?'沿用镜像内账号':h(p.username)+' · 密码已保护'}</dd><dt>计算机名</dt><dd>${p.preserve_image_settings?'沿用镜像内名称':h(p.computer_prefix)+'-设备标识'}</dd></dl><div class="form-actions"><button class="small" data-action="edit-profile" data-id="${h(p.id)}">编辑方案</button></div></article>`).join('')}</div>` : empty('尚未配置装机方案','先添加安装源，再配置系统版本、分区和临时本地账号。');
 }
+function renderJobProgress(job) {
+  const progress = job.progress;
+  if (!progress) return '';
+  const stages = {applying:'正在还原 WIM',boot_files:'正在配置 UEFI 引导',awaiting_report:'等待新系统回报'};
+  if (!Object.hasOwn(stages, progress.stage)) return '';
+  const completed = job.state === 'completed', stopped = ['failed','cancelled'].includes(job.state);
+  const percent = completed ? 100 : progress.stage === 'applying' && Number.isInteger(progress.percent) && progress.percent >= 0 && progress.percent <= 100 ? progress.percent : null;
+  const label = completed ? '安装后系统已回报' : (stopped ? '已停止 · ' : '') + stages[progress.stage];
+  return '<div class="job-progress'+(stopped?' stopped':'')+'"><span>'+h(label)+(percent === null ? '' : ' · '+percent+'%')+'</span>' +
+    (stopped && percent === null ? '' : '<progress max="100"'+(percent === null ? '' : ' value="'+percent+'"')+' aria-label="'+h(label)+'"></progress>') +
+    (Number.isFinite(progress.updated) ? '<small>最后回报：'+h(date(progress.updated))+'</small>' : '')+'</div>';
+}
 function renderJobs() {
-  $('#page-content').innerHTML = `<div class="table-wrap">${data.jobs.length?`<table><thead><tr><th>设备</th><th>方案 / 目标盘</th><th>任务状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody>${data.jobs.map(j=>`<tr><td><span class="cell-title">${h(j.model)}</span><span class="cell-sub mono">${h(j.serial)}</span></td><td>${h(j.profile)}<span class="cell-sub">磁盘 ${j.disk.number} · ${h(size(j.disk.size_bytes))}</span></td><td>${badge(j.state)}${j.stale?'<span class="cell-sub error">长时间未回报，需现场核对</span>':''}</td><td>${h(date(j.created))}</td><td>${['queued','preflight'].includes(j.state)?`<button class="small" data-action="cancel-job" data-id="${h(j.id)}">取消任务</button>`:activeStates.includes(j.state)?`<button class="small" data-action="reconcile-job" data-id="${h(j.id)}">现场核对</button>`:'—'}</td></tr>`).join('')}</tbody></table>`:empty('暂无安装任务')}</div><div class="subheading"><h3>操作记录</h3><small>最近 100 条</small></div><div class="log-list">${data.events.map(e=>`<div class="log"><time>${h(date(e.created))}</time><span>${h(e.message)}</span></div>`).join('') || empty('暂无操作记录')}</div>`;
+  $('#page-content').innerHTML = `<div class="table-wrap">${data.jobs.length?`<table><thead><tr><th>设备</th><th>方案 / 目标盘</th><th>任务状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody>${data.jobs.map(j=>`<tr><td><span class="cell-title">${h(j.model)}</span><span class="cell-sub mono">${h(j.serial)}</span></td><td>${h(j.profile)}<span class="cell-sub">磁盘 ${j.disk.number} · ${h(size(j.disk.size_bytes))}</span></td><td>${badge(j.state)}${renderJobProgress(j)}${j.stale?'<span class="cell-sub error">长时间未回报，需现场核对</span>':''}</td><td>${h(date(j.created))}</td><td>${['queued','preflight'].includes(j.state)?`<button class="small" data-action="cancel-job" data-id="${h(j.id)}">取消任务</button>`:activeStates.includes(j.state)?`<button class="small" data-action="reconcile-job" data-id="${h(j.id)}">现场核对</button>`:'—'}</td></tr>`).join('')}</tbody></table>`:empty('暂无安装任务')}</div><div class="subheading"><h3>操作记录</h3><small>最近 100 条</small></div><div class="log-list">${data.events.map(e=>`<div class="log"><time>${h(date(e.created))}</time><span>${h(e.message)}</span></div>`).join('') || empty('暂无操作记录')}</div>`;
 }
 
 function validityLabel(days) { return days === null ? '永不过期' : (days ?? 7) + ' 天'; }

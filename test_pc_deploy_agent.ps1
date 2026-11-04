@@ -547,6 +547,120 @@ $count += 2
 }
 $count += 2
 
+# Parse actual redirected byte encodings and carriage-return redraws in isolated files.
+& {
+    $fixture=Join-Path ([IO.Path]::GetTempPath()) ('pcdeploy-progress-test-' + [guid]::NewGuid().ToString('N'))
+    [IO.Directory]::CreateDirectory($fixture) | Out-Null
+    try {
+        $path=Join-Path $fixture 'native.log'
+        foreach ($encoding in @([Text.Encoding]::UTF8,[Text.Encoding]::Unicode,[Text.Encoding]::BigEndianUnicode)) {
+            [IO.File]::WriteAllText($path, ("x" * 20000) + [char]13 + '[===== 12.5% =====]' + [char]13 + '[===== 43,9% =====]', $encoding)
+            if ((Get-DeploymentNativePercent $path) -ne 43) { throw 'DISM percent parsing failed for a redirected encoding.' }
+        }
+        [IO.File]::WriteAllText($path, '[==== 100.0% ====]', [Text.Encoding]::UTF8)
+        if ((Get-DeploymentNativePercent $path) -ne 100) { throw 'Final DISM percent not recognized.' }
+        foreach ($text in @('', 'No progress yet', '[==== 101% ====]', '[==== -1% ====]')) {
+            [IO.File]::WriteAllText($path, $text)
+            if ($null -ne (Get-DeploymentNativePercent $path)) { throw 'Invalid output was converted to a fake percentage.' }
+        }
+        if ($null -ne (Get-DeploymentNativePercent (Join-Path $fixture 'missing.log'))) { throw 'Missing log became fake progress.' }
+    } finally {
+        $root=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')+'\'
+        if (-not ([IO.Path]::GetFullPath($fixture)).StartsWith($root,[StringComparison]::OrdinalIgnoreCase) -or
+            -not ([IO.Path]::GetFileName($fixture)).StartsWith('pcdeploy-progress-test-')) { throw 'Unsafe fixture path.' }
+        [IO.Directory]::Delete($fixture,$true)
+    }
+}
+$count += 9
+& {
+    $lines=[Collections.Generic.List[string]]::new()
+    function Write-Host { param($Object,[switch]$NoNewline) $lines.Add([string]$Object) }
+    Write-DeploymentProgress 37
+    Write-DeploymentProgress $null
+    if (($lines -join '') -notlike '*###########-------------------*37%*' -or ($lines -join '') -notlike '*waiting for progress*') {
+        throw 'Console progress is not a readable hash bar.'
+    }
+}
+$count++
+& {
+    $sent=[Collections.Generic.List[object]]::new()
+    function Invoke-Platform { param($Route,$Token,$Data,$TimeoutSec) $sent.Add(@{data=$Data;timeout=$TimeoutSec}) }
+    Send-DeploymentProgress @{id='fixture'} 'fixture-token' 'applying' -Percent 37
+    Send-DeploymentProgress @{id='fixture'} 'fixture-token' 'boot_files'
+    if ($sent[0].data.percent -ne 37 -or $sent[0].timeout -ne 3 -or $sent[1].data.ContainsKey('percent')) {
+        throw 'Progress telemetry omitted the measured percent or imposed a percentage on another phase.'
+    }
+}
+$count++
+
+# The real executor is exercised with a fake process; it cannot run DISM, access storage or retry.
+foreach ($case in @(@{exit=0;offline=$false},@{exit=87;offline=$false},@{exit=0;offline=$true})) {
+    & {
+        param($case)
+        $script:nativeTick=0
+        $script:nativeStarts=0
+        $sent=[Collections.Generic.List[object]]::new()
+        $shown=[Collections.Generic.List[object]]::new()
+        function Start-Process {
+            param($FilePath,$ArgumentList,[switch]$PassThru,[switch]$NoNewWindow,$RedirectStandardOutput,$RedirectStandardError)
+            $script:nativeStarts++
+            $process=[pscustomobject]@{ExitCode=$case.exit}
+            $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
+                param($Timeout)
+                if (-not $PSBoundParameters.ContainsKey('Timeout')) { return }
+                $script:nativeTick++
+                if ($script:nativeTick -eq 1) { Start-Sleep -Milliseconds 5100; return $false }
+                if ($script:nativeTick -eq 2) { return $false }
+                return $true
+            }
+            $process
+        }
+        function Get-DeploymentNativePercent { if ($script:nativeTick -eq 1) { 43 } else { 18 } }
+        function Write-DeploymentProgress { param($Percent) $shown.Add($Percent) }
+        function Invoke-Platform {
+            param($Route,$Token,$Data,$TimeoutSec)
+            $sent.Add($Data)
+            if ($case.offline) { throw [TimeoutException]::new('Telemetry offline.') }
+        }
+        function Get-Content { param($LiteralPath,$Tail,$ErrorAction) 'Simulated native failure.' }
+        function Write-Host { }
+        $failed=$false
+        try { Invoke-DeploymentNative 'fixture.exe' @('/fixture') 'applying' @{id='progress-fixture'} 'fixture-token' }
+        catch { $failed=$true }
+        if ($failed -ne ($case.exit -ne 0) -or $script:nativeStarts -ne 1) { throw 'Progress handling retried or masked the native result.' }
+        if ($sent[0].percent -ne 43 -or $shown.Contains(18)) { throw 'Live progress was lost or moved backwards.' }
+        if ($case.exit -eq 0 -and $sent[$sent.Count-1].percent -ne 100) { throw 'Successful native completion did not publish 100 percent.' }
+        if ($case.exit -ne 0 -and @($sent | Where-Object { $_.percent -eq 100 }).Count) { throw 'Failed native tool falsely reported completion.' }
+    } $case
+    $count++
+}
+
+# Verify real redirected carriage-return output while the child is still running.
+# The child only prints fixture percentages; it never runs an imaging or disk tool.
+& {
+    $fixture=Join-Path ([IO.Path]::GetTempPath()) ('pcdeploy-stdio-test-' + [guid]::NewGuid().ToString('N'))
+    [IO.Directory]::CreateDirectory($fixture) | Out-Null
+    try {
+        $library=Join-Path $fixture 'Deploy-Agent.ps1'
+        [IO.File]::Copy("$PSScriptRoot\pc_deploy\agent\Deploy-Agent.ps1",$library)
+        . $library -LibraryOnly
+        $payloads=[Collections.Generic.List[object]]::new()
+        function Invoke-Platform { param($Route,$Token,$Data,$TimeoutSec) $payloads.Add($Data) }
+        $child="[Console]::Write('[==== 12.0% ====]' + [char]13); [Console]::Out.Flush(); Start-Sleep -Milliseconds 1500; [Console]::Write('[==== 43.0% ====]' + [char]13); [Console]::Out.Flush(); Start-Sleep -Milliseconds 5000"
+        $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($child))
+        Invoke-DeploymentNative (Get-Process -Id $PID).Path @('-NoProfile','-EncodedCommand',$encoded) 'applying' @{id='stdio-fixture'} 'fixture-token'
+        if (-not @($payloads | Where-Object { $_.percent -eq 43 }).Count -or $payloads[$payloads.Count-1].percent -ne 100) {
+            throw 'Real native stdout was buffered until exit; live percentage updates were lost.'
+        }
+    } finally {
+        $root=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')+'\'
+        if (-not ([IO.Path]::GetFullPath($fixture)).StartsWith($root,[StringComparison]::OrdinalIgnoreCase) -or
+            -not ([IO.Path]::GetFileName($fixture)).StartsWith('pcdeploy-stdio-test-')) { throw 'Unsafe fixture path.' }
+        [IO.Directory]::Delete($fixture,$true)
+    }
+}
+$count++
+
 Write-Output "$count PowerShell protection and parser checks passed. No disk command was executed."
 
 # Metadata-only quick inspection. All I/O is mocked.

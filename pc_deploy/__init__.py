@@ -264,13 +264,26 @@ def register_pc_deploy(host_app, current_user, touch_session):
                 jobs.append(dict(id=r['id'], device_id=r['device_id'], serial=d['target']['serial'],
                                  model=d['target']['model'], disk=d['target']['disk'], profile=d['profile']['name'],
                                  state=r['state'], state_name=STATES[r['state']], created=r['created'],
-                                 updated=r['updated'], stale=r['state'] in ACTIVE and now-r['updated'] > 600))
+                                 updated=r['updated'], stale=r['state'] in ACTIVE and now-r['updated'] > 600,
+                                 progress=d.get('progress')))
             settings = {k: store.setting(c, k) for k in ('public_url', 'enabled', 'concurrency', 'ca_pem')}
             settings['enrollment_days'] = store.setting(c, 'enrollment_days', 7)
             media = media_dashboard(c)
             enrollments = [dict(id=r['token_hash'], expires_at=None if r['expires'] == -1 else r['expires'], uses=r['uses'])
                            for r in c.execute('SELECT * FROM enrollments ORDER BY expires DESC')]
-            logs = [dict(r) for r in c.execute('SELECT * FROM events ORDER BY id DESC LIMIT 100')]
+            # Collapse legacy per-job progress heartbeats before applying the 100-record limit.
+            # Raw audit rows remain intact, including repeated messages separated by a real event.
+            logs = [dict(r) for r in c.execute("""
+                WITH ordered AS (
+                    SELECT *, LAG(kind) OVER (PARTITION BY job_id ORDER BY id DESC) AS newer_kind,
+                           LAG(message) OVER (PARTITION BY job_id ORDER BY id DESC) AS newer_message
+                    FROM events
+                )
+                SELECT id,job_id,kind,message,created FROM ordered
+                WHERE NOT (job_id IS NOT NULL AND kind='installing' AND message IN (?,?)
+                           AND newer_kind IS kind AND newer_message IS message)
+                ORDER BY id DESC LIMIT 100
+            """, ('正在还原封装 WIM', '正在配置系统引导与安装后回报'))]
         boot = store.root / 'boot'
         files = {n: (boot / n).is_file() for n in ('wimboot', 'boot.wim', 'BCD', 'boot.sdi')}
         return jsonify(devices=devices, sources=sources, profiles=profiles, jobs=jobs, settings=settings,
@@ -698,6 +711,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
         with store.connect(write=True) as c:
             dev = agent(c)
             row, job_data = agent_job(c, dev, identity, ('preflight', 'installing', 'awaiting_report'))
+            emit_event, track_progress = True, False
             if value.get('code') in ERRORS:
                 state, message = 'failed', ERRORS[value['code']]
                 detail = value.get('detail')
@@ -714,19 +728,37 @@ def register_pc_deploy(host_app, current_user, touch_session):
                     message += '\n客户端未上报有效错误详情；当前日志仅包含错误分类。'
             elif value.get('stage') == 'verifying' and row['state'] == 'preflight':
                 state, message = 'preflight', '正在核对安装源 SHA-256，尚未启动安装'
+                emit_event = False
             elif (value.get('stage') in ('applying', 'boot_files') and row['state'] == 'installing'
                   and job_data['source'].get('kind') == 'wim'):
                 state = 'installing'
+                track_progress = True
                 message = '正在还原封装 WIM' if value['stage'] == 'applying' else '正在配置系统引导与安装后回报'
-            elif value.get('stage') == 'awaiting_report' and row['state'] == 'installing':
+            elif value.get('stage') == 'awaiting_report' and row['state'] in ('installing', 'awaiting_report'):
+                track_progress = True
                 state, message = 'awaiting_report', (
                     'WIM 已还原并配置引导，等待新系统回报；非封装 OOBE 镜像需首次管理员登录'
                     if job_data['source'].get('kind') == 'wim' else 'Windows Setup 已返回，等待安装后系统回报')
             else:
                 raise Invalid('不允许的任务状态变更')
-            c.execute('UPDATE jobs SET state=?,updated=? WHERE id=?', (state, time.time(), identity))
-            c.execute('UPDATE devices SET last_seen=? WHERE id=?', (time.time(), dev['id']))
-            if value.get('stage') != 'verifying':
+            now = time.time()
+            if track_progress:
+                stage = value['stage']
+                previous = job_data.get('progress') or {}
+                order = {'applying': 0, 'boot_files': 1, 'awaiting_report': 2}
+                if order.get(previous.get('stage'), -1) > order[stage]:
+                    raise Invalid('任务阶段不能倒退')
+                percent = value.get('percent')
+                if percent is not None and (stage != 'applying' or type(percent) is not int or not 0 <= percent <= 100):
+                    raise Invalid('WIM 还原进度必须是 0 到 100 的整数')
+                old_percent = previous.get('percent') if previous.get('stage') == stage else None
+                if old_percent is not None:
+                    percent = old_percent if percent is None else max(old_percent, percent)
+                emit_event = previous.get('stage') != stage or row['state'] != state
+                job_data['progress'] = dict(stage=stage, percent=percent, updated=now)
+            c.execute('UPDATE jobs SET state=?,data=?,updated=? WHERE id=?', (state, canonical(job_data), now, identity))
+            c.execute('UPDATE devices SET last_seen=? WHERE id=?', (now, dev['id']))
+            if emit_event:
                 event(c, state, message, identity)
         return jsonify(ok=True)
 

@@ -642,6 +642,70 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(result.status_code, 200, result.json)
         return inv, reg, result.json['ids'][0]
 
+    def test_wim_progress_heartbeats_update_status_without_flooding_events(self):
+        inv, reg, job = self.wim_queued('system_partition')
+        self.post('/pc-deploy/api/agent/poll', inv, reg['token'])
+        self.post(f'/pc-deploy/api/agent/jobs/{job}/start', inv, reg['token'])
+        route = f'/pc-deploy/api/agent/jobs/{job}/event'
+        with self.store.connect() as c:
+            before = c.execute('SELECT COUNT(*) FROM events WHERE job_id=?', (job,)).fetchone()[0]
+        for percent in (None, 0, 15, 15, 37, 25, None, 100):
+            response = self.post(route, dict(stage='applying', percent=percent), reg['token'])
+            self.assertEqual(response.status_code, 200, response.json)
+        dashboard = self.client.get('/pc-deploy/api/dashboard').json
+        current = next(j for j in dashboard['jobs'] if j['id'] == job)
+        self.assertEqual(current['progress']['percent'], 100)
+        self.assertEqual(current['state'], 'installing')
+        self.assertEqual(current['updated'], current['progress']['updated'])
+        with self.store.connect() as c:
+            self.assertEqual(c.execute('SELECT COUNT(*) FROM events WHERE job_id=?', (job,)).fetchone()[0], before + 1)
+            self.assertEqual(c.execute('SELECT last_seen FROM devices WHERE id=?', (inv['hardware_uuid'],)).fetchone()[0], current['updated'])
+        for _ in range(3):
+            self.assertEqual(self.post(route, dict(stage='boot_files'), reg['token']).status_code, 200)
+        self.assertEqual(self.post(route, dict(stage='applying', percent=99), reg['token']).status_code, 400)
+        for _ in range(2):
+            self.assertEqual(self.post(route, dict(stage='awaiting_report'), reg['token']).status_code, 200)
+        dashboard = self.client.get('/pc-deploy/api/dashboard').json
+        current = next(j for j in dashboard['jobs'] if j['id'] == job)
+        self.assertEqual(current['state'], 'awaiting_report')
+        self.assertIsNone(current['progress']['percent'])
+        with self.store.connect() as c:
+            self.assertEqual(c.execute('SELECT COUNT(*) FROM events WHERE job_id=?', (job,)).fetchone()[0], before + 3)
+
+    def test_wim_progress_rejects_invalid_percent_before_mutating_status(self):
+        inv, reg, job = self.wim_queued()
+        self.post('/pc-deploy/api/agent/poll', inv, reg['token'])
+        self.post(f'/pc-deploy/api/agent/jobs/{job}/start', inv, reg['token'])
+        route = f'/pc-deploy/api/agent/jobs/{job}/event'
+        for percent in (-1, 101, True, False, 12.5, '30', [], {}):
+            with self.subTest(percent=percent):
+                self.assertEqual(self.post(route, dict(stage='applying', percent=percent), reg['token']).status_code, 400)
+        self.assertEqual(self.post(route, dict(stage='boot_files', percent=100), reg['token']).status_code, 400)
+        current = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
+        self.assertIsNone(current['progress'])
+        self.assertEqual(current['state'], 'installing')
+
+    def test_dashboard_collapses_legacy_heartbeats_before_log_limit_without_deleting(self):
+        with self.store.connect(write=True) as c:
+            c.execute('INSERT INTO events(job_id,kind,message,created) VALUES(?,?,?,?)',
+                      ('legacy-a', 'failed', 'older important diagnostic', time.time()))
+            for index in range(250):
+                for job in ('legacy-a', 'legacy-b'):
+                    c.execute('INSERT INTO events(job_id,kind,message,created) VALUES(?,?,?,?)',
+                              (job, 'installing', '正在还原封装 WIM', time.time()))
+            c.execute('INSERT INTO events(job_id,kind,message,created) VALUES(?,?,?,?)',
+                      ('legacy-a', 'note', 'keep this intervening event', time.time()))
+            c.execute('INSERT INTO events(job_id,kind,message,created) VALUES(?,?,?,?)',
+                      ('legacy-a', 'installing', '正在还原封装 WIM', time.time()))
+            count = c.execute('SELECT COUNT(*) FROM events').fetchone()[0]
+        events = self.client.get('/pc-deploy/api/dashboard').json['events']
+        self.assertIn('older important diagnostic', [e['message'] for e in events])
+        self.assertIn('keep this intervening event', [e['message'] for e in events])
+        self.assertEqual(sum(e['job_id'] == 'legacy-a' and e['kind'] == 'installing' for e in events), 2)
+        self.assertEqual(sum(e['job_id'] == 'legacy-b' and e['kind'] == 'installing' for e in events), 1)
+        with self.store.connect() as c:
+            self.assertEqual(c.execute('SELECT COUNT(*) FROM events').fetchone()[0], count)
+
     def test_failure_details_reach_dashboard_without_exposing_job_secrets(self):
         inv, reg, job = self.queued()
         self.post('/pc-deploy/api/agent/poll', inv, reg['token'])

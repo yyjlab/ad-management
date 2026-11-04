@@ -250,6 +250,45 @@ async function run() {
     await page.setViewportSize({width:390,height:844});
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));checks++;
 
+    fixture.jobs=[{id:'progress-job',device_id:'laptop-1',model:'Fixture Laptop',serial:'TEST-LAPTOP',disk,
+      profile:'WIM preserve',state:'installing',created:1793347200,updated:1793347300,stale:false,
+      progress:{stage:'applying',percent:37,updated:1793347300}}];
+    await page.setViewportSize({width:1440,height:1000});
+    await page.locator('#refresh').click();
+    const liveProgress=page.locator('.job-progress');
+    await liveProgress.waitFor();
+    assert.equal(await liveProgress.locator('progress').getAttribute('value'),'37');checks++;
+    assert.ok((await liveProgress.textContent()).includes('37%'));checks++;
+    fixture.jobs[0].progress.percent=100;
+    await page.locator('#refresh').click();
+    await page.waitForFunction(()=>document.querySelector('.job-progress progress')?.getAttribute('value')==='100');
+    assert.ok(!(await liveProgress.textContent()).includes('安装后系统已回报'));checks++;
+    fixture.jobs[0].progress={stage:'boot_files',percent:null,updated:1793347400};
+    await page.locator('#refresh').click();
+    await page.waitForFunction(()=>document.querySelector('.job-progress')?.textContent.includes('配置 UEFI'));
+    assert.equal(await liveProgress.locator('progress').getAttribute('value'),null);checks++;
+    fixture.jobs[0].state='awaiting_report';
+    fixture.jobs[0].progress.stage='awaiting_report';
+    await page.locator('#refresh').click();
+    await page.waitForFunction(()=>document.querySelector('.job-progress')?.textContent.includes('等待新系统回报'));
+    assert.ok((await liveProgress.textContent()).includes('最后回报'));checks++;
+    fixture.jobs[0].state='completed';
+    await page.locator('#refresh').click();
+    await page.waitForFunction(()=>document.querySelector('.job-progress')?.textContent.includes('安装后系统已回报'));
+    assert.equal(await liveProgress.locator('progress').getAttribute('value'),'100');checks++;
+    fixture.jobs[0].state='failed';
+    fixture.jobs[0].progress={stage:'applying',percent:43,updated:1793347400};
+    await page.locator('#refresh').click();
+    await page.locator('.job-progress.stopped').waitFor();
+    assert.equal(await liveProgress.locator('progress').getAttribute('value'),'43');checks++;
+    assert.ok((await liveProgress.textContent()).includes('已停止'));checks++;
+    fixture.jobs[0].progress=null;
+    await page.locator('#refresh').click();
+    await page.waitForFunction(()=>!document.querySelector('.job-progress'));
+    assert.equal(await page.locator('.job-progress').count(),0);checks++;
+    await page.setViewportSize({width:390,height:844});
+    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));checks++;
+
     assert.deepEqual(errors,[]);checks++;
     console.log(`${checks} nested menu, embedded page, HTTP form, role, message origin, lifecycle, mobile and WIM restore UI checks passed. No live system contacted.`);
   }finally{await browser.close();}
