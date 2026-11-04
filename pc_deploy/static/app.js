@@ -46,6 +46,35 @@ async function refresh() {
   finally { busy = false; }
 }
 function badge(state) { const colors = {completed:'good',failed:'bad',preflight:'blue',installing:'blue',awaiting_report:'warn',queued:'muted',cancelled:'muted'}; return `<span class="badge ${colors[state] || 'muted'}">${h(({queued:'等待领取',preflight:'安装前检查',installing:'Windows 安装中',awaiting_report:'等待安装后回报',completed:'安装后已回报',failed:'失败，需核对',cancelled:'已取消'})[state] || state)}</span>`; }
+function firmwareText(value) {
+  const text = String(value ?? '').trim();
+  return /^(unknown|none|not (?:specified|applicable)|default string|system (?:manufacturer|family|product name|version)|to be filled by o\.?e\.?m\.?)$/i.test(text) ? '' : text;
+}
+function deviceLabel(device) {
+  const raw = firmwareText(device.model) || firmwareText(device.product_name) || '型号未提供';
+  const vendor = firmwareText(device.manufacturer), family = firmwareText(device.system_family);
+  const version = firmwareText(device.product_version), code = /^[a-z0-9][a-z0-9._-]{2,30}$/i.test(raw);
+  const main = vendor.toLowerCase() === 'lenovo' && version ? version : raw;
+  const parts = [];
+  if (vendor && !main.toLowerCase().includes(vendor.toLowerCase())) parts.push(vendor);
+  if (code && family && !main.toLowerCase().includes(family.toLowerCase())) parts.push(family);
+  parts.push(main);
+  if (main !== raw && !main.toLowerCase().includes(raw.toLowerCase())) parts.push('('+raw+')');
+  return parts.join(' ');
+}
+function modelHint(device) {
+  return /^[a-z0-9][a-z0-9._-]{2,30}$/i.test(device.model || '') && !firmwareText(device.manufacturer) ?
+    '<span class="cell-sub">BIOS 上报型号；品牌 / 系列未上报</span>' : '';
+}
+function jobBadge(job) {
+  if (job.state !== 'failed' || !job.review) return badge(job.state);
+  return '<span class="badge '+(job.review.outcome === 'installed'?'good':'bad')+'">'+
+    (job.review.outcome === 'installed'?'人工核对已安装':'失败，已核对')+'</span><span class="cell-sub">原任务报告失败 · '+h(job.review.operator)+' · '+h(date(job.review.reviewed_at))+'</span>';
+}
+function reviewJob(id) {
+  const job = data.jobs.find(j=>j.id===id); if (!job || job.state !== 'failed') return;
+  modal('人工核对安装结果', '<form id="job-review-form" data-id="'+h(id)+'"><p><strong>'+h(deviceLabel(job))+'</strong><br><span class="mono">'+h(job.serial)+'</span></p><p class="modal-help">登记现场实际结果，保留原任务的失败日志。此操作不会重新安装或操作电脑硬盘。</p><div class="field"><label>现场结果</label><select name="outcome" required><option value="">请选择实际情况</option><option value="installed">已能进入 Windows</option><option value="not_installed">仍未安装完成</option></select></div><div class="field"><label>核对备注（可选）</label><input name="note" maxlength="500" value="'+h(job.review?.note || '')+'"></div><label class="check-label"><input name="physical_confirmed" type="checkbox" required>已现场核对这台电脑的序列号和实际安装结果</label><div id="form-error" class="error" role="alert"></div><div class="form-actions"><button type="button" data-action="close">返回</button><button class="primary" type="submit">保存核对结果</button></div></form>');
+}
 function currentJob(d) { return data.jobs.find(j => j.device_id === d.id && activeStates.includes(j.state)); }
 function selectable(d) { return d.online && !d.consumed && !currentJob(d) && d.firmware === 'UEFI' && d.architecture === 'amd64' && d.disks.some(x => x.eligible); }
 function empty(title, caption = '') { return `<div class="empty"><h3>${h(title)}</h3>${caption ? `<p>${h(caption)}</p>` : ''}</div>`; }
@@ -58,13 +87,13 @@ function render() {
   ({devices:renderDevices,sources:renderSources,profiles:renderProfiles,jobs:renderJobs,settings:renderSettings})[view]();
   if (embedded) window.parent.postMessage({type:'pc-deploy:view', view}, location.origin);
 }
-function filteredDevices() { return data.devices.filter(d => (!search || [d.serial,d.model,...d.macs].join(' ').toLowerCase().includes(search.toLowerCase())) && (filter === 'all' || (filter === 'online' ? d.online : filter === 'ready' ? selectable(d) : !d.online))); }
+function filteredDevices() { return data.devices.filter(d => (!search || [d.serial,deviceLabel(d),...d.macs].join(' ').toLowerCase().includes(search.toLowerCase())) && (filter === 'all' || (filter === 'online' ? d.online : filter === 'ready' ? selectable(d) : !d.online))); }
 function renderDevices() {
   const active = data.jobs.filter(j => activeStates.includes(j.state));
-  $('#page-content').innerHTML = `<div class="stats"><div class="stat"><span>已登记设备</span><strong>${data.devices.length}</strong></div><div class="stat"><span>在线待部署</span><strong class="good-text">${data.devices.filter(selectable).length}</strong></div><div class="stat"><span>进行中任务</span><strong>${active.length}</strong></div><div class="stat"><span>待处理失败</span><strong class="bad-text">${data.jobs.filter(j=>j.state==='failed').length}</strong></div></div>
+  $('#page-content').innerHTML = `<div class="stats"><div class="stat"><span>已登记设备</span><strong>${data.devices.length}</strong></div><div class="stat"><span>在线待部署</span><strong class="good-text">${data.devices.filter(selectable).length}</strong></div><div class="stat"><span>进行中任务</span><strong>${active.length}</strong></div><div class="stat"><span>待核对失败</span><strong class="bad-text">${data.jobs.filter(j=>j.state==='failed'&&!j.review).length}</strong></div></div>
     <div class="toolbar"><div class="toolbar-left"><input id="search" class="search" aria-label="搜索设备" placeholder="搜索序列号、机型或 MAC" value="${h(search)}"><select id="filter" class="filter" aria-label="设备状态"><option value="all">全部设备</option><option value="online">在线设备</option><option value="ready">可选设备</option><option value="offline">离线设备</option></select></div><div class="toolbar-right"><select id="profile-choice" class="profile-select" aria-label="装机方案"><option value="">选择装机方案</option>${data.profiles.map(p=>`<option value="${h(p.id)}">${h(p.name)}</option>`).join('')}</select><button id="preview-button" class="primary" data-action="preview">创建安装批次${chosen.size ? ` (${chosen.size})` : ''}</button></div></div>
     <div class="table-wrap"><table class="devices-table"><thead><tr><th class="check-cell"><input id="select-all" type="checkbox" aria-label="全选可选设备"></th><th>设备 / 整机序列号</th><th>启动环境</th><th>目标物理硬盘</th><th>状态</th><th>校验码 / 最近上线</th></tr></thead><tbody id="device-rows"></tbody></table><div id="device-empty"></div></div>
-    <div class="subheading"><h3>当前任务</h3><small>最多同时安装 ${data.settings.concurrency} 台 · 不自动重试</small></div><div class="queue-list">${active.length ? active.slice(0,8).map(j=>`<div class="queue-row"><div class="queue-main"><strong>${h(j.model)} · ${h(j.serial)}</strong><p>${h(j.profile)} · 硬盘 ${h(j.disk.number)} / ${h(size(j.disk.size_bytes))}${j.stale ? ' · 长时间未回报，请现场核对' : ''}</p></div><div class="queue-state">${badge(j.state)}<button class="small" data-action="view-jobs">查看任务</button></div></div>`).join('') : empty('暂无进行中的任务')}</div>`;
+    <div class="subheading"><h3>当前任务</h3><small>最多同时安装 ${data.settings.concurrency} 台 · 不自动重试</small></div><div class="queue-list">${active.length ? active.slice(0,8).map(j=>`<div class="queue-row"><div class="queue-main"><strong>${h(deviceLabel(j))} · ${h(j.serial)}</strong><p>${h(j.profile)} · 硬盘 ${h(j.disk.number)} / ${h(size(j.disk.size_bytes))}${j.stale ? ' · 长时间未回报，请现场核对' : ''}</p></div><div class="queue-state">${badge(j.state)}<button class="small" data-action="view-jobs">查看任务</button></div></div>`).join('') : empty('暂无进行中的任务')}</div>`;
   $('#filter').value = filter; $('#profile-choice').value = profileId; renderDeviceRows();
 }
 function selectedProfile() { return data.profiles.find(p=>p.id===profileId); }
@@ -79,7 +108,7 @@ function renderDeviceRows() {
   const list = filteredDevices();
   $('#device-rows').innerHTML = list.map(d=>{
     const job = currentJob(d), eligible = selectable(d);
-    return `<tr class="${chosen.has(d.id)?'selected':''}"><td class="check-cell"><input type="checkbox" data-device="${h(d.id)}" aria-label="选择 ${h(d.serial)}" ${chosen.has(d.id)?'checked':''} ${!eligible?'disabled':''}></td><td class="device-name"><button class="inline-link cell-title" data-action="device-detail" data-id="${h(d.id)}">${h(d.model)}</button><span class="cell-sub mono">${h(d.serial)}</span></td><td><span class="badge ${d.firmware==='UEFI'?'good':'warn'}">${h(d.firmware)} · ${h(d.architecture)}</span><span class="cell-sub">TPM 2.0 ${d.tpm2?'✓':'—'} / Secure Boot ${d.secure_boot?'✓':'—'}</span></td><td><select class="disk-select" aria-label="${h(d.serial)} 的目标硬盘" data-disk="${h(d.id)}" ${!eligible?'disabled':''}><option value="">请选择目标硬盘，不自动猜测</option>${d.disks.map(k=>`<option value="${h(k.key)}" ${disks.get(d.id)===k.key?'selected':''} ${!k.eligible?'disabled':''}>磁盘 ${k.number} · ${h(size(k.size_bytes))} · ${h(k.model || k.serial || k.bus)}${!k.eligible?'（不可选）':''}</option>`).join('')}</select>${partitionChoice(d)}<span class="cell-sub">${preservesPartitions()?'同盘 EFI 引导文件会更新':d.disks.filter(k=>k.eligible).length>1?'多硬盘：只清除手动选中的这一块':d.disks.every(k=>!k.eligible)?'没有符合保护规则的内置硬盘':'所选物理盘上的全部分区会被清空'}</span></td><td>${job?badge(job.state):`<span class="badge ${d.online?'good':'muted'}">${d.online?(d.consumed?'本次启动已执行':'等待确认'):'离线'}</span>`}</td><td><span class="mono">${h(d.boot_code)}</span><span class="cell-sub">${h(date(d.last_seen))}</span></td></tr>`;
+    return `<tr class="${chosen.has(d.id)?'selected':''}"><td class="check-cell"><input type="checkbox" data-device="${h(d.id)}" aria-label="选择 ${h(d.serial)}" ${chosen.has(d.id)?'checked':''} ${!eligible?'disabled':''}></td><td class="device-name"><button class="inline-link cell-title" data-action="device-detail" data-id="${h(d.id)}">${h(deviceLabel(d))}</button><span class="cell-sub mono">${h(d.serial)}</span>${modelHint(d)}</td><td><span class="badge ${d.firmware==='UEFI'?'good':'warn'}">${h(d.firmware)} · ${h(d.architecture)}</span><span class="cell-sub">TPM 2.0 ${d.tpm2?'✓':'—'} / Secure Boot ${d.secure_boot?'✓':'—'}</span></td><td><select class="disk-select" aria-label="${h(d.serial)} 的目标硬盘" data-disk="${h(d.id)}" ${!eligible?'disabled':''}><option value="">请选择目标硬盘，不自动猜测</option>${d.disks.map(k=>`<option value="${h(k.key)}" ${disks.get(d.id)===k.key?'selected':''} ${!k.eligible?'disabled':''}>磁盘 ${k.number} · ${h(size(k.size_bytes))} · ${h(k.model || k.serial || k.bus)}${!k.eligible?'（不可选）':''}</option>`).join('')}</select>${partitionChoice(d)}<span class="cell-sub">${preservesPartitions()?'同盘 EFI 引导文件会更新':d.disks.filter(k=>k.eligible).length>1?'多硬盘：只清除手动选中的这一块':d.disks.every(k=>!k.eligible)?'没有符合保护规则的内置硬盘':'所选物理盘上的全部分区会被清空'}</span></td><td>${job?badge(job.state):`<span class="badge ${d.online?'good':'muted'}">${d.online?(d.consumed?'本次启动已执行':'等待确认'):'离线'}</span>`}</td><td><span class="mono">${h(d.boot_code)}</span><span class="cell-sub">${h(date(d.last_seen))}</span></td></tr>`;
   }).join('');
   $('#device-empty').innerHTML = list.length ? '' : empty(data.devices.length?'没有匹配的设备':'等待设备进入 WinPE',data.devices.length?'':'连接网线后，还需从网络或 Ventoy 启动部署环境。');
   $('#select-all').checked = list.filter(selectable).length>0 && list.filter(selectable).every(d=>chosen.has(d.id));
@@ -133,7 +162,7 @@ function restoreJobProgress(root, previous) {
 }
 function renderJobProgress(job) {
   const progress = job.progress;
-  if (!progress) return '';
+  if (!progress || (job.state === 'failed' && job.review)) return '';
   const stages = {applying:'正在还原 WIM',boot_files:'WIM 还原已结束 · 正在配置 UEFI 引导',awaiting_report:'等待新系统回报'};
   if (!Object.hasOwn(stages, progress.stage)) return '';
   const completed = job.state === 'completed', stopped = ['failed','cancelled'].includes(job.state);
@@ -149,7 +178,7 @@ function renderJobProgress(job) {
 function renderLogEvents(events) {
   const kinds = {queued:['任务确认','muted'],preflight:['安装前检查','blue'],installing:['安装过程','blue'],
     awaiting_report:['等待回报','warn'],completed:['完成','good'],failed:['失败','bad'],cancelled:['取消','muted'],
-    security:['执行设置','warn'],device:['设备登记','muted'],source:['安装源','muted'],profile:['装机方案','muted'],bootstrap:['启动包','muted']};
+    security:['执行设置','warn'],device:['设备登记','muted'],source:['安装源','muted'],profile:['装机方案','muted'],bootstrap:['启动包','muted'],review:['人工核对','muted']};
   return events.map(e => {
     const [label,tone] = Object.hasOwn(kinds,e.kind) ? kinds[e.kind] : ['操作','muted'];
     return '<div class="log event-'+tone+'"><time>'+h(date(e.created))+'</time><div class="log-content"><span class="badge '+tone+'">'+h(label)+'</span><span class="log-message">'+h(e.message)+'</span></div></div>';
@@ -162,7 +191,7 @@ function renderJobLogs() {
   const scroll = $('#modal').scrollTop;
   const previous = captureJobProgress($('#job-log'));
   $('#job-log').innerHTML = (job ?
-    '<dl class="detail-grid"><div><dt>设备 / 整机序列号</dt><dd>'+h(job.model)+'<br><span class="mono">'+h(job.serial)+'</span></dd></div><div><dt>安装时间</dt><dd>'+renderJobTiming(job)+'</dd></div><div><dt>方案 / 目标盘</dt><dd>'+h(job.profile)+'<br>磁盘 '+h(job.disk.number)+' · '+h(size(job.disk.size_bytes))+'</dd></div><div><dt>任务状态</dt><dd>'+badge(job.state)+renderJobProgress(job)+'</dd></div></dl><p class="job-log-id">任务编号：<span class="mono">'+h(job.id)+'</span></p>' : '') +
+    '<dl class="detail-grid"><div><dt>设备 / 整机序列号</dt><dd>'+h(deviceLabel(job))+'<br><span class="mono">'+h(job.serial)+'</span></dd></div><div><dt>安装时间</dt><dd>'+renderJobTiming(job)+'</dd></div><div><dt>方案 / 目标盘</dt><dd>'+h(job.profile)+'<br>磁盘 '+h(job.disk.number)+' · '+h(size(job.disk.size_bytes))+'</dd></div><div><dt>任务状态</dt><dd>'+jobBadge(job)+renderJobProgress(job)+'</dd></div></dl><p class="job-log-id">任务编号：<span class="mono">'+h(job.id)+'</span></p>' : '') +
     '<div class="job-log-toolbar"><small>'+(current.before === null ? '最新记录在前 · 进行中每 8 秒刷新' : '正在查看历史记录')+'</small><div><button class="small" data-action="refresh-job-logs" '+(current.busy?'disabled':'')+'>'+(current.before === null?'刷新日志':'返回最新')+'</button> <button class="small" data-action="older-job-logs" '+(current.busy || !result?.next_before?'disabled':'')+'>更早记录</button></div></div>' +
     '<p id="job-log-error" class="error" role="alert" '+(current.error?'':'hidden')+'>'+h(current.error)+'</p><div class="log-list job-log-list">'+
     (result ? renderLogEvents(result.events) || empty('此任务暂无操作记录','尚未收到任务日志；已保存的记录不会因其他任务增多而消失。') : '<p class="modal-help">正在读取此任务日志…</p>')+'</div>';
@@ -194,7 +223,7 @@ async function openJobLogs(id) {
 }
 function renderJobs() {
   const previous = captureJobProgress($('#page-content'));
-  $('#page-content').innerHTML = `<div class="table-wrap">${data.jobs.length?`<table><thead><tr><th>设备</th><th>方案 / 目标盘</th><th>任务状态</th><th>安装时间 / 用时</th><th>操作</th></tr></thead><tbody>${data.jobs.map(j=>`<tr class="job-row" data-state="${h(j.state)}"><td><span class="cell-title">${h(j.model)}</span><span class="cell-sub mono">${h(j.serial)}</span></td><td>${h(j.profile)}<span class="cell-sub">磁盘 ${j.disk.number} · ${h(size(j.disk.size_bytes))}</span></td><td>${badge(j.state)}${renderJobProgress(j)}${j.stale?'<span class="cell-sub error">长时间未回报，需现场核对</span>':''}</td><td>${renderJobTiming(j)}</td><td>${['queued','preflight'].includes(j.state)?`<button class="small" data-action="cancel-job" data-id="${h(j.id)}">取消任务</button>`:activeStates.includes(j.state)?`<button class="small" data-action="reconcile-job" data-id="${h(j.id)}">现场核对</button>`:''} <button class="small job-log-button" data-action="job-logs" data-id="${h(j.id)}">查看日志</button></td></tr>`).join('')}</tbody></table>`:empty('暂无安装任务')}</div><div class="subheading"><h3>平台操作记录</h3><small>最近 100 条 · 任务日志请点击对应任务查看</small></div><div class="log-list">${renderLogEvents(data.events) || empty('暂无操作记录')}</div>`;
+  $('#page-content').innerHTML = `<div class="table-wrap">${data.jobs.length?`<table><thead><tr><th>设备</th><th>方案 / 目标盘</th><th>任务状态</th><th>安装时间 / 用时</th><th>操作</th></tr></thead><tbody>${data.jobs.map(j=>`<tr class="job-row" data-state="${h(j.state)}"><td><span class="cell-title">${h(deviceLabel(j))}</span><span class="cell-sub mono">${h(j.serial)}</span>${modelHint(j)}</td><td>${h(j.profile)}<span class="cell-sub">磁盘 ${j.disk.number} · ${h(size(j.disk.size_bytes))}</span></td><td>${jobBadge(j)}${renderJobProgress(j)}${j.stale?'<span class="cell-sub error">长时间未回报，需现场核对</span>':''}</td><td>${renderJobTiming(j)}</td><td>${['queued','preflight'].includes(j.state)?`<button class="small" data-action="cancel-job" data-id="${h(j.id)}">取消任务</button>`:j.state==='failed'?`<button class="small" data-action="review-job" data-id="${h(j.id)}">${j.review?'更新核对':'人工核对'}</button>`:activeStates.includes(j.state)&&j.stale?`<button class="small" data-action="reconcile-job" data-id="${h(j.id)}">结束异常记录</button>`:''} <button class="small job-log-button" data-action="job-logs" data-id="${h(j.id)}">查看日志</button></td></tr>`).join('')}</tbody></table>`:empty('暂无安装任务')}</div><div class="subheading"><h3>平台操作记录</h3><small>最近 100 条 · 任务日志请点击对应任务查看</small></div><div class="log-list">${renderLogEvents(data.events) || empty('暂无操作记录')}</div>`;
   restoreJobProgress($('#page-content'), previous);
   updateJobTimers();
 }
@@ -271,7 +300,7 @@ async function preview() {
 }
 function deviceDetail(id) {
   const d = data.devices.find(x=>x.id===id); if(!d)return;
-  modal('设备与物理硬盘', `<dl class="detail-grid"><div><dt>机型</dt><dd>${h(d.model)}</dd></div><div><dt>整机序列号</dt><dd class="mono">${h(d.serial)}</dd></div><div><dt>硬件 UUID</dt><dd class="mono">${h(d.hardware_uuid)}</dd></div><div><dt>屏幕校验码</dt><dd class="mono">${h(d.boot_code)}</dd></div><div><dt>内存</dt><dd>${h(size(d.ram_bytes))}</dd></div><div><dt>网卡 MAC</dt><dd class="mono">${h(d.macs.join(' / '))}</dd></div></dl><div class="table-wrap"><table class="modal-table"><thead><tr><th>编号 / 型号</th><th>硬盘序列号</th><th>容量 / 总线</th><th>保护状态</th></tr></thead><tbody>${d.disks.map(k=>`<tr><td>${k.number} / ${h(k.model)}</td><td class="mono">${h(k.serial||k.unique_id||'身份未知')}</td><td>${h(size(k.size_bytes))} / ${h(k.bus)}</td><td>${k.eligible?'允许手动选择':'禁止选择'}</td></tr>`).join('')}</tbody></table></div>`);
+  modal('设备与物理硬盘', `<dl class="detail-grid"><div><dt>机型</dt><dd>${h(deviceLabel(d))}</dd></div><div><dt>厂家 / 系列</dt><dd>${h(firmwareText(d.manufacturer)||'未上报')} / ${h(firmwareText(d.system_family)||'未上报')}</dd></div><div><dt>BIOS 型号 / 产品版本</dt><dd>${h(d.model)} / ${h(firmwareText(d.product_version)||'未上报')}</dd></div><div><dt>整机序列号</dt><dd class="mono">${h(d.serial)}</dd></div><div><dt>硬件 UUID</dt><dd class="mono">${h(d.hardware_uuid)}</dd></div><div><dt>屏幕校验码</dt><dd class="mono">${h(d.boot_code)}</dd></div><div><dt>内存</dt><dd>${h(size(d.ram_bytes))}</dd></div><div><dt>网卡 MAC</dt><dd class="mono">${h(d.macs.join(' / '))}</dd></div></dl><div class="table-wrap"><table class="modal-table"><thead><tr><th>编号 / 型号</th><th>硬盘序列号</th><th>容量 / 总线</th><th>保护状态</th></tr></thead><tbody>${d.disks.map(k=>`<tr><td>${k.number} / ${h(k.model)}</td><td class="mono">${h(k.serial||k.unique_id||'身份未知')}</td><td>${h(size(k.size_bytes))} / ${h(k.bus)}</td><td>${k.eligible?'允许手动选择':'禁止选择'}</td></tr>`).join('')}</tbody></table></div>`);
   if (d.consumed && !currentJob(d)) {
     const actions = document.createElement('div'); actions.className = 'form-actions';
     const button = document.createElement('button'); button.textContent = '允许重新登记';
@@ -293,6 +322,7 @@ document.addEventListener('click', async e=>{
     else if(a==='new-source'||a==='edit-source')editSource(id);
     else if(a==='new-profile'||a==='edit-profile')editProfile(id);
     else if(a==='device-detail')deviceDetail(id);
+    else if(a==='review-job')reviewJob(id);
     else if(a==='job-logs')await openJobLogs(id);
     else if(a==='refresh-job-logs')await loadJobLogs();
     else if(a==='older-job-logs' && jobLog?.result?.next_before)await loadJobLogs(jobLog.result.next_before);
@@ -314,7 +344,7 @@ document.addEventListener('click', async e=>{
       try { const result=await api('/api/enrollments/'+encodeURIComponent(id)+'/extend','POST',{}); toast('登记包有效期：'+(result.expires_at===null?'永不过期':date(result.expires_at))+'，现有 ISO 可继续使用'); await refresh(); }
       finally { b.disabled=false; }
     }
-    else if(a==='cancel-job'||a==='reconcile-job')modal(a==='cancel-job'?'取消安装前任务':'现场核对后结束记录',`<form id="job-action-form" data-id="${h(id)}" data-kind="${a}"><p>${a==='cancel-job'?'仅允许取消尚未启动安装或还原的任务。':'请现场确认电脑状态。此操作只结束平台记录，不会停止电脑、恢复数据或重新安装。'}</p>${a==='reconcile-job'?field('输入 CHECKED','confirmation','text','','required pattern="CHECKED" autocomplete="off"'):''}<div id="form-error" class="error" role="alert"></div><div class="form-actions"><button type="button" data-action="close">返回</button><button class="primary" type="submit">确认</button></div></form>`);
+    else if(a==='cancel-job'||a==='reconcile-job')modal(a==='cancel-job'?'取消安装前任务':'人工结束异常记录',`<form id="job-action-form" data-id="${h(id)}" data-kind="${a}"><p>${a==='cancel-job'?'仅允许取消尚未启动安装或还原的任务。':'客户端长时间未回报。请先现场确认电脑已停止安装，再结束这条记录。结束后将不再接受此任务的自动成功回报；不会停止电脑或重新安装。'}</p>${a==='reconcile-job'?field('输入 CHECKED','confirmation','text','','required pattern="CHECKED" autocomplete="off"'):''}<div id="form-error" class="error" role="alert"></div><div class="form-actions"><button type="button" data-action="close">返回</button><button class="primary" type="submit">确认</button></div></form>`);
   } catch(err){toast(err.message);}
 });
 document.addEventListener('input',e=>{if(e.target.closest('#settings-form,#enrollment-policy-form,#media-form'))settingsDirty=true;if(e.target.id==='search'){search=e.target.value;renderDeviceRows();}});
@@ -348,6 +378,7 @@ document.addEventListener('submit',async e=>{
     else if(form.id==='builder-package-form'){await downloadPackage('/api/builders/package','pc-deploy-builder.zip');}
     else if(form.id==='media-action-form')await api(form.dataset.kind==='revoke-builder'?'/api/builders/'+encodeURIComponent(form.dataset.id)+'/revoke':'/api/media/'+encodeURIComponent(form.dataset.id)+'/cancel','POST',{});
     else if(form.id==='settings-form'){await api('/api/settings','POST',{...f,concurrency:Number(f.concurrency),enabled:!!f.enabled,isolated_network_confirmed:!!f.isolated_network_confirmed});settingsDirty=false;toast('设置已保存');await refresh();return;}
+    else if(form.id==='job-review-form')await api('/api/jobs/'+encodeURIComponent(form.dataset.id)+'/review','POST',{outcome:f.outcome,note:f.note,physical_confirmed:!!f.physical_confirmed});
     else if(form.id==='job-action-form'){await api(`/api/jobs/${form.dataset.id}/${form.dataset.kind==='cancel-job'?'cancel':'reconcile'}`,'POST',f);}
     else if(form.id==='rearm-form'){await api(`/api/devices/${form.dataset.id}/rearm`,'POST',f);}
     else return;

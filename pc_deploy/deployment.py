@@ -249,6 +249,10 @@ def inventory(data):
                 disks=sorted(clean, key=lambda d: d['number']))
     if data.get('wim_apply_v1') is True:
         result['wim_apply_v1'] = True
+    # Optional display metadata: old PE payloads keep exactly the same normalized inventory/hash.
+    for field in ('manufacturer', 'system_family', 'product_name', 'product_version'):
+        if data.get(field) not in (None, ''):
+            result[field] = text(data[field], '设备型号信息')
     return result
 
 

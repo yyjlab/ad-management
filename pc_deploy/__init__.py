@@ -263,7 +263,9 @@ def register_pc_deploy(host_app, current_user, touch_session):
                     model=data['target']['model'], disk=data['target']['disk'], profile=data['profile']['name'],
                     state=row['state'], state_name=STATES[row['state']], created=row['created'],
                     updated=row['updated'], stale=row['state'] in ACTIVE and now-row['updated'] > 600,
-                    progress=data.get('progress'), kind=data['source'].get('kind', 'setup'),
+                    progress=data.get('progress'), kind=data['source'].get('kind', 'setup'), review=data.get('review'),
+                    **{k: data['target']['inventory'].get(k, '') for k in
+                       ('manufacturer', 'system_family', 'product_name', 'product_version')},
                     started_at=timing.get('started_at'),
                     finished_at=None if row['state'] in ACTIVE else timing.get('finished_at') or row['updated'])
 
@@ -516,6 +518,32 @@ def register_pc_deploy(host_app, current_user, touch_session):
                 raise Invalid('任务已经结束')
             c.execute('UPDATE jobs SET state=?,updated=? WHERE id=?', ('failed', time.time(), identity))
             event(c, 'failed', '管理员现场核对后结束记录；未向电脑发送停止或重试命令', identity)
+        return jsonify(ok=True)
+
+    @app.post('/api/jobs/<identity>/review')
+    @admin
+    def review_job(identity):
+        value = body()
+        if value.get('physical_confirmed') is not True or value.get('outcome') not in ('installed', 'not_installed'):
+            raise Invalid('请现场核对电脑，并明确选择实际安装结果')
+        note = value.get('note', '')
+        if note:
+            note = text(note, '核对备注', maximum=500)
+        elif not isinstance(note, str):
+            raise Invalid('核对备注必须是文字')
+        with store.connect(write=True) as c:
+            row, data = load(c, 'jobs', identity)
+            if row['state'] != 'failed':
+                raise Invalid('只有已失败的任务可以登记人工核对结果')
+            previous = data.get('review') or {}
+            operator = g.pc_deploy_operator
+            if (previous.get('outcome'), previous.get('note'), previous.get('operator')) == (value['outcome'], note, operator):
+                return jsonify(ok=True)
+            data['review'] = dict(outcome=value['outcome'], note=note, operator=operator, reviewed_at=time.time())
+            # Preserve the original failure and finish time; this is an operator observation.
+            c.execute('UPDATE jobs SET data=? WHERE id=?', (canonical(data), identity))
+            result = '已能进入 Windows' if value['outcome'] == 'installed' else '仍未安装完成'
+            event(c, 'review', '人工核对：' + result + '；保留原任务失败记录' + ('。备注：' + note if note else ''), identity)
         return jsonify(ok=True)
 
     def validity_days(value):

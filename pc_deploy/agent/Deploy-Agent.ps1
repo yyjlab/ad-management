@@ -173,6 +173,13 @@ function Invoke-WaitingPlatform {
     }
 }
 
+function Get-FirmwareDisplayText {
+    param($Value)
+    $text = ([string]$Value -replace '[\x00-\x1f\x7f]', ' ').Trim()
+    if ($text.Length -gt 120) { $text = $text.Substring(0, 120) }
+    $text
+}
+
 function Get-Inventory {
     param([string]$BootId)
     $computer = Get-CimInstance Win32_ComputerSystem
@@ -222,6 +229,8 @@ function Get-Inventory {
     @{
         hardware_uuid = ([guid]$product.UUID).ToString().ToLowerInvariant(); boot_id = $BootId
         model = [string]$computer.Model; serial = $serial; architecture = 'amd64'
+        manufacturer = Get-FirmwareDisplayText $computer.Manufacturer; system_family = Get-FirmwareDisplayText $computer.SystemFamily
+        product_name = Get-FirmwareDisplayText $product.Name; product_version = Get-FirmwareDisplayText $product.Version
         firmware = $(if ($firmwareValue -eq 2) { 'UEFI' } else { 'BIOS' })
         secure_boot = $secureBoot; tpm2 = $tpm2
         ram_bytes = [long]$computer.TotalPhysicalMemory; macs = $macs; disks = $disks; wim_apply_v1 = $true

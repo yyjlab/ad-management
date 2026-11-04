@@ -12,7 +12,7 @@ async function run() {
     const errors=[], requests=[];
     page.on('pageerror',error=>errors.push(error.message));
     let role='super_admin',expired=false,saves=0,extensions=0,policyPayload=null,validityPayload=null,mediaPayload=null,enrollmentExpires=1793433600,fixture=null,profilePayload=null,previewPayload=null;
-    const jobLogEvents={};let jobLogError=false,jobLogGate=null;
+    const jobLogEvents={};let jobLogError=false,jobLogGate=null,jobReviewPayload=null;
     const settings={public_url:'http://ad-menu.test/pc-deploy',enabled:false,concurrency:2,ca_pem:''};
     const media={builders:[{id:'test-builder',name:'测试制作电脑',online:true,template_name:'WinPE',driver_name:'ASIX'}],builds:[]};
     const adHtml=fs.readFileSync(path.join(__dirname,'admin_manage.html'),'utf8');
@@ -70,6 +70,16 @@ async function run() {
         return route.fulfill({json:{ok:true,id:'test-media'}});
       }
 
+
+      if(/^\/pc-deploy\/api\/jobs\/[^/]+\/review$/.test(url.pathname)){
+        assert.equal(request.method(),'POST');
+        assert.equal(request.headers()['x-csrf-token'],'fixture-csrf');
+        jobReviewPayload=request.postDataJSON();
+        const id=decodeURIComponent(url.pathname.split('/')[4]),job=fixture.jobs.find(j=>j.id===id);
+        job.review={...jobReviewPayload,operator:'test-admin',reviewed_at:fixture.server_time};
+        (jobLogEvents[id] ||= []).unshift({id:1000,job_id:id,kind:'review',created:fixture.server_time,message:'人工核对：'+jobReviewPayload.note});
+        return route.fulfill({json:{ok:true}});
+      }
       if(/^\/pc-deploy\/api\/jobs\/[^/]+\/events$/.test(url.pathname)){
         if(jobLogError) return route.fulfill({status:503,json:{error:'fixture log unavailable'}});
         const id=decodeURIComponent(url.pathname.split('/')[4]);
@@ -271,6 +281,14 @@ async function run() {
     await liveProgress.waitFor();
     assert.equal(await liveProgress.locator('progress').getAttribute('value'),'37');checks++;
     assert.ok((await liveProgress.textContent()).includes('37%'));checks++;
+    assert.equal(await page.locator('[data-action=reconcile-job]').count(),0);checks++;
+    fixture.jobs[0].stale=true;
+    await page.locator('#refresh').click();
+    await page.getByRole('button',{name:'结束异常记录',exact:true}).waitFor();
+    assert.equal(await page.locator('[data-action=reconcile-job]').count(),1);checks++;
+    fixture.jobs[0].stale=false;
+    await page.locator('#refresh').click();
+    await page.waitForFunction(()=>!document.querySelector('[data-action=reconcile-job]'));
 
     // Real task time is independent of the browser clock and stops at the recorded finish.
     assert.ok((await page.locator('.job-timing').textContent()).includes('安装用时 20分'));checks++;
@@ -398,6 +416,37 @@ async function run() {
     await lateLog;
     assert.ok((await page.locator('#job-log').textContent()).includes('progress-job'));checks++;
     assert.equal(await page.evaluate(()=>window.logInjected),undefined);checks++;
+    await page.locator('#close-modal').click();
+
+
+    fixture.jobs[0].state='failed';
+    fixture.jobs[0].model='HKD-WXX';
+    fixture.jobs[0].manufacturer='HUAWEI';
+    fixture.jobs[0].system_family='MateBook';
+    fixture.jobs[0].product_version='M1010';
+    fixture.jobs[0].stale=false;
+    await page.locator('#refresh').click();
+    await page.waitForFunction(()=>document.querySelector('.job-row .cell-title')?.textContent==='HUAWEI MateBook HKD-WXX');
+    await page.locator('[data-action=review-job][data-id=progress-job]').waitFor();
+    assert.ok((await page.locator('.job-row').first().textContent()).includes('HUAWEI MateBook HKD-WXX'));checks++;
+    assert.equal(await page.locator('[data-action=reconcile-job]').count(),0);checks++;
+    await page.locator('[data-action=review-job][data-id=progress-job]').click();
+    assert.equal(await page.locator('#job-review-form [name=confirmation]').count(),0);checks++;
+    await page.locator('#job-review-form [name=outcome]').selectOption('installed');
+    await page.locator('#job-review-form [name=physical_confirmed]').check();
+    await page.locator('#job-review-form [name=note]').fill('已进入 Windows <img src=x onerror="window.reviewInjected=true">');
+    await page.locator('#job-review-form [type=submit]').click();
+    await page.locator('#modal').waitFor({state:'hidden'});
+    await page.getByText('人工核对已安装',{exact:true}).waitFor();
+    assert.equal(jobReviewPayload.outcome,'installed');checks++;
+    assert.equal(jobReviewPayload.physical_confirmed,true);checks++;
+    assert.equal(await page.locator('.job-row').first().getAttribute('data-state'),'failed');checks++;
+    assert.equal(await page.locator('.job-row').first().locator('.job-progress').count(),0);checks++;
+    await page.locator('[data-action=job-logs][data-id=progress-job]').click();
+    await page.locator('#job-log .log-message').first().waitFor();
+    assert.ok((await page.locator('#job-log .log-message').first().textContent()).includes('<img src=x'));checks++;
+    assert.equal(await page.locator('#job-log img').count(),0);checks++;
+    assert.equal(await page.evaluate(()=>window.reviewInjected),undefined);checks++;
     await page.locator('#close-modal').click();
 
     assert.deepEqual(errors,[]);checks++;

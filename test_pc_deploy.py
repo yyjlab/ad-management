@@ -412,6 +412,86 @@ class PlatformTests(unittest.TestCase):
                    ca_pem='',enabled=True,confirmation='ENABLE',isolated_network_confirmed=True))
         self.assertEqual(r.status_code,200)
 
+
+    def test_inventory_model_metadata_round_trips_without_changing_legacy_hash(self):
+        legacy = machine()
+        expected = inventory(legacy)
+        empty = dict(legacy, manufacturer='', system_family=None, product_name='', product_version='')
+        self.assertEqual(digest(inventory(empty)), digest(expected))
+        enriched = dict(legacy, model='HKD-WXX', manufacturer='HUAWEI', system_family='MateBook',
+                        product_name='HKD-WXX', product_version='M1010')
+        inv, reg, _, profile = self.fixtures(enriched)
+        device = self.client.get('/pc-deploy/api/dashboard').json['devices'][0]
+        self.assertEqual(device['manufacturer'], 'HUAWEI')
+        self.assertEqual(device['model'], 'HKD-WXX')
+        pv = self.preview(inv, profile)
+        self.enable()
+        result = self.post('/pc-deploy/api/jobs/commit',
+                           dict(preview_id=pv.json['id'], confirmation='YES', physical_confirmed=True))
+        job = result.json['ids'][0]
+        self.post('/pc-deploy/api/agent/poll', inv, reg['token'])
+        self.assertEqual(self.post(f'/pc-deploy/api/agent/jobs/{job}/start', inv, reg['token']).status_code, 200)
+        snapshot = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
+        self.assertEqual(snapshot['model'], 'HKD-WXX')
+        self.assertEqual(snapshot['manufacturer'], 'HUAWEI')
+        self.assertEqual(snapshot['system_family'], 'MateBook')
+        self.assertEqual(snapshot['product_version'], 'M1010')
+        with self.assertRaises(Invalid):
+            inventory(dict(legacy, manufacturer=['invalid']))
+
+    def test_failed_job_manual_review_keeps_failure_finish_time_and_no_retry(self):
+        inv, reg, job = self.queued()
+        route = f'/pc-deploy/api/agent/jobs/{job}'
+        self.post('/pc-deploy/api/agent/poll', inv, reg['token'])
+        self.post(route+'/start', inv, reg['token'])
+        self.post(route+'/event', dict(code='WIM', detail='original diagnostic'), reg['token'])
+        with self.store.connect() as c:
+            before = dict(c.execute('SELECT * FROM jobs WHERE id=?', (job,)).fetchone())
+            consumed = c.execute('SELECT consumed FROM devices WHERE id=?', (inv['hardware_uuid'],)).fetchone()[0]
+            finish_token = self.store.decrypt(before['secret'])['finish_token']
+        payload = dict(physical_confirmed=True, outcome='installed', note='现场已能进入 Windows')
+        review_route = f'/pc-deploy/api/jobs/{job}/review'
+        self.assertEqual(self.post(review_route, payload).status_code, 200)
+        self.assertEqual(self.post(review_route, payload).status_code, 200)
+        result = self.client.get(f'/pc-deploy/api/jobs/{job}/events').json
+        self.assertEqual(result['job']['state'], 'failed')
+        self.assertEqual(result['job']['review']['outcome'], 'installed')
+        self.assertEqual(result['job']['review']['operator'], 'test-super-admin')
+        self.assertEqual(sum(e['kind'] == 'review' for e in result['events']), 1)
+        self.assertTrue(any('original diagnostic' in e['message'] for e in result['events']))
+        self.assertEqual(self.post(route+'/finish', {}, finish_token).status_code, 400)
+        with self.store.connect() as c:
+            after = dict(c.execute('SELECT * FROM jobs WHERE id=?', (job,)).fetchone())
+            self.assertEqual(after['updated'], before['updated'])
+            self.assertEqual(after['secret'], before['secret'])
+            self.assertEqual(c.execute('SELECT COUNT(*) FROM jobs').fetchone()[0], 1)
+            self.assertEqual(c.execute('SELECT consumed FROM devices WHERE id=?', (inv['hardware_uuid'],)).fetchone()[0], consumed)
+        payload['outcome'] = 'not_installed'
+        self.assertEqual(self.post(review_route, payload).status_code, 200)
+        updated = self.client.get(f'/pc-deploy/api/jobs/{job}/events').json
+        self.assertEqual(updated['job']['review']['outcome'], 'not_installed')
+        self.assertEqual(sum(e['kind'] == 'review' for e in updated['events']), 2)
+
+    def test_manual_review_requires_failed_job_permission_and_explicit_result(self):
+        inv, reg, job = self.queued()
+        route = f'/pc-deploy/api/jobs/{job}/review'
+        valid = dict(physical_confirmed=True, outcome='installed')
+        self.assertEqual(self.post(route, valid).status_code, 400)
+        self.post('/pc-deploy/api/agent/poll', inv, reg['token'])
+        self.post(f'/pc-deploy/api/agent/jobs/{job}/start', inv, reg['token'])
+        self.post(f'/pc-deploy/api/agent/jobs/{job}/event', dict(code='WIM'), reg['token'])
+        for bad in (dict(outcome='installed'), dict(valid, physical_confirmed='true'),
+                    dict(valid, outcome='completed'), dict(valid, note=['invalid']), dict(valid, note='x'*501)):
+            self.assertEqual(self.post(route, bad).status_code, 400)
+        self.assertEqual(self.app.test_client().post(route, json=valid).status_code, 401)
+        self.assertEqual(self.client.post(route, json=valid).status_code, 403)
+        with self.client.session_transaction() as s:
+            s['admin_role'] = 'readonly'
+        self.assertEqual(self.post(route, valid).status_code, 403)
+        with self.client.session_transaction() as s:
+            s['admin_role'] = 'super_admin'
+        self.assertIsNone(self.client.get(f'/pc-deploy/api/jobs/{job}/events').json['job']['review'])
+
     def test_reconcile_does_not_send_retry(self):
         inv,reg,job=self.queued()
         self.post('/pc-deploy/api/agent/poll',inv,reg['token'])
