@@ -10,20 +10,18 @@ AD 用户注册、密码修改和后台管理平台。前端静态页面与 Flas
 
 ## Jenkins 构建
 
-在仓库根目录执行，得到两个镜像；推送 SWR 时使用 Jenkins 中配置的镜像仓库和版本号。
+在仓库根目录执行，得到两个镜像；推送 SWR 时沿用 Jenkins 中配置的镜像仓库和版本号。后端使用 BuildKit 缓存挂载，需要支持 RUN --mount 缓存挂载的 BuildKit；只在 AD 的后端构建命令启用，不修改 Jenkins 公共设置。
 
 ```bash
-docker build -f Dockerfile.backend -t be-ad:latest .
+DOCKER_BUILDKIT=1 docker build -f Dockerfile.backend -t be-ad:latest .
 docker build -f Dockerfile.frontend -t fe-ad:latest .
 ```
 
-后端安装依赖后才复制源码，普通代码更新可复用依赖层。前端只复制 HTML 和 Nginx 配置，不包含后端代码。
+后端先复制依赖清单并安装，再复制源码。普通源码更新复用依赖层；依赖层需要重建时，项目专用的 pip 下载缓存仍可复用，且不写入最终镜像。前端只复制 HTML 和 Nginx 配置，不包含后端代码。
 
-后端默认使用官方 PyPI，下载连接超时为 120 秒、连接重试 10 次。Jenkins 下载慢或超时时，可在后端构建命令中指定清华 PyPI 镜像；只影响本次构建，不修改服务器配置：
+后端默认使用清华 HTTPS PyPI 镜像，下载超时 30 秒、重试 3 次；可用构建参数 `PIP_INDEX_URL` 覆盖为公司源或 `https://pypi.org/simple`。依赖版本不变。
 
-```bash
-docker build -f Dockerfile.backend --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple -t swr.cn-south-1.myhuaweicloud.com/recovery-uat/be-ad:test${BUILD_NUMBER} .
-```
+同一构建节点保留 BuildKit 缓存后才能持续命中；每次更换临时节点或清理构建缓存仍会重新下载。若 Jenkins 当前命令带有 `--no-cache`，会跳过依赖层缓存；不建议日常构建使用。这里不修改或清理其他项目的缓存。
 
 ## 运行配置
 
