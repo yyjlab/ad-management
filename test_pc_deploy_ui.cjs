@@ -56,6 +56,11 @@ async function run() {
         enrollmentExpires=validityPayload.days===null?null:1793347200+validityPayload.days*86400;
         return route.fulfill({json:{ok:true,expires_at:enrollmentExpires}});
       }
+      if(url.pathname==='/pc-deploy/api/local-media/package'){
+        assert.equal(request.headers()['x-csrf-token'],'fixture-csrf');
+        mediaPayload=request.postDataJSON();
+        return route.fulfill({contentType:'application/zip',body:Buffer.from('PK-test-local-package')});
+      }
       if(url.pathname==='/pc-deploy/api/media'){
         assert.equal(request.headers()['x-csrf-token'],'fixture-csrf');
         mediaPayload=request.postDataJSON();
@@ -124,13 +129,16 @@ async function run() {
     await frame.locator('#modal').waitFor({state:'hidden'});
     assert.deepEqual(validityPayload,{days:null});checks++;
     assert.ok((await frame.locator('#page-content').textContent()).includes('永不过期'));checks++;
-    await frame.locator('#media-form [name=builder_id]').selectOption('test-builder');
+    assert.equal(await frame.locator('#media-form [name=builder_id]').count(),0);checks++;
+    assert.equal(await frame.locator('[data-action=builder-package]').count(),0);checks++;
+    assert.ok(!(await frame.locator('#media-panel').textContent()).includes('离线'));checks++;
     await frame.locator('#media-form [name=mode]').selectOption('registration');
     await frame.locator('#media-form [name=include_drivers]').uncheck();
-    await frame.locator('#media-form [type=submit]').click();
-    await frame.locator('a[href="/pc-deploy/api/media/test-media/download"]').waitFor();
-    assert.deepEqual(mediaPayload,{builder_id:'test-builder',registration_only:true,include_drivers:false});checks++;
-    assert.ok((await frame.locator('#media-status').textContent()).includes('SHA256: '+'b'.repeat(64)));checks++;
+    const [download]=await Promise.all([page.waitForEvent('download'),frame.locator('#media-form [type=submit]').click()]);
+    assert.equal(download.suggestedFilename(),'pc-deploy-local-build.zip');checks++;
+    assert.deepEqual(mediaPayload,{registration_only:true,include_drivers:false});checks++;
+    assert.ok(!requests.includes('/pc-deploy/api/builders/package'));checks++;
+    assert.ok(!requests.includes('/pc-deploy/api/media'));checks++;
 
     await page.evaluate(()=>window.dispatchEvent(new MessageEvent('message',{origin:location.origin,source:window,data:{type:'pc-deploy:view',view:'jobs'}})));
     assert.ok(await page.locator('[data-deploy-view=settings]').evaluate(e=>e.classList.contains('active')));checks++;

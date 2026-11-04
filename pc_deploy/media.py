@@ -65,6 +65,40 @@ def register_media_routes(app, store, admin, body, tls_required, bearer, event, 
             raise Invalid('制作任务超过 6 小时，请在页面结束记录后重新制作')
         return row, json.loads(row['data'])
 
+    @app.post('/api/local-media/package')
+    @admin
+    def local_media_package():
+        value = body()
+        if type(value.get('registration_only')) is not bool or type(value.get('include_drivers')) is not bool:
+            raise Invalid('请选择启动模式和是否注入额外驱动')
+        with store.connect(write=True) as c:
+            config = create_config(c)
+            config.update(registration_only=value['registration_only'], include_drivers=value['include_drivers'])
+            event(c, 'media', '已下载本机 ISO 制作包；无需注册或选择制作电脑')
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+            z.writestr('config.json', canonical(config))
+            for name in ('Deploy-Agent.ps1', 'Start.ps1'):
+                z.write(ROOT / 'agent' / name, name)
+            for name in ('Build-OnThisPC.ps1', 'Build-LocalMedia.ps1'):
+                z.write(ROOT / 'scripts' / name, name)
+            z.writestr('Start-Build.cmd', '@echo off\r\nsetlocal\r\n'
+                       'set "PCDEPLOY_PWSH=%ProgramFiles%\\PowerShell\\7\\pwsh.exe"\r\n'
+                       'if exist "%PCDEPLOY_PWSH%" goto run\r\n'
+                       'where pwsh.exe >nul 2>nul\r\n'
+                       'if errorlevel 1 (echo PowerShell 7 is required. Install it and run again. & pause & exit /b 1)\r\n'
+                       'set "PCDEPLOY_PWSH=pwsh.exe"\r\n:run\r\n'
+                       '"%PCDEPLOY_PWSH%" -NoProfile -STA -ExecutionPolicy Bypass -File "%~dp0Build-OnThisPC.ps1"\r\n'
+                       'if errorlevel 1 pause\r\n')
+            z.writestr('使用说明.txt', '完整解压后，双击 Start-Build.cmd，在管理员授权提示中选择“是”。\r\n'
+                       '程序直接在当前电脑制作，不需要注册、选择电脑或安装常驻程序。\r\n'
+                       '优先使用本机保存的 PE 资源；首次缺少文件时提示选择一次，之后自动复用。\r\n'
+                       '完成后自动打开 ISO 所在文件夹。产物在本包 Builds\\本次任务\\pc-deploy.iso。\r\n'
+                       '不修改原 PE 模板，不格式化 U 盘，不启动装机任务。需要 Windows 和 PowerShell 7。\r\n')
+        buf.seek(0)
+        return send_file(buf, mimetype='application/zip', as_attachment=True,
+                         download_name='pc-deploy-local-build.zip')
+
     @app.post('/api/builders/package')
     @admin
     def builder_package():

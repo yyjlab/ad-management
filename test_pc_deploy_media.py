@@ -301,5 +301,45 @@ class MediaTests(unittest.TestCase):
             server.server_close()
             self.app.wsgi_app=original
 
+
+    def test_local_package_download_needs_no_builder_and_creates_no_build_job(self):
+        self.enable(False)
+        self.post('/pc-deploy/api/enrollment-policy',dict(days=None))
+        response=self.post('/pc-deploy/api/local-media/package',dict(registration_only=False,include_drivers=True))
+        self.assertEqual(response.status_code,200)
+        self.assertIn('pc-deploy-local-build.zip',response.headers['Content-Disposition'])
+        with zipfile.ZipFile(io.BytesIO(response.data)) as z:
+            config=json.loads(z.read('config.json'))
+            self.assertIsNone(config['expires_at'])
+            self.assertFalse(config['registration_only'])
+            self.assertTrue(config['include_drivers'])
+            for name in ('Start-Build.cmd','Build-OnThisPC.ps1','Build-LocalMedia.ps1','Deploy-Agent.ps1','Start.ps1'):
+                self.assertIn(name,z.namelist())
+            self.assertNotIn('builder-registration.json',z.namelist())
+            self.assertNotIn('Start-Builder.ps1',z.namelist())
+            self.assertNotIn('Install-Builder.ps1',z.namelist())
+            self.assertIn('-File "%~dp0Build-OnThisPC.ps1"',z.read('Start-Build.cmd').decode())
+            self.assertNotIn('Get-VerifiedHash',z.read('Deploy-Agent.ps1').decode('utf-8-sig'))
+        with self.store.connect() as c:
+            self.assertEqual(c.execute('SELECT COUNT(*) FROM media_builders').fetchone()[0],0)
+            self.assertEqual(c.execute('SELECT COUNT(*) FROM media_builds').fetchone()[0],0)
+            self.assertEqual(c.execute('SELECT COUNT(*) FROM jobs').fetchone()[0],0)
+            self.assertFalse(self.store.setting(c,'enabled',False))
+        self.assertEqual(self.post('/pc-deploy/api/agent/register',machine(),config['enrollment_token']).status_code,200)
+
+    def test_local_package_validates_options_and_uses_admin_csrf(self):
+        path='/pc-deploy/api/local-media/package'
+        self.assertEqual(self.app.test_client().post(path,json={}).status_code,401)
+        self.assertEqual(self.client.post(path,json=dict(registration_only=True,include_drivers=False)).status_code,403)
+        self.assertEqual(self.post(path,dict(registration_only='false',include_drivers=True)).status_code,400)
+        self.assertEqual(self.post(path,dict(registration_only=True)).status_code,400)
+        self.enable(False)
+        response=self.post(path,dict(registration_only=True,include_drivers=False))
+        self.assertEqual(response.status_code,200)
+        with zipfile.ZipFile(io.BytesIO(response.data)) as z:
+            config=json.loads(z.read('config.json'))
+        self.assertTrue(config['registration_only'])
+        self.assertFalse(config['include_drivers'])
+
 if __name__ == '__main__':
     unittest.main()
