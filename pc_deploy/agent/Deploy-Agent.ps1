@@ -90,7 +90,7 @@ function Save-DeploymentFailureLog {
     try {
         $usbRoot = Get-DeploymentUsbLogRoot
         if ($usbRoot) {
-            $usbPath = Join-Path $usbRoot 'PCDeploy-error.log'
+            $usbPath = Join-Path $usbRoot 'error.log'
             [IO.File]::AppendAllText($usbPath, $text, $encoding)
             Write-Host ('USB error log: ' + $usbPath) -ForegroundColor Yellow
         } else {

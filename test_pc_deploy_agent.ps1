@@ -451,7 +451,7 @@ $count+=3
         function Get-DeploymentUsbLogRoot { $script:logFixtureRoot }
         Save-DeploymentFailureLog 'first sanitized error' 'DISK_CHANGED' $local
         Save-DeploymentFailureLog 'second sanitized error' 'SOURCE' $local
-        $history = [IO.File]::ReadAllText((Join-Path $usb 'PCDeploy-error.log'))
+        $history = [IO.File]::ReadAllText((Join-Path $usb 'error.log'))
         if ($history -notlike '*first sanitized error*' -or $history -notlike '*second sanitized error*') {
             throw 'USB error history was overwritten.'
         }
