@@ -8,13 +8,13 @@
 
 1. 按主 README 构建并部署前后端镜像；普通访问与客户端请求统一经过 `/pc-deploy/`。内网管理、WinPE 登记与安装后回报支持 HTTP / HTTPS，无需为了使用 HTTP 额外修改服务器配置。平台不修改公司 DHCP，不自动调整 BIOS，不绕过 TPM / Secure Boot。
 2. 使用隔离的装机交换机或 VLAN。原版方式将合法 Windows ISO 完整解压到 SMB 共享；封装方式直接使用已有 WIM 文件，无需重新制作系统 ISO。创建专用只读账号，不使用域管理员、匿名或写入账号。
-3. 在“安装源”下载检测脚本，在能读取共享的 Windows 电脑上执行下面的只读检查；将输出 JSON 导入页面并填写专用读取密码。
+3. 在“安装源”下载检测脚本，在能读取共享的 Windows 电脑上执行下面的只读检查；将输出 JSON 导入页面并填写专用读取密码。检测仅读取镜像信息，不进行整文件 SHA256 扫描。
 
 ```powershell
 .\Inspect-InstallSource.ps1 -SourcePath '\\fileserver\install\Win11' -Family windows11 -Name 'Windows 11' -SmbUser 'FILESERVER\deploy-read'
 ```
 
-封装 WIM 改为传入完整文件路径。下面只读取共享上的镜像并计算摘要，不修改原 WIM；将 JSON 输出导入“安装源”。Win10 文件使用同一命令，将路径、系统类型和名称改为对应值。
+封装 WIM 改为传入完整文件路径。下面只读取共享上的镜像版本和索引，不计算整文件 SHA256，不修改原 WIM；将 JSON 输出导入“安装源”。Win10 文件使用同一命令，将路径、系统类型和名称改为对应值。
 
 ```powershell
 .\Inspect-InstallSource.ps1 -SourcePath '\\DC01\reminst\win11.wim' -Family windows11 -Name '封装 Windows 11' -SmbUser 'WFQ\deploy-read'
@@ -57,6 +57,8 @@
 脚本只创建 ISO，不格式化 U 盘。将 `pc-deploy-winpe.iso` 复制到已有 Ventoy U 盘，再从目标电脑启动。两种构建方式都使用后台保存的登记有效期；一键制作不会改变设备的 BIOS 启动顺序。
 
 纯网络启动可将 ADK 构建目录中的 `media/sources/boot.wim`、`media/Boot/BCD`、`media/Boot/boot.sdi` 及官方 `wimboot` 放到后端 `instance/pc-deploy/boot/`，由现有受控 iPXE 服务引导至 `/pc-deploy/boot.ipxe`。必须先验证所选协议的访问、使用 HTTPS 时的证书信任、Secure Boot 及退出 iPXE 后的本地系统启动回退；平台不接管初始 DHCP / TFTP。
+
+更新前已制作的 PE 仍包含旧的整文件校验逻辑。使用快速安装前检查时，需重新制作 ISO 并用新 ISO 启动；已有安装源无需重建，新客户端忽略旧摘要。ISO 制作产物的传输校验与账号凭据保护保持原有处理。
 
 ## 每批装机
 

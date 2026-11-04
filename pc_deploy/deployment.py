@@ -130,8 +130,7 @@ def source_record(data):
         raise Invalid('安装源账号必须包含域或文件服务器名称')
     return dict(name=text(data.get('name'), '安装源名称'), path=unc_path(data.get('path')),
                 family=family, image_file=filename, images=cleaned, kind=kind,
-                image_sha256=sha256(data.get('image_sha256')),
-                setup_sha256=sha256(data.get('setup_sha256')) if kind == 'setup' else '', smb_user=user)
+                image_sha256='', setup_sha256='', smb_user=user)
 
 
 def profile_record(data, source):

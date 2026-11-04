@@ -353,3 +353,24 @@ $count+=4
 $count++
 
 Write-Output "$count PowerShell protection and parser checks passed. No disk command was executed."
+
+# Metadata-only quick inspection. All I/O is mocked.
+& {
+    function Test-Path { param($LiteralPath,$PathType) return $true }
+    function Get-WindowsImage {
+        param($ImagePath,$Index)
+        if ($PSBoundParameters.ContainsKey('Index')) {
+            return [pscustomobject]@{Architecture=9;DefaultLanguage='zh-CN';ImageName='Test WIM';Version='10.0.26100.1'}
+        }
+        [pscustomobject]@{ImageIndex=1}
+    }
+    function Get-FileHash { throw 'Quick inspection must never read full-file hashes.' }
+    $raw = & "$PSScriptRoot\pc_deploy\scripts\Inspect-InstallSource.ps1" -SourcePath '\\fixture\reminst\win11.wim' -SmbUser 'FIXTURE\read'
+    $source=$raw | ConvertFrom-Json
+    if ($source.images.Count -ne 1 -or $source.images[0].build -ne 26100) { throw 'Quick image metadata inspection failed.' }
+    if ($source.PSObject.Properties['image_sha256'] -or $source.PSObject.Properties['setup_sha256']) { throw 'Quick manifest still contains hash requirements.' }
+}
+$agentAst=[Management.Automation.Language.Parser]::ParseFile("$PSScriptRoot\pc_deploy\agent\Deploy-Agent.ps1",[ref]$tokens,[ref]$errors)
+$hashCalls=$agentAst.FindAll({param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -in @('Get-VerifiedHash','Get-FileHash')},$true)
+if ($hashCalls.Count) { throw 'The deployment agent still scans installation source hashes.' }
+Write-Host 'Quick-source inspection and no-full-file-scan checks passed. No real image or disk was accessed.'

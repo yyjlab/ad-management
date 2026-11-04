@@ -160,31 +160,6 @@ function Select-VerifiedDisk {
     $disk
 }
 
-function Get-VerifiedHash {
-    param([string]$Path, [string]$Expected, [string]$JobId, [string]$Token)
-    $stream, $hash = $null, $null
-    try {
-        $stream = [IO.File]::OpenRead($Path)
-        $hash = [Security.Cryptography.SHA256]::Create()
-        $buffer = New-Object byte[] (1024 * 1024)
-        $lastReport = [DateTime]::UtcNow.AddMinutes(-1)
-        while (($count = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
-            [void]$hash.TransformBlock($buffer, 0, $count, $buffer, 0)
-            if (([DateTime]::UtcNow - $lastReport).TotalSeconds -ge 10) {
-                Invoke-Platform "/api/agent/jobs/$JobId/event" $Token @{stage = 'verifying'} | Out-Null
-                $lastReport = [DateTime]::UtcNow
-            }
-        }
-        [void]$hash.TransformFinalBlock($buffer, 0, 0)
-        $actual = [BitConverter]::ToString($hash.Hash).Replace('-', '').ToLowerInvariant()
-        if ($actual -cne $Expected.ToLowerInvariant()) { throw 'Installation source SHA-256 mismatch.' }
-    } finally {
-        if ($stream) { $stream.Dispose() }
-        if ($hash) { $hash.Dispose() }
-    }
-}
-
-
 function Select-VerifiedPartition {
     param($Partitions, $Expected)
     $matches = @($Partitions | Where-Object {
@@ -442,7 +417,8 @@ function Invoke-Deployment {
     if ($Job.source.kind -and $Job.source.kind -notin @('setup','wim')) { throw 'Unsupported installation kind.' }
     $setupPath = Join-Path $Job.source.path 'setup.exe'
     $imagePath = Join-Path $Job.source.path $Job.source.image_file
-    if (-not $isWim) { Get-VerifiedHash $setupPath $Job.source.setup_sha256 $Job.id $Token }
+    if (-not (Test-Path -LiteralPath $imagePath -PathType Leaf)) { throw 'Installation image file not found.' }
+    if (-not $isWim -and -not (Test-Path -LiteralPath $setupPath -PathType Leaf)) { throw 'Windows Setup executable not found.' }
     if ($isWim -and $Job.source.image_file -notmatch '^[A-Za-z0-9_-][A-Za-z0-9_. -]{0,119}\.wim$') { throw 'Unsafe WIM file name.' }
     $sourceLock = $null
     try {
@@ -452,7 +428,7 @@ function Invoke-Deployment {
         }
         $sourceLock = [IO.File]::Open($imagePath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
     }
-    Get-VerifiedHash $imagePath $Job.source.image_sha256 $Job.id $Token
+    # Read selected image metadata directly without scanning the entire source file.
     $image = Get-WindowsImage -ImagePath $imagePath -Index $Job.profile.image_index
     $expectedImage = @($Job.source.images | Where-Object { $_.index -eq $Job.profile.image_index })
     if ($expectedImage.Count -ne 1 -or [int]$image.Architecture -ne 9 -or

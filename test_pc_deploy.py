@@ -386,6 +386,22 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(self.post('/pc-deploy/api/agent/register',inv,self.enrollment).status_code,400)
         self.assertLess(self.client.get('/pc-deploy/api/dashboard').json['enrollments'][0]['expires_at'],time.time())
 
+    def test_quick_source_accepts_metadata_without_hashes_and_ignores_old_hashes(self):
+        for kind in ('setup','wim'):
+            value=install_source()
+            value.update(kind=kind)
+            if kind=='wim':
+                value['image_file']='win11.wim'
+            value.pop('image_sha256',None)
+            value.pop('setup_sha256',None)
+            response=self.post('/pc-deploy/api/sources',value)
+            self.assertEqual(response.status_code,200,response.json)
+            value.update(image_sha256='legacy-invalid-unused',setup_sha256='legacy-unused')
+            cleaned=source_record(value)
+            self.assertEqual(cleaned['image_sha256'],'')
+            self.assertEqual(cleaned['setup_sha256'],'')
+            self.assertEqual(cleaned['images'][0]['build'],26100)
+
     def test_boot_file_allowlist(self):
         self.assertEqual(self.client.get('/pc-deploy/boot/secret.key').status_code,404)
         self.assertEqual(self.client.get('/pc-deploy/boot/wimboot').status_code,404)

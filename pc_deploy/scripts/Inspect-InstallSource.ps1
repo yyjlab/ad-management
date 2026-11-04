@@ -18,7 +18,7 @@ $setupPath = Join-Path $base 'setup.exe'
 if (-not (Test-Path -LiteralPath $imagePath) -or ($kind -eq 'setup' -and -not (Test-Path -LiteralPath $setupPath))) {
     throw 'Use an extracted Windows ISO folder, or pass the full UNC path of a custom .wim file. No file was modified.'
 }
-Write-Host 'Read-only scan: computing hashes and inspecting image indexes. This may take several minutes.'
+Write-Host 'Quick inspection: reading image metadata and indexes only. No full-file SHA256 scan.'
 $images = @(Get-WindowsImage -ImagePath $imagePath | ForEach-Object {
     $item = Get-WindowsImage -ImagePath $imagePath -Index $_.ImageIndex
     if ([int]$item.Architecture -ne 9) { throw 'Only x64 media is supported.' }
@@ -30,7 +30,5 @@ $images = @(Get-WindowsImage -ImagePath $imagePath | ForEach-Object {
 })
 @{
     name=$Name; path=$base; family=$Family; image_file=$file; smb_user=$SmbUser; kind=$kind
-    image_sha256=(Get-FileHash -LiteralPath $imagePath -Algorithm SHA256).Hash.ToLowerInvariant()
-    setup_sha256=$(if ($kind -eq 'setup') { (Get-FileHash -LiteralPath $setupPath -Algorithm SHA256).Hash.ToLowerInvariant() } else { '' })
     images=$images
 } | ConvertTo-Json -Depth 8
