@@ -12,7 +12,7 @@ async function run() {
     const errors=[], requests=[];
     page.on('pageerror',error=>errors.push(error.message));
     let role='super_admin',expired=false,saves=0,extensions=0,policyPayload=null,validityPayload=null,mediaPayload=null,enrollmentExpires=1793433600,fixture=null,profilePayload=null,previewPayload=null;
-    const jobLogEvents={};let jobLogError=false,jobLogGate=null,jobReviewPayload=null;
+    const jobLogEvents={};let jobLogError=false,jobLogGate=null,dashboardGate=null,jobReviewPayload=null;
     const settings={public_url:'http://ad-menu.test/pc-deploy',enabled:false,concurrency:2,ca_pem:''};
     const media={builders:[{id:'test-builder',name:'测试制作电脑',online:true,template_name:'WinPE',driver_name:'ASIX'}],builds:[]};
     const adHtml=fs.readFileSync(path.join(__dirname,'admin_manage.html'),'utf8');
@@ -90,8 +90,12 @@ async function run() {
         if(jobLogGate){const gate=jobLogGate;jobLogGate=null;await gate;}
         return route.fulfill({json:{job,events:events.slice(0,100),next_before:events.length>100?events[99].id:null,server_time:fixture.server_time}});
       }
-      if(url.pathname==='/pc-deploy/api/dashboard') return route.fulfill({json:fixture||{devices:[],sources:[],profiles:[],jobs:[],events:[],settings,
-        boot_files:{wimboot:false,'boot.wim':false,BCD:false,'boot.sdi':false},enrollments:[{id:'a'.repeat(64),expires_at:enrollmentExpires,uses:1}],media,server_time:1793347200}});
+      if(url.pathname==='/pc-deploy/api/dashboard') {
+        const snapshot=JSON.parse(JSON.stringify(fixture||{devices:[],sources:[],profiles:[],jobs:[],events:[],settings,
+          boot_files:{wimboot:false,'boot.wim':false,BCD:false,'boot.sdi':false},enrollments:[{id:'a'.repeat(64),expires_at:enrollmentExpires,uses:1}],media,server_time:1793347200}));
+        if(dashboardGate){const gate=dashboardGate;dashboardGate=null;await gate;}
+        return route.fulfill({json:snapshot});
+      }
       if(url.pathname==='/pc-deploy/api/settings'){
         assert.equal(request.headers()['x-csrf-token'],'fixture-csrf');
         const payload=request.postDataJSON();
@@ -394,13 +398,53 @@ async function run() {
     assert.ok(!(await page.locator('#job-log').textContent()).includes('Access denied'));checks++;
     await page.locator('#close-modal').click();
 
-    fixture.jobs[0].state='installing';
+    // The live log and its table row must share a snapshot, even while the modal is open.
+    Object.assign(fixture.jobs[0],{state:'installing',updated:1793347500,
+      progress:{stage:'applying',percent:95,updated:1793347500}});
+    fixture.server_time=1793347510;
+    await page.locator('#refresh').click();
+    await page.waitForFunction(()=>document.querySelector('.job-row .job-progress progress')?.value===95);
+    await page.evaluate(()=>{window.savedTableProgress=document.querySelector('.job-row .job-progress progress');});
     await page.locator('[data-action=job-logs][data-id=progress-job]').click();
     await page.locator('#job-log .event-bad').waitFor();
-    jobLogEvents['progress-job'].unshift({id:400,job_id:'progress-job',kind:'installing',created:1793347500,message:'automatic task update'});
+    Object.assign(fixture.jobs[0],{state:'awaiting_report',updated:1793347600,
+      progress:{stage:'awaiting_report',percent:null,updated:1793347600}});
+    fixture.server_time=1793347610;
+    jobLogEvents['progress-job'].unshift({id:400,job_id:'progress-job',kind:'awaiting_report',created:1793347600,message:'automatic task update'});
     await page.getByText('automatic task update',{exact:true}).waitFor({timeout:12000});
     assert.equal(await page.locator('#job-log .log-message').first().textContent(),'automatic task update');checks++;
-    await page.locator('#close-modal').click();
+    assert.equal(await page.locator('.job-row').first().getAttribute('data-state'),'awaiting_report');checks++;
+    assert.equal(await page.locator('.job-row .job-progress progress').getAttribute('value'),'100');checks++;
+    assert.equal(await page.locator('.job-row .job-progress').first().textContent(),await page.locator('#job-log .job-progress').textContent());checks++;
+    assert.equal(await page.locator('#job-log .badge').first().textContent(),'等待安装后回报');checks++;
+    assert.ok(await page.evaluate(()=>window.savedTableProgress===document.querySelector('.job-row .job-progress progress')));checks++;
+
+    // An older dashboard response arriving after a newer log must not roll the task back.
+    let releaseDashboard;
+    dashboardGate=new Promise(resolve=>{releaseDashboard=resolve;});
+    const pendingDashboard=page.waitForRequest(r=>r.url().endsWith('/api/dashboard'));
+    const delayedRefresh=page.evaluate(()=>refresh());
+    await pendingDashboard;
+    Object.assign(fixture.jobs[0],{state:'completed',updated:1793347700,finished_at:1793347700});
+    fixture.server_time=1793347710;
+    jobLogEvents['progress-job'].unshift({id:401,job_id:'progress-job',kind:'completed',created:1793347700,message:'installation acknowledged'});
+    await page.locator('[data-action=refresh-job-logs]').click();
+    await page.getByText('installation acknowledged',{exact:true}).waitFor();
+    assert.equal(await page.locator('.job-row').first().getAttribute('data-state'),'completed');checks++;
+    assert.equal(await page.locator('.job-row [data-job-timer]').first().textContent(),await page.locator('#job-log [data-job-timer]').textContent());checks++;
+    assert.ok((await page.locator('.job-row [data-job-timer]').first().textContent()).startsWith('安装耗时 '));checks++;
+    releaseDashboard();
+    await delayedRefresh;
+    assert.equal(await page.locator('.job-row').first().getAttribute('data-state'),'completed');checks++;
+    assert.equal(await page.locator('#job-log .badge').first().textContent(),'安装后已回报');checks++;
+    assert.equal(await page.locator('.job-row .job-progress').first().textContent(),await page.locator('#job-log .job-progress').textContent());checks++;
+
+    // Closing the log immediately refreshes other rows, without waiting for the poll timer.
+    Object.assign(fixture.jobs[1],{state:'failed',updated:1793347800});
+    fixture.server_time=1793347810;
+    await Promise.all([page.waitForResponse(r=>r.url().endsWith('/api/dashboard'),{timeout:2500}),page.locator('#close-modal').click()]);
+    await page.waitForFunction(()=>document.querySelectorAll('.job-row')[1]?.dataset.state==='failed');
+    assert.equal(await page.locator('.job-row').nth(1).getAttribute('data-state'),'failed');checks++;
 
     // Late requests from a closed task must not replace another task's dialog.
     let releaseLog;

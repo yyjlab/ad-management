@@ -12,6 +12,14 @@ if (embedded) document.documentElement.classList.add('embedded');
 let csrf = '', data = null, view = Object.hasOwn(labels, embedParams.get('view')) ? embedParams.get('view') : 'devices', busy = false;
 let chosen = new Set(), disks = new Map(), partitions = new Map(), profileId = '', search = '', filter = 'all', previewId = null;
 let toastTimer, settingsDirty = false, jobLog = null, serverTime = 0, serverSample = 0;
+const jobSnapshots = new Map();
+function latestJob(job, sampledAt) {
+  const previous = jobSnapshots.get(job.id);
+  const version = Math.max(Number(job.updated) || 0, Number(job.review?.reviewed_at) || 0);
+  if (previous && (version < previous.version || (version === previous.version && sampledAt < previous.sampledAt))) return previous.job;
+  jobSnapshots.set(job.id, {job, version, sampledAt});
+  return job;
+}
 
 function toast(message) { $('#toast').textContent = message; $('#toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').hidden = true, 6000); }
 async function api(path, method = 'GET', payload) {
@@ -33,7 +41,12 @@ async function refresh() {
   if (busy || $('#workspace').hidden) return;
   busy = true;
   try {
-    data = await api('/api/dashboard');
+    const snapshot = await api('/api/dashboard');
+    snapshot.jobs = snapshot.jobs.map(job => latestJob(job, snapshot.server_time));
+    data = snapshot;
+    const retained = new Set(data.jobs.map(job => job.id));
+    if (jobLog) retained.add(jobLog.id);
+    for (const id of jobSnapshots.keys()) if (!retained.has(id)) jobSnapshots.delete(id);
     syncServerClock(data.server_time);
     chosen = new Set([...chosen].filter(id => data.devices.some(d => d.id === id && selectable(d))));
     $('#connection-error').hidden = true;
@@ -42,6 +55,10 @@ async function refresh() {
     $('#last-updated').textContent = '更新于 ' + date(data.server_time);
     if (!(view === 'settings' && settingsDirty)) render();
     else if ($('#media-status')) $('#media-status').innerHTML=renderMediaStatus();
+    if (jobLog?.result) {
+      jobLog.result.job = latestJob(jobLog.result.job, jobLog.result.server_time);
+      renderJobLogs();
+    }
   } catch (e) { $('#connection-error').textContent = '数据读取失败：' + e.message; $('#connection-error').hidden = false; }
   finally { busy = false; }
 }
@@ -122,7 +139,7 @@ function renderProfiles() {
   $('#page-content').innerHTML = data.profiles.length ? `<div class="record-grid">${data.profiles.map(p=>`<article class="record"><div class="record-top"><h3>${h(p.name)}</h3><span class="badge good">UEFI / GPT</span></div><dl><dt>安装源</dt><dd>${h(data.sources.find(s=>s.id===p.source_id)?.name || '安装源不存在')}</dd><dt>镜像索引</dt><dd>${p.image_index}</dd><dt>分区方案</dt><dd>${p.disk_mode==='system_partition'?'保留分区布局，仅还原所选 Windows 分区':(p.system_gib?`C 盘 ${p.system_gib} GiB + D 盘剩余空间`:'单 C 盘，使用可用空间')}<br><small>${p.disk_mode==='system_partition'?'更新同盘 EFI 引导':'重建 EFI / MSR / 恢复分区'}</small></dd><dt>本地账号</dt><dd>${p.preserve_image_settings?'沿用镜像内账号':h(p.username)+' · 密码已保护'}</dd><dt>计算机名</dt><dd>${p.preserve_image_settings?'沿用镜像内名称':h(p.computer_prefix)+'-设备标识'}</dd></dl><div class="form-actions"><button class="small" data-action="edit-profile" data-id="${h(p.id)}">编辑方案</button></div></article>`).join('')}</div>` : empty('尚未配置装机方案','先添加安装源，再配置系统版本、分区和临时本地账号。');
 }
 function syncServerClock(seconds) {
-  if (Number.isFinite(seconds)) { serverTime = seconds; serverSample = performance.now(); }
+  if (Number.isFinite(seconds) && seconds >= serverTime) { serverTime = seconds; serverSample = performance.now(); }
 }
 function serverNow() { return serverTime ? serverTime + (performance.now()-serverSample)/1000 : Date.now()/1000; }
 function duration(seconds) {
@@ -208,7 +225,12 @@ async function loadJobLogs(before = null, automatic = false) {
     const result = await api('/api/jobs/'+encodeURIComponent(current.id)+'/events'+(before === null?'':'?before='+encodeURIComponent(before)));
     if (jobLog !== current || !$('#modal').open || !$('#job-log')) return;
     syncServerClock(result.server_time);
+    result.job = latestJob(result.job, result.server_time);
     current.before = before; current.result = result; current.error = '';
+    if (data) {
+      data.jobs = data.jobs.map(job => job.id === result.job.id ? result.job : job);
+      if (view === 'jobs' || view === 'devices') render();
+    }
   } catch (e) {
     if (jobLog === current) current.error = '日志读取失败：'+e.message;
   } finally {
@@ -388,7 +410,13 @@ document.addEventListener('submit',async e=>{
 });
 $('#close-modal').addEventListener('click',()=>$('#modal').close());
 $('#refresh').addEventListener('click',refresh);
-$('#modal').addEventListener('close',()=>{if(!$('#modal').open)jobLog=null;});
+$('#modal').addEventListener('close',()=>{
+  if (!$('#modal').open) {
+    const wasJobLog = jobLog !== null;
+    jobLog = null;
+    if (wasJobLog) refresh();
+  }
+});
 setInterval(()=>{if(!document.hidden)updateJobTimers();},1000);
 setInterval(()=>{
   if (document.hidden) return;
