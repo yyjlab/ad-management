@@ -642,6 +642,45 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(result.status_code, 200, result.json)
         return inv, reg, result.json['ids'][0]
 
+
+    def test_installation_timing_uses_first_start_and_freezes_at_failure(self):
+        inv, reg, job = self.wim_queued('system_partition')
+        route = f'/pc-deploy/api/agent/jobs/{job}'
+        queued = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
+        self.assertIsNone(queued['started_at'])
+        self.assertIsNone(queued['finished_at'])
+        self.post('/pc-deploy/api/agent/poll', inv, reg['token'])
+        self.assertEqual(self.post(route+'/start', inv, reg['token']).status_code, 200)
+        started = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
+        with self.store.connect() as c:
+            first_start = c.execute("SELECT MIN(created) FROM events WHERE job_id=? AND kind='installing'", (job,)).fetchone()[0]
+        self.assertEqual(started['started_at'], first_start)
+        self.assertEqual(started['kind'], 'wim')
+        self.assertIsNone(started['finished_at'])
+        for percent in (12, 43):
+            self.assertEqual(self.post(route+'/event', dict(stage='applying', percent=percent), reg['token']).status_code, 200)
+        running = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
+        self.assertEqual(running['started_at'], first_start)
+        self.assertIsNone(running['finished_at'])
+        self.post(route+'/event', dict(code='WIM', detail='fixture stop'), reg['token'])
+        stopped = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
+        self.assertEqual(stopped['state'], 'failed')
+        self.assertGreaterEqual(stopped['finished_at'], first_start)
+        history = self.client.get(f'/pc-deploy/api/jobs/{job}/events').json
+        self.assertEqual(history['job']['started_at'], first_start)
+        self.assertEqual(history['job']['finished_at'], stopped['finished_at'])
+        self.assertGreaterEqual(history['server_time'], stopped['finished_at'])
+        again = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
+        self.assertEqual(again['finished_at'], stopped['finished_at'])
+
+    def test_cancelled_before_installation_has_no_installation_start(self):
+        _, _, job = self.queued()
+        self.assertEqual(self.post(f'/pc-deploy/api/jobs/{job}/cancel').status_code, 200)
+        result = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
+        self.assertEqual(result['state'], 'cancelled')
+        self.assertIsNone(result['started_at'])
+        self.assertIsNotNone(result['finished_at'])
+
     def test_wim_progress_heartbeats_update_status_without_flooding_events(self):
         inv, reg, job = self.wim_queued('system_partition')
         self.post('/pc-deploy/api/agent/poll', inv, reg['token'])

@@ -245,13 +245,27 @@ def register_pc_deploy(host_app, current_user, touch_session):
         return jsonify(authenticated=True, username=g.pc_deploy_operator,
                        csrf=session['pc_deploy_csrf'], test_mode=host_app.testing)
 
-    def public_job(row, now):
+    def job_timings(c, identities):
+        if not identities:
+            return {}
+        placeholders = ','.join('?' for _ in identities)
+        return {r['job_id']: dict(r) for r in c.execute(f"""
+            SELECT job_id,
+                   MIN(CASE WHEN kind='installing' THEN created END) AS started_at,
+                   MIN(CASE WHEN kind IN ('completed','failed','cancelled') THEN created END) AS finished_at
+            FROM events WHERE job_id IN ({placeholders}) GROUP BY job_id
+        """, identities)}
+
+    def public_job(row, now, timing):
         data = json.loads(row['data'])
+        timing = timing or {}
         return dict(id=row['id'], device_id=row['device_id'], serial=data['target']['serial'],
                     model=data['target']['model'], disk=data['target']['disk'], profile=data['profile']['name'],
                     state=row['state'], state_name=STATES[row['state']], created=row['created'],
                     updated=row['updated'], stale=row['state'] in ACTIVE and now-row['updated'] > 600,
-                    progress=data.get('progress'))
+                    progress=data.get('progress'), kind=data['source'].get('kind', 'setup'),
+                    started_at=timing.get('started_at'),
+                    finished_at=None if row['state'] in ACTIVE else timing.get('finished_at') or row['updated'])
 
     @app.get('/api/dashboard')
     @admin
@@ -266,7 +280,9 @@ def register_pc_deploy(host_app, current_user, touch_session):
                 devices.append(item)
             sources = [dict(json.loads(r['data']), has_password=True) for r in c.execute('SELECT data FROM sources')]
             profiles = [dict(json.loads(r['data']), has_password=True) for r in c.execute('SELECT data FROM profiles')]
-            jobs = [public_job(r, now) for r in c.execute('SELECT * FROM jobs ORDER BY created DESC LIMIT 200')]
+            job_rows = list(c.execute('SELECT * FROM jobs ORDER BY created DESC LIMIT 200'))
+            timings = job_timings(c, [r['id'] for r in job_rows])
+            jobs = [public_job(r, now, timings.get(r['id'])) for r in job_rows]
             settings = {k: store.setting(c, k) for k in ('public_url', 'enabled', 'concurrency', 'ca_pem')}
             settings['enrollment_days'] = store.setting(c, 'enrollment_days', 7)
             media = media_dashboard(c)
@@ -302,8 +318,10 @@ def register_pc_deploy(host_app, current_user, touch_session):
                   AND (? IS NULL OR id<?)
                 ORDER BY id DESC LIMIT 101
             """, (identity, '正在还原封装 WIM', '正在配置系统引导与安装后回报', before, before))]
-            job = public_job(row, time.time())
-        return jsonify(job=job, events=logs[:100], next_before=logs[99]['id'] if len(logs) > 100 else None)
+            now = time.time()
+            job = public_job(row, now, job_timings(c, [identity]).get(identity))
+        return jsonify(job=job, events=logs[:100], next_before=logs[99]['id'] if len(logs) > 100 else None,
+                       server_time=now)
 
     @app.post('/api/sources')
     @app.put('/api/sources/<identity>')

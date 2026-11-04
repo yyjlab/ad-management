@@ -78,7 +78,7 @@ async function run() {
         const before=url.searchParams.has('before')?Number(url.searchParams.get('before')):Infinity;
         const events=(jobLogEvents[id]||[]).filter(e=>e.id<before).sort((a,b)=>b.id-a.id);
         if(jobLogGate){const gate=jobLogGate;jobLogGate=null;await gate;}
-        return route.fulfill({json:{job,events:events.slice(0,100),next_before:events.length>100?events[99].id:null}});
+        return route.fulfill({json:{job,events:events.slice(0,100),next_before:events.length>100?events[99].id:null,server_time:fixture.server_time}});
       }
       if(url.pathname==='/pc-deploy/api/dashboard') return route.fulfill({json:fixture||{devices:[],sources:[],profiles:[],jobs:[],events:[],settings,
         boot_files:{wimboot:false,'boot.wim':false,BCD:false,'boot.sdi':false},enrollments:[{id:'a'.repeat(64),expires_at:enrollmentExpires,uses:1}],media,server_time:1793347200}});
@@ -263,7 +263,7 @@ async function run() {
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));checks++;
 
     fixture.jobs=[{id:'progress-job',device_id:'laptop-1',model:'Fixture Laptop',serial:'TEST-LAPTOP',disk,
-      profile:'WIM preserve',state:'installing',created:1793347200,updated:1793347300,stale:false,
+      profile:'WIM preserve',kind:'wim',state:'installing',created:1793345800,started_at:1793346000,finished_at:null,updated:1793347300,stale:false,
       progress:{stage:'applying',percent:37,updated:1793347300}}];
     await page.setViewportSize({width:1440,height:1000});
     await page.locator('#refresh').click();
@@ -271,23 +271,36 @@ async function run() {
     await liveProgress.waitFor();
     assert.equal(await liveProgress.locator('progress').getAttribute('value'),'37');checks++;
     assert.ok((await liveProgress.textContent()).includes('37%'));checks++;
+
+    // Real task time is independent of the browser clock and stops at the recorded finish.
+    assert.ok((await page.locator('.job-timing').textContent()).includes('安装用时 20分'));checks++;
+    assert.ok(await page.locator('.duration-warning').isVisible());checks++;
+    const firstElapsed=await page.locator('[data-job-timer]').textContent();
+    await page.waitForFunction(text=>document.querySelector('[data-job-timer]')?.textContent!==text,firstElapsed);
+    assert.ok((await page.locator('[data-job-timer]').textContent()).startsWith('安装用时 '));checks++;
+    await page.evaluate(()=>{window.savedProgress=document.querySelector('.job-progress progress');});
     fixture.jobs[0].progress.percent=100;
     await page.locator('#refresh').click();
     await page.waitForFunction(()=>document.querySelector('.job-progress progress')?.getAttribute('value')==='100');
     assert.ok(!(await liveProgress.textContent()).includes('安装后系统已回报'));checks++;
+    assert.ok(await page.evaluate(()=>window.savedProgress===document.querySelector('.job-progress progress')));checks++;
     fixture.jobs[0].progress={stage:'boot_files',percent:null,updated:1793347400};
     await page.locator('#refresh').click();
     await page.waitForFunction(()=>document.querySelector('.job-progress')?.textContent.includes('配置 UEFI'));
-    assert.equal(await liveProgress.locator('progress').getAttribute('value'),null);checks++;
+    assert.equal(await liveProgress.locator('progress').getAttribute('value'),'100');checks++;
     fixture.jobs[0].state='awaiting_report';
     fixture.jobs[0].progress.stage='awaiting_report';
     await page.locator('#refresh').click();
     await page.waitForFunction(()=>document.querySelector('.job-progress')?.textContent.includes('等待新系统回报'));
     assert.ok((await liveProgress.textContent()).includes('最后回报'));checks++;
     fixture.jobs[0].state='completed';
+    fixture.jobs[0].finished_at=1793346610;
     await page.locator('#refresh').click();
     await page.waitForFunction(()=>document.querySelector('.job-progress')?.textContent.includes('安装后系统已回报'));
     assert.equal(await liveProgress.locator('progress').getAttribute('value'),'100');checks++;
+    assert.equal(await page.locator('[data-job-timer]').textContent(),'安装耗时 10分10秒');checks++;
+    await page.evaluate(()=>new Promise(resolve=>setTimeout(resolve,1100)));
+    assert.equal(await page.locator('[data-job-timer]').textContent(),'安装耗时 10分10秒');checks++;
     fixture.jobs[0].state='failed';
     fixture.jobs[0].progress={stage:'applying',percent:43,updated:1793347400};
     await page.locator('#refresh').click();
@@ -301,6 +314,16 @@ async function run() {
     await page.setViewportSize({width:390,height:844});
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));checks++;
 
+
+
+    fixture.jobs[0].state='installing';
+    fixture.jobs[0].progress={stage:'applying',percent:null,updated:1793347200};
+    await page.locator('#refresh').click();
+    await page.waitForFunction(()=>document.querySelector('.job-progress progress')?.getAttribute('value')==='0');
+    assert.ok((await page.locator('.job-progress').textContent()).includes('等待真实进度'));checks++;
+    assert.equal(await page.locator('progress:indeterminate').count(),0);checks++;
+    fixture.jobs[0].progress=null;
+    fixture.jobs[0].state='failed';
 
     // A row opens only its own durable task history, including older attempts on the same PC.
     fixture.events=[{id:900,job_id:null,kind:'source',created:1793347200,message:'platform source saved'}];

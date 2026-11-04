@@ -11,7 +11,7 @@ const embedded = embedParams.get('embedded') === '1' && window.parent !== window
 if (embedded) document.documentElement.classList.add('embedded');
 let csrf = '', data = null, view = Object.hasOwn(labels, embedParams.get('view')) ? embedParams.get('view') : 'devices', busy = false;
 let chosen = new Set(), disks = new Map(), partitions = new Map(), profileId = '', search = '', filter = 'all', previewId = null;
-let toastTimer, settingsDirty = false, jobLog = null;
+let toastTimer, settingsDirty = false, jobLog = null, serverTime = 0, serverSample = 0;
 
 function toast(message) { $('#toast').textContent = message; $('#toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').hidden = true, 6000); }
 async function api(path, method = 'GET', payload) {
@@ -34,6 +34,7 @@ async function refresh() {
   busy = true;
   try {
     data = await api('/api/dashboard');
+    syncServerClock(data.server_time);
     chosen = new Set([...chosen].filter(id => data.devices.some(d => d.id === id && selectable(d))));
     $('#connection-error').hidden = true;
     $('#live-badge').textContent = data.settings.enabled ? '真实下发已开启' : '真实下发关闭';
@@ -91,17 +92,58 @@ function renderSources() {
 function renderProfiles() {
   $('#page-content').innerHTML = data.profiles.length ? `<div class="record-grid">${data.profiles.map(p=>`<article class="record"><div class="record-top"><h3>${h(p.name)}</h3><span class="badge good">UEFI / GPT</span></div><dl><dt>安装源</dt><dd>${h(data.sources.find(s=>s.id===p.source_id)?.name || '安装源不存在')}</dd><dt>镜像索引</dt><dd>${p.image_index}</dd><dt>分区方案</dt><dd>${p.disk_mode==='system_partition'?'保留分区布局，仅还原所选 Windows 分区':(p.system_gib?`C 盘 ${p.system_gib} GiB + D 盘剩余空间`:'单 C 盘，使用可用空间')}<br><small>${p.disk_mode==='system_partition'?'更新同盘 EFI 引导':'重建 EFI / MSR / 恢复分区'}</small></dd><dt>本地账号</dt><dd>${p.preserve_image_settings?'沿用镜像内账号':h(p.username)+' · 密码已保护'}</dd><dt>计算机名</dt><dd>${p.preserve_image_settings?'沿用镜像内名称':h(p.computer_prefix)+'-设备标识'}</dd></dl><div class="form-actions"><button class="small" data-action="edit-profile" data-id="${h(p.id)}">编辑方案</button></div></article>`).join('')}</div>` : empty('尚未配置装机方案','先添加安装源，再配置系统版本、分区和临时本地账号。');
 }
+function syncServerClock(seconds) {
+  if (Number.isFinite(seconds)) { serverTime = seconds; serverSample = performance.now(); }
+}
+function serverNow() { return serverTime ? serverTime + (performance.now()-serverSample)/1000 : Date.now()/1000; }
+function duration(seconds) {
+  const total = Math.max(0, Math.floor(seconds)), hours = Math.floor(total/3600), minutes = Math.floor(total%3600/60);
+  return (hours ? hours+'小时'+String(minutes).padStart(2,'0') : minutes)+'分'+String(total%60).padStart(2,'0')+'秒';
+}
+function renderJobTiming(job) {
+  const started = Number.isFinite(job.started_at) && job.started_at > 0 ? job.started_at : null;
+  const active = activeStates.includes(job.state);
+  const ended = active ? null : (job.finished_at ?? job.updated ?? job.created);
+  return '<div class="job-timing"><strong data-job-timer data-start="'+h(started ?? job.created)+'" data-end="'+h(ended ?? '')+'" data-installed="'+(started !== null)+'" data-active="'+active+'"></strong><small>'+
+    (started === null ? '创建：'+h(date(job.created))+' · 尚未开始安装' : '开始：'+h(date(started)))+
+    '</small><small class="duration-warning" hidden>已超过 10 分钟，请查看当前阶段与日志</small></div>';
+}
+function updateJobTimers() {
+  const now = serverNow();
+  document.querySelectorAll('[data-job-timer]').forEach(el => {
+    const active = el.dataset.active === 'true', installed = el.dataset.installed === 'true';
+    const seconds = Math.max(0, (active ? now : Number(el.dataset.end))-Number(el.dataset.start));
+    el.textContent = !active && !installed ? '未开始安装' : (installed ? (active?'安装用时 ':'安装耗时 ') : '等待用时 ')+duration(seconds);
+    el.parentElement.querySelector('.duration-warning').hidden = !(active && installed && seconds > 600);
+  });
+}
+function captureJobProgress(root) {
+  return new Map([...root.querySelectorAll('progress[data-job-progress]')].map(el=>[el.dataset.jobProgress,el]));
+}
+function restoreJobProgress(root, previous) {
+  root.querySelectorAll('progress[data-job-progress]').forEach(fresh => {
+    const old = previous.get(fresh.dataset.jobProgress);
+    if (!old) return;
+    const value = fresh.getAttribute('value'), label = fresh.getAttribute('aria-label');
+    fresh.replaceWith(old);
+    old.getBoundingClientRect(); // Keep the existing width before transitioning to the new report.
+    old.setAttribute('aria-label',label);
+    old.setAttribute('value',value);
+  });
+}
 function renderJobProgress(job) {
   const progress = job.progress;
   if (!progress) return '';
-  const stages = {applying:'正在还原 WIM',boot_files:'正在配置 UEFI 引导',awaiting_report:'等待新系统回报'};
+  const stages = {applying:'正在还原 WIM',boot_files:'WIM 还原已结束 · 正在配置 UEFI 引导',awaiting_report:'等待新系统回报'};
   if (!Object.hasOwn(stages, progress.stage)) return '';
   const completed = job.state === 'completed', stopped = ['failed','cancelled'].includes(job.state);
-  const percent = completed ? 100 : progress.stage === 'applying' && Number.isInteger(progress.percent) && progress.percent >= 0 && progress.percent <= 100 ? progress.percent : null;
+  const known = Number.isInteger(progress.percent) && progress.percent >= 0 && progress.percent <= 100;
+  const restored = progress.stage === 'boot_files' || (job.kind === 'wim' && progress.stage === 'awaiting_report');
+  const percent = completed || restored ? 100 : known && progress.stage === 'applying' ? progress.percent : null;
   const label = completed ? '安装后系统已回报' : (stopped ? '已停止 · ' : '') + stages[progress.stage];
   const tone = completed ? ' completed' : job.state === 'failed' ? ' stopped' : job.state === 'cancelled' ? ' cancelled' : progress.stage === 'awaiting_report' ? ' pending' : '';
-  return '<div class="job-progress'+tone+'"><span>'+h(label)+(percent === null ? '' : ' · '+percent+'%')+'</span>' +
-    (stopped && percent === null ? '' : '<progress max="100"'+(percent === null ? '' : ' value="'+percent+'"')+' aria-label="'+h(label)+'"></progress>') +
+  return '<div class="job-progress'+tone+'"><span>'+h(label)+(percent === null ? ' · 等待真实进度' : ' · '+percent+'%')+'</span>' +
+    '<progress max="100" value="'+(percent ?? 0)+'" data-job-progress="'+h(job.id)+'" aria-label="'+h(label)+'"></progress>'+
     (Number.isFinite(progress.updated) ? '<small>最后回报：'+h(date(progress.updated))+'</small>' : '')+'</div>';
 }
 function renderLogEvents(events) {
@@ -118,11 +160,14 @@ function renderJobLogs() {
   if (!current || !$('#job-log')) return;
   const result = current.result, job = result?.job;
   const scroll = $('#modal').scrollTop;
+  const previous = captureJobProgress($('#job-log'));
   $('#job-log').innerHTML = (job ?
-    '<dl class="detail-grid"><div><dt>设备 / 整机序列号</dt><dd>'+h(job.model)+'<br><span class="mono">'+h(job.serial)+'</span></dd></div><div><dt>任务创建时间</dt><dd>'+h(date(job.created))+'</dd></div><div><dt>方案 / 目标盘</dt><dd>'+h(job.profile)+'<br>磁盘 '+h(job.disk.number)+' · '+h(size(job.disk.size_bytes))+'</dd></div><div><dt>任务状态</dt><dd>'+badge(job.state)+renderJobProgress(job)+'</dd></div></dl><p class="job-log-id">任务编号：<span class="mono">'+h(job.id)+'</span></p>' : '') +
+    '<dl class="detail-grid"><div><dt>设备 / 整机序列号</dt><dd>'+h(job.model)+'<br><span class="mono">'+h(job.serial)+'</span></dd></div><div><dt>安装时间</dt><dd>'+renderJobTiming(job)+'</dd></div><div><dt>方案 / 目标盘</dt><dd>'+h(job.profile)+'<br>磁盘 '+h(job.disk.number)+' · '+h(size(job.disk.size_bytes))+'</dd></div><div><dt>任务状态</dt><dd>'+badge(job.state)+renderJobProgress(job)+'</dd></div></dl><p class="job-log-id">任务编号：<span class="mono">'+h(job.id)+'</span></p>' : '') +
     '<div class="job-log-toolbar"><small>'+(current.before === null ? '最新记录在前 · 进行中每 8 秒刷新' : '正在查看历史记录')+'</small><div><button class="small" data-action="refresh-job-logs" '+(current.busy?'disabled':'')+'>'+(current.before === null?'刷新日志':'返回最新')+'</button> <button class="small" data-action="older-job-logs" '+(current.busy || !result?.next_before?'disabled':'')+'>更早记录</button></div></div>' +
     '<p id="job-log-error" class="error" role="alert" '+(current.error?'':'hidden')+'>'+h(current.error)+'</p><div class="log-list job-log-list">'+
     (result ? renderLogEvents(result.events) || empty('此任务暂无操作记录','尚未收到任务日志；已保存的记录不会因其他任务增多而消失。') : '<p class="modal-help">正在读取此任务日志…</p>')+'</div>';
+  restoreJobProgress($('#job-log'), previous);
+  updateJobTimers();
   $('#modal').scrollTop = scroll;
 }
 async function loadJobLogs(before = null, automatic = false) {
@@ -133,6 +178,7 @@ async function loadJobLogs(before = null, automatic = false) {
   try {
     const result = await api('/api/jobs/'+encodeURIComponent(current.id)+'/events'+(before === null?'':'?before='+encodeURIComponent(before)));
     if (jobLog !== current || !$('#modal').open || !$('#job-log')) return;
+    syncServerClock(result.server_time);
     current.before = before; current.result = result; current.error = '';
   } catch (e) {
     if (jobLog === current) current.error = '日志读取失败：'+e.message;
@@ -147,7 +193,10 @@ async function openJobLogs(id) {
   await loadJobLogs();
 }
 function renderJobs() {
-  $('#page-content').innerHTML = `<div class="table-wrap">${data.jobs.length?`<table><thead><tr><th>设备</th><th>方案 / 目标盘</th><th>任务状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody>${data.jobs.map(j=>`<tr class="job-row" data-state="${h(j.state)}"><td><span class="cell-title">${h(j.model)}</span><span class="cell-sub mono">${h(j.serial)}</span></td><td>${h(j.profile)}<span class="cell-sub">磁盘 ${j.disk.number} · ${h(size(j.disk.size_bytes))}</span></td><td>${badge(j.state)}${renderJobProgress(j)}${j.stale?'<span class="cell-sub error">长时间未回报，需现场核对</span>':''}</td><td>${h(date(j.created))}</td><td>${['queued','preflight'].includes(j.state)?`<button class="small" data-action="cancel-job" data-id="${h(j.id)}">取消任务</button>`:activeStates.includes(j.state)?`<button class="small" data-action="reconcile-job" data-id="${h(j.id)}">现场核对</button>`:''} <button class="small job-log-button" data-action="job-logs" data-id="${h(j.id)}">查看日志</button></td></tr>`).join('')}</tbody></table>`:empty('暂无安装任务')}</div><div class="subheading"><h3>平台操作记录</h3><small>最近 100 条 · 任务日志请点击对应任务查看</small></div><div class="log-list">${renderLogEvents(data.events) || empty('暂无操作记录')}</div>`;
+  const previous = captureJobProgress($('#page-content'));
+  $('#page-content').innerHTML = `<div class="table-wrap">${data.jobs.length?`<table><thead><tr><th>设备</th><th>方案 / 目标盘</th><th>任务状态</th><th>安装时间 / 用时</th><th>操作</th></tr></thead><tbody>${data.jobs.map(j=>`<tr class="job-row" data-state="${h(j.state)}"><td><span class="cell-title">${h(j.model)}</span><span class="cell-sub mono">${h(j.serial)}</span></td><td>${h(j.profile)}<span class="cell-sub">磁盘 ${j.disk.number} · ${h(size(j.disk.size_bytes))}</span></td><td>${badge(j.state)}${renderJobProgress(j)}${j.stale?'<span class="cell-sub error">长时间未回报，需现场核对</span>':''}</td><td>${renderJobTiming(j)}</td><td>${['queued','preflight'].includes(j.state)?`<button class="small" data-action="cancel-job" data-id="${h(j.id)}">取消任务</button>`:activeStates.includes(j.state)?`<button class="small" data-action="reconcile-job" data-id="${h(j.id)}">现场核对</button>`:''} <button class="small job-log-button" data-action="job-logs" data-id="${h(j.id)}">查看日志</button></td></tr>`).join('')}</tbody></table>`:empty('暂无安装任务')}</div><div class="subheading"><h3>平台操作记录</h3><small>最近 100 条 · 任务日志请点击对应任务查看</small></div><div class="log-list">${renderLogEvents(data.events) || empty('暂无操作记录')}</div>`;
+  restoreJobProgress($('#page-content'), previous);
+  updateJobTimers();
 }
 
 function validityLabel(days) { return days === null ? '永不过期' : (days ?? 7) + ' 天'; }
@@ -309,6 +358,7 @@ document.addEventListener('submit',async e=>{
 $('#close-modal').addEventListener('click',()=>$('#modal').close());
 $('#refresh').addEventListener('click',refresh);
 $('#modal').addEventListener('close',()=>{if(!$('#modal').open)jobLog=null;});
+setInterval(()=>{if(!document.hidden)updateJobTimers();},1000);
 setInterval(()=>{
   if (document.hidden) return;
   if (!$('#modal').open) refresh();
