@@ -54,6 +54,52 @@ function Get-DeploymentFailureDetail {
     $detail
 }
 
+function Get-DeploymentUsbLogRoot {
+    # Locate the Ventoy data partition by its USB disk and companion EFI volume.
+    # Drive letters in PE can differ from those on the preparation computer.
+    $roots = @()
+    foreach ($disk in @(Get-Disk | Where-Object { [string]$_.BusType -eq 'USB' })) {
+        try {
+            $parts = @(Get-Partition -DiskNumber $disk.Number -ErrorAction Stop)
+            $hasVentoy = $false
+            $root = $null
+            foreach ($part in $parts) {
+                $volume = $null
+                try { $volume = $part | Get-Volume -ErrorAction Stop } catch { continue }
+                if ([string]$volume.FileSystemLabel -eq 'VTOYEFI') { $hasVentoy = $true }
+                if ($part.PartitionNumber -eq 1 -and $part.DriveLetter -and
+                    [string]$part.DriveLetter -ne 'X' -and [string]$volume.FileSystemLabel -ne 'VTOYEFI') {
+                    $root = [string]$part.DriveLetter + ':\'
+                }
+            }
+            if ($hasVentoy -and $root) { $roots += $root }
+        } catch { continue }
+    }
+    $roots = @($roots | Select-Object -Unique)
+    if ($roots.Count -eq 1) { $roots[0] }
+}
+
+function Save-DeploymentFailureLog {
+    param([string]$Detail, [string]$Stage, [string]$LocalDirectory)
+    $text = 'Time: ' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + [Environment]::NewLine +
+        'Stage: ' + $Stage + [Environment]::NewLine + $Detail + [Environment]::NewLine + [Environment]::NewLine
+    $encoding = New-Object Text.UTF8Encoding($false)
+    $localPath = Join-Path $LocalDirectory 'deployment-error.txt'
+    try { [IO.File]::WriteAllText($localPath, $text, $encoding) }
+    catch { Write-Host 'Could not save the PE error log.' -ForegroundColor Yellow }
+    try {
+        $usbRoot = Get-DeploymentUsbLogRoot
+        if ($usbRoot) {
+            $usbPath = Join-Path $usbRoot 'PCDeploy-error.log'
+            [IO.File]::AppendAllText($usbPath, $text, $encoding)
+            Write-Host ('USB error log: ' + $usbPath) -ForegroundColor Yellow
+        } else {
+            Write-Host 'No unique Ventoy USB data partition found. Error log remains in PE.' -ForegroundColor Yellow
+        }
+    } catch { Write-Host 'USB error log could not be saved. Error log remains in PE.' -ForegroundColor Yellow }
+    Write-Host ('PE error log: ' + $localPath) -ForegroundColor Yellow
+}
+
 function Test-TransientPlatformFailure {
     param([Management.Automation.ErrorRecord]$Failure)
     $exception = $Failure.Exception
@@ -559,15 +605,11 @@ try {
 } catch {
     $failure = $_
     $detail = Get-DeploymentFailureDetail $failure $job $token $cfg
-    $logPath = Join-Path $PSScriptRoot 'deployment-error.txt'
-    try {
-        [IO.File]::WriteAllText($logPath, ('Stage: ' + $script:FailureCode + [Environment]::NewLine + $detail), (New-Object Text.UTF8Encoding($false)))
-    } catch { Write-Host 'Could not save the local error log.' -ForegroundColor Yellow }
+    Save-DeploymentFailureLog $detail $script:FailureCode $PSScriptRoot
     if ($job) {
         try { Invoke-Platform "/api/agent/jobs/$($job.id)/event" $token @{code = $script:FailureCode} | Out-Null } catch { }
     }
     Write-Host ('Stopped at stage: ' + $script:FailureCode + '. No automatic retry.') -ForegroundColor Red
     Write-Host $detail -ForegroundColor Red
-    Write-Host ('Local error log: ' + $logPath) -ForegroundColor Yellow
     throw 'Deployment stopped. See the diagnostic above; secrets have been redacted.'
 }

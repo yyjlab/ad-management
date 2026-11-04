@@ -412,6 +412,63 @@ $count++
 }
 $count+=2
 
+# USB log selection must ignore internal disks and the EFI partition.
+& {
+    $script:usbFixture = 'one'
+    function Get-Disk {
+        [pscustomobject]@{Number=0;BusType='NVMe'}
+        if ($script:usbFixture -ne 'absent') { [pscustomobject]@{Number=4;BusType='USB'} }
+        if ($script:usbFixture -eq 'multiple') { [pscustomobject]@{Number=5;BusType='USB'} }
+    }
+    function Get-Partition {
+        param($DiskNumber)
+        if ($DiskNumber -eq 0) { throw 'Internal disks must never be selected for USB logs.' }
+        $letter = if ($DiskNumber -eq 4) { 'F' } else { 'H' }
+        [pscustomobject]@{PartitionNumber=1;DriveLetter=$letter;FileSystemLabel='SanDisk'}
+        [pscustomobject]@{PartitionNumber=2;DriveLetter='G';FileSystemLabel='VTOYEFI'}
+    }
+    function Get-Volume {
+        param([Parameter(ValueFromPipeline=$true)]$InputObject)
+        process { $InputObject }
+    }
+    if ((Get-DeploymentUsbLogRoot) -cne 'F:\') { throw 'Ventoy data partition was not selected.' }
+    $script:usbFixture = 'multiple'
+    if (Get-DeploymentUsbLogRoot) { throw 'Ambiguous USB log target was selected.' }
+    $script:usbFixture = 'absent'
+    if (Get-DeploymentUsbLogRoot) { throw 'Missing USB disk was selected.' }
+}
+$count+=3
+
+# Exercise log persistence and failure fallback with isolated temporary fixtures.
+& {
+    $fixture = Join-Path ([IO.Path]::GetTempPath()) ('pcdeploy-log-test-' + [guid]::NewGuid().ToString('N'))
+    $local = Join-Path $fixture 'PE'
+    $usb = Join-Path $fixture 'USB'
+    [IO.Directory]::CreateDirectory($local) | Out-Null
+    [IO.Directory]::CreateDirectory($usb) | Out-Null
+    try {
+        $script:logFixtureRoot = $usb
+        function Get-DeploymentUsbLogRoot { $script:logFixtureRoot }
+        Save-DeploymentFailureLog 'first sanitized error' 'DISK_CHANGED' $local
+        Save-DeploymentFailureLog 'second sanitized error' 'SOURCE' $local
+        $history = [IO.File]::ReadAllText((Join-Path $usb 'PCDeploy-error.log'))
+        if ($history -notlike '*first sanitized error*' -or $history -notlike '*second sanitized error*') {
+            throw 'USB error history was overwritten.'
+        }
+        $script:logFixtureRoot = Join-Path $fixture 'missing'
+        Save-DeploymentFailureLog 'USB write failed' 'SOURCE' $local
+        if ([IO.File]::ReadAllText((Join-Path $local 'deployment-error.txt')) -notlike '*USB write failed*') {
+            throw 'USB failure lost the PE fallback log.'
+        }
+        $script:logFixtureRoot = $null
+        Save-DeploymentFailureLog 'USB removed' 'SOURCE' $local
+        if ([IO.File]::ReadAllText((Join-Path $local 'deployment-error.txt')) -notlike '*USB removed*') {
+            throw 'Missing USB lost the PE fallback log.'
+        }
+    } finally { [IO.Directory]::Delete($fixture, $true) }
+}
+$count+=3
+
 Write-Output "$count PowerShell protection and parser checks passed. No disk command was executed."
 
 # Metadata-only quick inspection. All I/O is mocked.
