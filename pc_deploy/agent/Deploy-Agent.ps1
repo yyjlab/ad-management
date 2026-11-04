@@ -25,6 +25,17 @@ function Invoke-Platform {
         -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($json)) -TimeoutSec 30
 }
 
+function Send-DeploymentProgress {
+    param($Job, [string]$Token, [string]$Stage)
+    # After one-time authorization, reporting must not interrupt local recovery of the target disk.
+    try {
+        Invoke-Platform "/api/agent/jobs/$($Job.id)/event" $Token @{stage=$Stage} | Out-Null
+    } catch {
+        # Do not expose the HTTP exception, which may contain credentials.
+        Write-Host ("Progress report unavailable at {0}. Continuing the authorized local installation." -f $Stage) -ForegroundColor Yellow
+    }
+}
+
 function Get-DeploymentFailureDetail {
     param([Management.Automation.ErrorRecord]$Failure, $Job, [string]$Token, $Config)
     $detail = 'Error: ' + $Failure.Exception.Message
@@ -350,8 +361,17 @@ function Invoke-WimDeployment {
             $Job.target.partitions.efi.filesystem -cne 'FAT32') { throw 'Unsafe partition selection.' }
         $windows = Get-VerifiedPartitionObject $number $Job.target.partitions.windows
         $efi = Get-VerifiedPartitionObject $number $Job.target.partitions.efi
-        Add-PartitionAccessPath -DiskNumber $number -PartitionNumber $windows.PartitionNumber -AccessPath ($letters[0] + ':\')
-        Add-PartitionAccessPath -DiskNumber $number -PartitionNumber $efi.PartitionNumber -AccessPath ($letters[1] + ':\')
+        # WinPE may already have mounted either approved partition; each supports only one drive letter.
+        $partitions = @($windows, $efi)
+        for ($index = 0; $index -lt $partitions.Count; $index++) {
+            $partition = $partitions[$index]
+            $existingLetter = [string]$partition.DriveLetter
+            if ($existingLetter -match '^[A-Za-z]$') {
+                $letters[$index] = $existingLetter.ToUpperInvariant()
+            } else {
+                Add-PartitionAccessPath -DiskNumber $number -PartitionNumber $partition.PartitionNumber -AccessPath ($letters[$index] + ':\')
+            }
+        }
         Assert-PartitionBinding $letters[0] $number $windows
         Assert-PartitionBinding $letters[1] $number $efi
         Get-VerifiedPartitionObject $number $Job.target.partitions.windows | Out-Null
@@ -388,13 +408,13 @@ function Invoke-WimDeployment {
     Assert-PartitionBinding $letters[1] $number $efi
     $root = $letters[0] + ':\'
     $script:FailureCode = 'WIM'
-    Invoke-Platform "/api/agent/jobs/$($Job.id)/event" $Token @{stage='applying'} | Out-Null
+    Send-DeploymentProgress $Job $Token 'applying'
     Invoke-DeploymentNative dism.exe @('/Apply-Image', ('/ImageFile:"' + $ImagePath + '"'),
         ('/Index:' + [int]$Job.profile.image_index), ('/ApplyDir:' + $root), '/CheckIntegrity', '/Verify') 'applying' $Job $Token
     if (-not (Test-Path -LiteralPath (Join-Path $root 'Windows\System32\config\SYSTEM'))) {
         throw 'Applied image does not contain a Windows system.'
     }
-    Invoke-Platform "/api/agent/jobs/$($Job.id)/event" $Token @{stage='boot_files'} | Out-Null
+    Send-DeploymentProgress $Job $Token 'boot_files'
     Add-OfflineCompletion (Join-Path $root 'Windows') $Job.id $Authorization.finalizer_command
     Assert-PartitionBinding $letters[0] $number $windows
     Assert-PartitionBinding $letters[1] $number $efi
@@ -409,7 +429,7 @@ function Invoke-WimDeployment {
         Invoke-DeploymentNative (Join-Path $root 'Windows\System32\reagentc.exe') @('/Setreimage', '/Path', $recoveryPath, '/Target', (Join-Path $root 'Windows')) 'boot_files' $Job $Token
     }
     $script:FailureCode = 'NETWORK'
-    Invoke-Platform "/api/agent/jobs/$($Job.id)/event" $Token @{stage='awaiting_report'} | Out-Null
+    Send-DeploymentProgress $Job $Token 'awaiting_report'
     Write-Host 'WIM applied and UEFI boot configured. Restarting; completion still requires the new Windows report.'
     & wpeutil.exe reboot
     if ($LASTEXITCODE -ne 0) { throw 'Restart failed. Restart the approved machine manually.' }

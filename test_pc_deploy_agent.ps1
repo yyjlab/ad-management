@@ -111,7 +111,17 @@ foreach ($case in @(
     @{mode='system_partition';fail='binding';expected='failure'},
     @{mode='wipe_disk';fail='applying';expected='failure'},
     @{mode='system_partition';fail='boot_files';expected='failure'},
-    @{mode='wipe_disk';fail='disk';expected='failure'}
+    @{mode='wipe_disk';fail='disk';expected='failure'},
+    @{mode='wipe_disk';fail='';reportFailure='applying';expected='success'},
+    @{mode='wipe_disk';fail='';reportFailure='boot_files';expected='success'},
+    @{mode='wipe_disk';fail='';reportFailure='awaiting_report';expected='success'},
+    @{mode='system_partition';fail='';reportFailure='applying';expected='success'},
+    @{mode='system_partition';fail='';reportFailure='boot_files';expected='success'},
+    @{mode='system_partition';fail='';reportFailure='awaiting_report';expected='success'},
+    @{mode='system_partition';fail='';windowsLetter='C';expected='success'},
+    @{mode='system_partition';fail='';efiLetter='Z';expected='success'},
+    @{mode='system_partition';fail='';windowsLetter='C';efiLetter='Z';expected='success'},
+    @{mode='system_partition';fail='existing_binding';windowsLetter='C';efiLetter='Z';expected='failure'}
 )) {
     & {
         param($case)
@@ -125,11 +135,24 @@ foreach ($case in @(
         $target.partitions = @($efiExpected,$winExpected)
         foreach ($entry in $target.partitions) {
             $partitionsByNumber[[int]$entry.number] = [pscustomobject]@{DiskNumber=7;PartitionNumber=$entry.number;
-                Guid=$entry.guid;GptType=$entry.gpt_type;Offset=$entry.offset;Size=$entry.size_bytes;IsReadOnly=$false;IsOffline=$false}
+                Guid=$entry.guid;GptType=$entry.gpt_type;Offset=$entry.offset;Size=$entry.size_bytes;IsReadOnly=$false;IsOffline=$false;DriveLetter=[char]0}
         }
         $job = @{id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';source=@{kind='wim'};profile=@{disk_mode=$case.mode;system_gib=128;image_index=1};
                  target=@{disk=$target;partitions=@{windows=$winExpected;efi=$efiExpected}}}
         $auth = @{kind='wim';finalizer_command='mock-authorized-completion'}
+        $winLetter='W'; $efiLetter='S'
+        foreach ($mount in @(@{number=3;letter=$case.windowsLetter},@{number=1;letter=$case.efiLetter})) {
+            if ($mount.letter) {
+                $obj=$partitionsByNumber[$mount.number]
+                $obj.DriveLetter=$mount.letter
+                $bindings[$mount.letter]=$obj
+            }
+        }
+        if ($case.windowsLetter) { $winLetter=$case.windowsLetter }
+        if ($case.efiLetter) { $efiLetter=$case.efiLetter }
+        if ($case.fail -eq 'existing_binding') {
+            $bindings[$winLetter]=[pscustomobject]@{DiskNumber=0;PartitionNumber=3;Guid=$winExpected.guid;Offset=1GB;Size=128GB}
+        }
         $RegistrationOnly=$false
         function Assert-WinPE { }
         function Get-InstallationMarker { $job.id }
@@ -178,6 +201,9 @@ foreach ($case in @(
             param($DiskNumber,$PartitionNumber,$AccessPath)
             if($DiskNumber -ne 7) { throw 'Wrong disk access path.' }
             $obj=$partitionsByNumber[[int]$PartitionNumber]
+            if ([string]$obj.DriveLetter -match '^[A-Za-z]$') { throw 'A partition cannot receive a second drive letter.' }
+            $calls.Add("mount:$PartitionNumber")
+            $obj.DriveLetter=$AccessPath.Substring(0,1)
             if($case.fail -eq 'binding') {
                 $obj=[pscustomobject]@{DiskNumber=0;PartitionNumber=$PartitionNumber;Offset=$obj.Offset;Size=$obj.Size;Guid=$obj.Guid}
             }
@@ -192,19 +218,22 @@ foreach ($case in @(
         function Invoke-Platform {
             param($Route,$Token,$Data)
             $calls.Add("event:$($Data.stage)")
+            if ($case.reportFailure -eq $Data.stage) {
+                throw [Net.WebException]::new('Simulated progress outage.',[Net.WebExceptionStatus]::ConnectFailure)
+            }
         }
         function Invoke-DeploymentNative {
             param($File,$Arguments,$Stage,$Job,$Token)
             $calls.Add("native:$Stage")
-            if($Stage -eq 'applying' -and ($Arguments -notcontains '/Index:1' -or $Arguments -notcontains '/ApplyDir:W:\')) {
+            if($Stage -eq 'applying' -and ($Arguments -notcontains '/Index:1' -or $Arguments -notcontains ('/ApplyDir:' + $winLetter + ':\'))) {
                 throw 'Wrong WIM application target.'
             }
-            if($Stage -eq 'boot_files' -and $Arguments -notcontains 'S:') {throw 'Wrong EFI target.'}
+            if($Stage -eq 'boot_files' -and $Arguments -notcontains ($efiLetter + ':')) {throw 'Wrong EFI target.'}
             if($case.fail -eq $Stage) { throw 'Simulated native tool failure.' }
         }
         function Add-OfflineCompletion {
             param($WindowsRoot,$JobId,$Command)
-            if($WindowsRoot -ne 'W:\Windows' -or $JobId -ne $job.id) { throw 'Wrong offline completion target.' }
+            if($WindowsRoot -ne ($winLetter + ':\Windows') -or $JobId -ne $job.id) { throw 'Wrong offline completion target.' }
             $calls.Add('completion')
         }
         function Join-Path {
@@ -213,7 +242,7 @@ foreach ($case in @(
         }
         function Test-Path {
             param($LiteralPath)
-            $LiteralPath -eq 'W:\Windows\System32\config\SYSTEM'
+            $LiteralPath -eq ($winLetter + ':\Windows\System32\config\SYSTEM')
         }
         function wpeutil.exe {
             param($Action)
@@ -227,10 +256,24 @@ foreach ($case in @(
         if($failed -ne ($case.expected -eq 'failure')) { throw "Unexpected result: $($case.mode) / $($case.fail)" }
         if($failed -and $calls.Contains('reboot')) { throw 'Failed deployment rebooted.' }
         if(-not $failed -and -not $calls.Contains('event:awaiting_report')) { throw 'Missing pending completion state.' }
+        if (-not $failed) {
+            foreach ($required in @('native:applying','completion','native:boot_files','reboot')) {
+                if (@($calls | Where-Object { $_ -eq $required }).Count -ne 1) {
+                    throw "The authorized local step was skipped or repeated: $required"
+                }
+            }
+            foreach ($stage in @('applying','boot_files','awaiting_report')) {
+                if (@($calls | Where-Object { $_ -eq "event:$stage" }).Count -ne 1) {
+                    throw 'Progress reporting was skipped or automatically retried.'
+                }
+            }
+        }
+        if ($case.windowsLetter -and $calls.Contains('mount:3')) { throw 'An existing Windows drive letter was reassigned.' }
+        if ($case.efiLetter -and $calls.Contains('mount:1')) { throw 'An existing EFI drive letter was reassigned.' }
         if($case.mode -eq 'system_partition') {
             if($calls -match '^clear:|^initialize:|^create:' -or $calls.Contains('format:1:FAT32')) { throw 'Preserve mode changed the disk layout or formatted EFI.' }
         }
-        if($case.fail -in @('partition','binding','disk') -and ($calls -match '^clear:|^initialize:|^format:|^native:')) {
+        if($case.fail -in @('partition','binding','existing_binding','disk') -and ($calls -match '^clear:|^initialize:|^format:|^native:')) {
             throw 'Identity mismatch did not stop before destructive operations.'
         }
     } $case
