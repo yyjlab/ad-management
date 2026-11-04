@@ -25,6 +25,24 @@ function Invoke-Platform {
         -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($json)) -TimeoutSec 30
 }
 
+function Get-DeploymentFailureDetail {
+    param([Management.Automation.ErrorRecord]$Failure, $Job, [string]$Token, $Config)
+    $detail = 'Error: ' + $Failure.Exception.Message
+    if ($Failure.ErrorDetails -and $Failure.ErrorDetails.Message) {
+        $detail += [Environment]::NewLine + $Failure.ErrorDetails.Message
+    }
+    if ($Failure.InvocationInfo.ScriptLineNumber) {
+        $detail += [Environment]::NewLine + 'Script line: ' + $Failure.InvocationInfo.ScriptLineNumber
+    }
+    # Never include request bodies, credentials, or the original source-code line.
+    foreach ($secret in @($Token, $Job.source_password, $Config.enrollment_token)) {
+        if (-not [string]::IsNullOrEmpty([string]$secret)) {
+            $detail = $detail.Replace([string]$secret, '[REDACTED]')
+        }
+    }
+    $detail
+}
+
 function Test-TransientPlatformFailure {
     param([Management.Automation.ErrorRecord]$Failure)
     $exception = $Failure.Exception
@@ -519,9 +537,17 @@ try {
     }
     Invoke-Deployment $job $token $bootId
 } catch {
+    $failure = $_
+    $detail = Get-DeploymentFailureDetail $failure $job $token $cfg
+    $logPath = Join-Path $PSScriptRoot 'deployment-error.txt'
+    try {
+        [IO.File]::WriteAllText($logPath, ('Stage: ' + $script:FailureCode + [Environment]::NewLine + $detail), (New-Object Text.UTF8Encoding($false)))
+    } catch { Write-Host 'Could not save the local error log.' -ForegroundColor Yellow }
     if ($job) {
         try { Invoke-Platform "/api/agent/jobs/$($job.id)/event" $token @{code = $script:FailureCode} | Out-Null } catch { }
     }
-    Write-Host 'Stopped. Check platform and local Setup logs. No automatic retry.' -ForegroundColor Red
-    throw 'Deployment did not finish normally. Credentials and raw errors are not printed.'
+    Write-Host ('Stopped at stage: ' + $script:FailureCode + '. No automatic retry.') -ForegroundColor Red
+    Write-Host $detail -ForegroundColor Red
+    Write-Host ('Local error log: ' + $logPath) -ForegroundColor Yellow
+    throw 'Deployment stopped. See the diagnostic above; secrets have been redacted.'
 }

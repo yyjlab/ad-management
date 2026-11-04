@@ -352,6 +352,23 @@ $count+=4
 }
 $count++
 
+# Preserve the real failure while redacting secrets, including server error details.
+& {
+    $failure = $null
+    try { throw 'Partition access path failed. password-fixture token-fixture' } catch { $failure = $_ }
+    $failure.ErrorDetails = New-Object Management.Automation.ErrorDetails('Server reason: enrollment-fixture')
+    $detail = Get-DeploymentFailureDetail $failure @{source_password='password-fixture'} 'token-fixture' @{enrollment_token='enrollment-fixture'}
+    if ($detail -notlike '*Partition access path failed*' -or $detail -notlike '*Server reason:*' -or $detail -notlike '*Script line:*') {
+        throw 'The original failure diagnostic was lost.'
+    }
+    foreach ($secret in @('password-fixture','token-fixture','enrollment-fixture')) {
+        if ($detail.Contains($secret)) { throw 'A diagnostic exposed a secret.' }
+    }
+    $detail = Get-DeploymentFailureDetail $failure $null '' $null
+    if ($detail -notlike '*Partition access path failed*') { throw 'Failure before a task was assigned lost its diagnostic.' }
+}
+$count+=2
+
 Write-Output "$count PowerShell protection and parser checks passed. No disk command was executed."
 
 # Metadata-only quick inspection. All I/O is mocked.
