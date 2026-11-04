@@ -700,6 +700,18 @@ def register_pc_deploy(host_app, current_user, touch_session):
             row, job_data = agent_job(c, dev, identity, ('preflight', 'installing', 'awaiting_report'))
             if value.get('code') in ERRORS:
                 state, message = 'failed', ERRORS[value['code']]
+                detail = value.get('detail')
+                if isinstance(detail, str):
+                    detail = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '',
+                                    detail.replace('\r\n', '\n').replace('\r', '\n')).strip()
+                if isinstance(detail, str) and detail:
+                    # Do not trust client-side redaction; also hide this job's stored credentials.
+                    sensitive = [bearer(), *store.decrypt(row['secret']).values()]
+                    for secret in sorted((s for s in sensitive if isinstance(s, str) and s), key=len, reverse=True):
+                        detail = detail.replace(secret, '[REDACTED]')
+                    message += '\n客户端错误详情：\n' + detail[:8192]
+                else:
+                    message += '\n客户端未上报有效错误详情；当前日志仅包含错误分类。'
             elif value.get('stage') == 'verifying' and row['state'] == 'preflight':
                 state, message = 'preflight', '正在核对安装源 SHA-256，尚未启动安装'
             elif (value.get('stage') in ('applying', 'boot_files') and row['state'] == 'installing'

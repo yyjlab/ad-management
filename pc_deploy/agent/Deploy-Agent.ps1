@@ -39,11 +39,20 @@ function Send-DeploymentProgress {
 function Get-DeploymentFailureDetail {
     param([Management.Automation.ErrorRecord]$Failure, $Job, [string]$Token, $Config)
     $detail = 'Error: ' + $Failure.Exception.Message
-    if ($Failure.ErrorDetails -and $Failure.ErrorDetails.Message) {
-        $detail += [Environment]::NewLine + $Failure.ErrorDetails.Message
+    if ($Failure.InvocationInfo.MyCommand.Name) {
+        $detail += [Environment]::NewLine + 'Command: ' + $Failure.InvocationInfo.MyCommand.Name
     }
     if ($Failure.InvocationInfo.ScriptLineNumber) {
         $detail += [Environment]::NewLine + 'Script line: ' + $Failure.InvocationInfo.ScriptLineNumber
+    }
+    if ($Failure.FullyQualifiedErrorId) {
+        $detail += [Environment]::NewLine + 'Error ID: ' + $Failure.FullyQualifiedErrorId
+    }
+    if ($Failure.ScriptStackTrace) {
+        $detail += [Environment]::NewLine + 'Stack: ' + $Failure.ScriptStackTrace
+    }
+    if ($Failure.ErrorDetails -and $Failure.ErrorDetails.Message) {
+        $detail += [Environment]::NewLine + $Failure.ErrorDetails.Message
     }
     # Never include request bodies, credentials, or the original source-code line.
     foreach ($secret in @($Token, $Job.source_password, $Config.enrollment_token)) {
@@ -51,6 +60,7 @@ function Get-DeploymentFailureDetail {
             $detail = $detail.Replace([string]$secret, '[REDACTED]')
         }
     }
+    if ($detail.Length -gt 8192) { $detail = $detail.Substring(0, 8160) + [Environment]::NewLine + '[Log truncated.]' }
     $detail
 }
 
@@ -291,7 +301,20 @@ function Invoke-DeploymentNative {
         try { Invoke-Platform "/api/agent/jobs/$($Job.id)/event" $Token @{stage=$Stage} | Out-Null } catch { }
     }
     $process.WaitForExit()
-    if ($process.ExitCode -ne 0) { throw "Deployment tool failed at $Stage. See local logs. No automatic retry." }
+    if ($process.ExitCode -ne 0) {
+        $failure = [Management.Automation.ErrorRecord]::new(
+            [InvalidOperationException]::new("Deployment tool failed at $Stage (exit code $($process.ExitCode)). No automatic retry."),
+            'DeploymentNativeFailed', [Management.Automation.ErrorCategory]::InvalidResult, $null)
+        $output = @()
+        foreach ($extension in @('.err', '.log')) {
+            try {
+                $tail = @(Get-Content -LiteralPath ($log + $extension) -Tail 20 -ErrorAction Stop)
+                if ($tail.Count) { $output += $extension + ':'; $output += $tail }
+            } catch { }
+        }
+        if ($output.Count) { $failure.ErrorDetails = New-Object Management.Automation.ErrorDetails($output -join [Environment]::NewLine) }
+        throw $failure
+    }
 }
 
 function Merge-CompletionAnswer {
@@ -605,10 +628,12 @@ try {
 } catch {
     $failure = $_
     $detail = Get-DeploymentFailureDetail $failure $job $token $cfg
-    Save-DeploymentFailureLog $detail $script:FailureCode $PSScriptRoot
     if ($job) {
-        try { Invoke-Platform "/api/agent/jobs/$($job.id)/event" $token @{code = $script:FailureCode} | Out-Null } catch { }
+        try {
+            Invoke-Platform "/api/agent/jobs/$($job.id)/event" $token @{code=$script:FailureCode;detail=$detail} | Out-Null
+        } catch { Write-Host 'Could not report the failure to the platform. Keeping the local error log.' -ForegroundColor Yellow }
     }
+    Save-DeploymentFailureLog $detail $script:FailureCode $PSScriptRoot
     Write-Host ('Stopped at stage: ' + $script:FailureCode + '. No automatic retry.') -ForegroundColor Red
     Write-Host $detail -ForegroundColor Red
     throw 'Deployment stopped. See the diagnostic above; secrets have been redacted.'

@@ -642,6 +642,54 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(result.status_code, 200, result.json)
         return inv, reg, result.json['ids'][0]
 
+    def test_failure_details_reach_dashboard_without_exposing_job_secrets(self):
+        inv, reg, job = self.queued()
+        self.post('/pc-deploy/api/agent/poll', inv, reg['token'])
+        self.assertEqual(self.post(f'/pc-deploy/api/agent/jobs/{job}/start', inv, reg['token']).status_code, 200)
+        with self.store.connect() as c:
+            secret = self.store.decrypt(c.execute('SELECT secret FROM jobs WHERE id=?', (job,)).fetchone()['secret'])
+        sensitive = [reg['token']] + [v for v in secret.values() if isinstance(v, str) and v]
+        detail = 'Error: access path denied\nCommand: Add-PartitionAccessPath\nScript line: 372\n' + '\n'.join(sensitive)
+        response = self.post(f'/pc-deploy/api/agent/jobs/{job}/event',
+                             dict(code='DISK_CHANGED', detail=detail), reg['token'])
+        self.assertEqual(response.status_code, 200, response.json)
+        dashboard = self.client.get('/pc-deploy/api/dashboard').json
+        self.assertEqual(dashboard['jobs'][0]['state'], 'failed')
+        message = next(e['message'] for e in dashboard['events'] if e['kind'] == 'failed')
+        self.assertIn('客户端错误详情：\nError: access path denied', message)
+        self.assertIn('Command: Add-PartitionAccessPath\nScript line: 372', message)
+        self.assertIn('[REDACTED]', message)
+        for value in sensitive:
+            self.assertNotIn(value, json.dumps(dashboard))
+
+    def test_failure_details_are_bounded_and_control_characters_removed(self):
+        inv, reg, job = self.wim_queued('system_partition')
+        self.post('/pc-deploy/api/agent/poll', inv, reg['token'])
+        self.post(f'/pc-deploy/api/agent/jobs/{job}/start', inv, reg['token'])
+        response = self.post(f'/pc-deploy/api/agent/jobs/{job}/event',
+                             dict(code='DISK_CHANGED', detail='Error:\r\n\x00access denied\t' + 'x' * 12000), reg['token'])
+        self.assertEqual(response.status_code, 200, response.json)
+        events = self.client.get('/pc-deploy/api/dashboard').json['events']
+        message = next(e['message'] for e in events if e['kind'] == 'failed')
+        detail = message.split('\n客户端错误详情：\n', 1)[1]
+        self.assertLessEqual(len(detail), 8192)
+        self.assertTrue(detail.startswith('Error:\naccess denied\t'))
+        self.assertNotIn('\x00', detail)
+        self.assertNotIn('\r', detail)
+
+    def test_legacy_or_malformed_failure_detail_does_not_lose_failure_event(self):
+        for detail in (None, '', {'unexpected': 'object'}):
+            with self.subTest(detail=detail):
+                inv, reg, job = self.wim_queued('system_partition')
+                self.post('/pc-deploy/api/agent/poll', inv, reg['token'])
+                self.post(f'/pc-deploy/api/agent/jobs/{job}/start', inv, reg['token'])
+                response = self.post(f'/pc-deploy/api/agent/jobs/{job}/event',
+                                     dict(code='DISK_CHANGED', detail=detail), reg['token'])
+                self.assertEqual(response.status_code, 200, response.json)
+                events = self.client.get('/pc-deploy/api/dashboard').json['events']
+                self.assertIn('客户端未上报有效错误详情', events[0]['message'])
+                self.assertEqual(events[0]['kind'], 'failed')
+
     def test_wim_preserve_settings_does_not_require_new_local_password(self):
         self.wim_fixtures()
         d = self.client.get('/pc-deploy/api/dashboard').json

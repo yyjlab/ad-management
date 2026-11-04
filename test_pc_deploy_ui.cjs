@@ -238,6 +238,18 @@ async function run() {
     assert.ok(await page.locator('#disk-mode').isHidden());checks++;
     await page.locator('#profile-form [data-action=close]').click();
 
+    // Failure output is displayed as literal multiline text, including untrusted tool output.
+    const failureText='目标磁盘或分区复核、准备失败，已停止\n客户端错误详情：\nError: Access denied\nCommand: Add-PartitionAccessPath\nScript line: 372\n<img src=x onerror="window.logInjected=true">\n'+'x'.repeat(1000);
+    fixture.events=[{id:1,kind:'failed',created:1793347200,message:failureText}];
+    await page.locator('[data-view=jobs]').click();
+    const failureLog=page.locator('.log span').first();
+    assert.equal(await failureLog.textContent(),failureText);checks++;
+    assert.equal(await failureLog.evaluate(el=>getComputedStyle(el).whiteSpace),'pre-wrap');checks++;
+    assert.equal(await page.locator('.log img').count(),0);checks++;
+    assert.equal(await page.evaluate(()=>window.logInjected),undefined);checks++;
+    await page.setViewportSize({width:390,height:844});
+    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));checks++;
+
     assert.deepEqual(errors,[]);checks++;
     console.log(`${checks} nested menu, embedded page, HTTP form, role, message origin, lifecycle, mobile and WIM restore UI checks passed. No live system contacted.`);
   }finally{await browser.close();}

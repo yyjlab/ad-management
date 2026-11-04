@@ -469,6 +469,84 @@ $count+=3
 }
 $count+=3
 
+# Error reporting uses the real top-level handler with all I/O mocked.
+& {
+    $handlerAst = $agentAst.Find({param($node)
+        $node -is [Management.Automation.Language.CatchClauseAst] -and
+        $node.Extent.Text.Contains('Save-DeploymentFailureLog $detail')
+    }, $true)
+    if (-not $handlerAst) { throw 'Deployment failure handler not found.' }
+    $body = $handlerAst.Body.Extent.Text
+    $handler = [scriptblock]::Create($body.Substring(1, $body.Length - 2))
+    foreach ($offline in @($false, $true)) {
+        $order = [Collections.Generic.List[string]]::new()
+        $report = @{}
+        $job = @{id='failure-job';source_password='password-fixture'}
+        $cfg = @{enrollment_token='enrollment-fixture'}
+        $token = 'token-fixture'
+        $script:FailureCode = 'DISK_CHANGED'
+        function Invoke-Platform {
+            param($Route, $Token, $Data)
+            $order.Add('report')
+            $report.data = $Data
+            $report.route = $Route
+            if ($Route -ne '/api/agent/jobs/failure-job/event' -or $Data.code -ne 'DISK_CHANGED' -or
+                $Data.detail -notlike '*simulated mounting failure*' -or $Data.detail -notlike '*Script line:*') {
+                throw 'Failure report omitted the original diagnostic.'
+            }
+            foreach ($secret in @('password-fixture','token-fixture','enrollment-fixture')) {
+                if ($Data.detail.Contains($secret)) { throw 'Failure report exposed a credential.' }
+            }
+            if ($offline) { throw [TimeoutException]::new('Platform offline.') }
+        }
+        function Save-DeploymentFailureLog {
+            param($Detail,$Stage,$LocalDirectory)
+            $order.Add('local')
+            if ($Detail -notlike '*simulated mounting failure*') { throw 'Local fallback lost the error.' }
+        }
+        function Write-Host { }
+        try {
+            throw 'simulated mounting failure password-fixture token-fixture enrollment-fixture'
+        } catch {
+            try { & $handler } catch {
+                if ($_.Exception.Message -ne 'Deployment stopped. See the diagnostic above; secrets have been redacted.') { throw }
+            }
+        }
+        if (($order -join ',') -ne 'report,local') { throw 'Remote error reporting did not precede the local fallback.' }
+        if ($report.route -ne '/api/agent/jobs/failure-job/event' -or $report.data.code -ne 'DISK_CHANGED' -or
+            $report.data.detail -notlike '*simulated mounting failure*' -or $report.data.detail -notlike '*Script line:*') {
+            throw 'The platform did not receive the actual failure detail.'
+        }
+        foreach ($secret in @('password-fixture','token-fixture','enrollment-fixture')) {
+            if ($report.data.detail.Contains($secret)) { throw 'The platform received an unredacted secret.' }
+        }
+    }
+}
+$count += 2
+
+# Native tool failures include bounded output and exit code without running a process or reading a log.
+& {
+    function Start-Process {
+        param($FilePath,$ArgumentList,[switch]$PassThru,[switch]$NoNewWindow,$RedirectStandardOutput,$RedirectStandardError)
+        $process = [pscustomobject]@{ExitCode=87}
+        $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($Timeout) if ($PSBoundParameters.ContainsKey('Timeout')) { return $true } }
+        $process
+    }
+    function Get-Content { param($LiteralPath,$Tail,$ErrorAction) 'DISM diagnostic fixture password-fixture' }
+    function Invoke-Platform { throw 'Unexpected live platform request.' }
+    $failure = $null
+    try { Invoke-DeploymentNative 'dism.exe' @('/fixture') 'applying' @{id='fixture'} 'token-fixture' } catch { $failure = $_ }
+    if (-not $failure) { throw 'Native failure was ignored.' }
+    $detail = Get-DeploymentFailureDetail $failure @{source_password='password-fixture'} 'token-fixture' @{}
+    if ($detail -notlike '*exit code 87*' -or $detail -notlike '*DISM diagnostic fixture*' -or $detail.Contains('password-fixture')) {
+        throw 'Native tool detail or credential protection was lost.'
+    }
+    $failure.ErrorDetails = New-Object Management.Automation.ErrorDetails(('x' * 20000) + ' password-fixture')
+    $bounded = Get-DeploymentFailureDetail $failure @{source_password='password-fixture'} '' @{}
+    if ($bounded.Length -gt 8192 -or $bounded.Contains('password-fixture')) { throw 'Remote failure detail is not safely bounded.' }
+}
+$count += 2
+
 Write-Output "$count PowerShell protection and parser checks passed. No disk command was executed."
 
 # Metadata-only quick inspection. All I/O is mocked.
