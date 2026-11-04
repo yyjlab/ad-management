@@ -1,6 +1,11 @@
 import base64
 import copy
+import gzip
+import re
+from pathlib import Path
 import io
+import os
+import subprocess
 import json
 import secrets
 import tempfile
@@ -13,6 +18,7 @@ import zipfile
 from types import SimpleNamespace
 from flask import Flask, session
 from pc_deploy import register_pc_deploy, token_hash
+from pc_deploy.deployment import finalizer_command
 from pc_deploy.deployment import (Invalid, NAMESPACE, answer_file, canonical, digest, inventory,
                         public_url, source_record, target_check, unc_path)
 
@@ -92,6 +98,288 @@ class PlatformTests(unittest.TestCase):
         commit = self.post('/pc-deploy/api/jobs/commit', dict(preview_id=pv.json['id'], confirmation='YES', physical_confirmed=True))
         self.assertEqual(commit.status_code, 200, commit.json)
         return inv, reg, commit.json['ids'][0]
+
+
+    def join_post(self, path, data=None, token=None, method='POST'):
+        headers = {'X-CSRF-Token': self.csrf}
+        if token:
+            headers['Authorization'] = 'Bearer ' + token
+        return self.client.open(path, base_url='https://localhost', method=method, json=data or {}, headers=headers)
+
+    def join_fixtures(self, commit=True, wim=False):
+        inv, reg, source, profile = self.fixtures()
+        self.enable()
+        if wim:
+            with self.store.connect(write=True) as c:
+                row, = c.execute('SELECT data FROM sources WHERE id=?', (source,)).fetchall()
+                value = json.loads(row['data'])
+                value.update(kind='wim', image_file='custom.wim')
+                c.execute('UPDATE sources SET data=? WHERE id=?', (canonical(value), source))
+            inv['wim_apply_v1'] = True
+            self.post('/pc-deploy/api/agent/poll', inv, reg['token'])
+        payload = dict(name='Join by employee', source_id=source, image_index=6, username='ITSetup',
+                       password='Test-only-local-password', system_gib=128, computer_prefix='TEST',
+                       domain_join=dict(enabled=True, domain='corp.test', ou_path='OU=Workstations,DC=corp,DC=test',
+                                        username='join-service@corp.test'),
+                       domain_join_password='Test-only-domain-password')
+        if wim:
+            payload['password'] = ''
+        saved = self.join_post('/pc-deploy/api/profiles', payload)
+        self.assertEqual(saved.status_code, 200, saved.json)
+        profile = saved.json['id']
+        target = dict(device_id=inv['hardware_uuid'], disk_key=inventory(inv)['disks'][0]['key'], employee_id='wfq101755')
+        preview = self.join_post('/pc-deploy/api/jobs/preview', dict(profile_id=profile, targets=[target]))
+        self.assertEqual(preview.status_code, 200, preview.json)
+        if not commit:
+            return inv, reg, profile, target, payload
+        result = self.join_post('/pc-deploy/api/jobs/commit', dict(preview_id=preview.json['id'], confirmation='YES', physical_confirmed=True))
+        self.assertEqual(result.status_code, 200, result.json)
+        job = result.json['ids'][0]
+        self.assertEqual(self.join_post('/pc-deploy/api/agent/poll', inv, reg['token']).status_code, 200)
+        started = self.join_post(f'/pc-deploy/api/agent/jobs/{job}/start', inv, reg['token'])
+        self.assertEqual(started.status_code, 200, started.json)
+        with self.store.connect() as c:
+            row = c.execute('SELECT secret FROM jobs WHERE id=?', (job,)).fetchone()
+            token = self.store.decrypt(row['secret'])['finish_token']
+        return inv, reg, job, token, started.json
+
+    def test_domain_join_blocks_http_pe_before_authorization(self):
+        inv, reg, profile, target, _ = self.join_fixtures(commit=False)
+        payload = dict(profile_id=profile, targets=[target])
+        self.assertEqual(self.post('/pc-deploy/api/jobs/preview', payload).status_code, 400)
+        pv = self.join_post('/pc-deploy/api/jobs/preview', payload)
+        result = self.join_post('/pc-deploy/api/jobs/commit', dict(preview_id=pv.json['id'], confirmation='YES', physical_confirmed=True))
+        job = result.json['ids'][0]
+        self.assertEqual(self.post('/pc-deploy/api/agent/poll', inv, reg['token']).status_code, 400)
+        with self.store.connect() as c:
+            row = c.execute('SELECT state FROM jobs WHERE id=?', (job,)).fetchone()
+        self.assertEqual(row['state'], 'queued')
+        self.assertEqual(self.join_post('/pc-deploy/api/agent/poll', inv, reg['token']).status_code, 200)
+        started = self.post(f'/pc-deploy/api/agent/jobs/{job}/start', inv, reg['token'])
+        self.assertEqual(started.status_code, 400)
+        self.assertNotIn('finalizer_command', started.json)
+        with self.store.connect() as c:
+            row = c.execute('SELECT consumed FROM devices WHERE id=?', (inv['hardware_uuid'],)).fetchone()
+        self.assertFalse(row['consumed'])
+        self.assertEqual(self.join_post(f'/pc-deploy/api/agent/jobs/{job}/start', inv, reg['token']).status_code, 200)
+
+    def test_domain_join_requires_https_and_explicit_profile_option(self):
+        _, _, _, _, payload = self.join_fixtures(commit=False)
+        self.assertEqual(self.post('/pc-deploy/api/profiles', payload).status_code, 400)
+        payload['domain_join']['enabled'] = False
+        saved = self.post('/pc-deploy/api/profiles', payload)
+        self.assertEqual(saved.status_code, 200, saved.json)
+        profiles = self.client.get('/pc-deploy/api/dashboard').json['profiles']
+        self.assertNotIn('domain_join', next(p for p in profiles if p['id'] == saved.json['id']))
+
+    def test_domain_join_validates_domain_account_ou_and_boolean(self):
+        _, _, _, _, payload = self.join_fixtures(commit=False)
+        for patch in ({'domain':'127.0.0.1'}, {'domain':'http://corp.test'}, {'username':'administrator'},
+                      {'ou_path':'OU=PCs,DC=other,DC=test'}, {'enabled':'true'}):
+            bad = copy.deepcopy(payload)
+            bad['domain_join'].update(patch)
+            self.assertEqual(self.join_post('/pc-deploy/api/profiles', bad).status_code, 400, patch)
+
+    def test_domain_join_validates_employee_and_allocates_distinct_batch_names(self):
+        _, _, profile, target, _ = self.join_fixtures(commit=False)
+        route = '/pc-deploy/api/jobs/preview'
+        for employee in ('', 'x'*15, 'wfq/test', 'WFQ<script>', '-WFQ', 'WFQ-'):
+            bad = dict(target, employee_id=employee)
+            self.assertEqual(self.join_post(route, dict(profile_id=profile, targets=[bad])).status_code, 400, employee)
+        numeric = self.join_post(route, dict(profile_id=profile, targets=[dict(target, employee_id='12345')]))
+        self.assertEqual(numeric.status_code, 200, numeric.json)
+        self.assertEqual(numeric.json['targets'][0]['employee_id'], '12345')
+        self.assertEqual(numeric.json['targets'][0]['computer_name'], '12345A')
+        inv2, _ = self.register(machine(serial='SECOND-LAPTOP'))
+        second = dict(device_id=inv2['hardware_uuid'], disk_key=inventory(inv2)['disks'][0]['key'], employee_id='WFQ101755')
+        result = self.join_post(route, dict(profile_id=profile, targets=[target, second]))
+        self.assertEqual(result.status_code, 200, result.json)
+        self.assertEqual([t['computer_name'] for t in result.json['targets']], ['WFQ101755', 'WFQ101755A'])
+        committed = self.join_post('/pc-deploy/api/jobs/commit',
+            dict(preview_id=result.json['id'], confirmation='YES', physical_confirmed=True))
+        self.assertEqual(committed.status_code, 200, committed.json)
+        with self.store.connect() as c:
+            jobs = [json.loads(r['data']) for r in c.execute('SELECT data FROM jobs')]
+        self.assertEqual({j['target']['computer_name'] for j in jobs}, {'WFQ101755', 'WFQ101755A'})
+
+    def test_domain_join_collision_is_scoped_idempotent_and_updates_final_name(self):
+        inv, reg, job, token, _ = self.join_fixtures()
+        route = f'/pc-deploy/api/agent/jobs/{job}'
+        conflict = dict(hardware_uuid=inv['hardware_uuid'], unavailable_name='WFQ101755')
+        self.assertEqual(self.join_post(route+'/domain-join/name', conflict, reg['token']).status_code, 400)
+        assigned = self.join_post(route+'/domain-join/name', conflict, token)
+        self.assertEqual(assigned.status_code, 200, assigned.json)
+        self.assertEqual(assigned.json['computer_name'], 'WFQ101755A')
+        repeated = self.join_post(route+'/domain-join/name', conflict, token)
+        self.assertEqual(repeated.json, assigned.json)
+        assigned = self.join_post(route+'/domain-join/name', dict(conflict, unavailable_name='WFQ101755A'), token)
+        self.assertEqual(assigned.json['computer_name'], 'WFQ101755B')
+        config = self.join_post(route+'/domain-join/config', dict(hardware_uuid=inv['hardware_uuid']), token)
+        self.assertEqual(config.json['employee_id'], 'WFQ101755')
+        self.assertEqual(config.json['computer_name'], 'WFQ101755B')
+        for stage in ('checking', 'joining'):
+            self.assertEqual(self.join_post(route+'/domain-join/status',
+                dict(hardware_uuid=inv['hardware_uuid'], stage=stage), token).status_code, 200)
+        self.assertEqual(self.join_post(route+'/domain-join/name',
+            dict(conflict, unavailable_name='WFQ101755B'), token).status_code, 400)
+        verified = dict(hardware_uuid=inv['hardware_uuid'], stage='verified', domain='corp.test',
+                        computer_name='WFQ101755B', secure_channel=True)
+        self.assertEqual(self.join_post(route+'/domain-join/status', verified, token).status_code, 200)
+        finished = dict(hardware_uuid=inv['hardware_uuid'], computer_name='WFQ101755B', os_build=26100,
+                        image_state='IMAGE_STATE_COMPLETE', oobe_done=True, domain_name='corp.test', domain_join_verified=True)
+        self.assertEqual(self.join_post(route+'/finish', finished, token).status_code, 200)
+        public = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
+        self.assertEqual(public['computer_name'], 'WFQ101755B')
+        events = self.client.get(route.replace('/agent', '')+'/events').json['events']
+        renamed = [e for e in events if '自动改用' in e['message']]
+        self.assertEqual(len(renamed), 2)
+
+    def test_domain_join_suffix_is_reserved_across_running_jobs_and_exhausts_safely(self):
+        inv, _, job, token, _ = self.join_fixtures()
+        route = f'/pc-deploy/api/agent/jobs/{job}/domain-join/name'
+        with self.store.connect() as c:
+            original = json.loads(c.execute('SELECT data FROM jobs WHERE id=?', (job,)).fetchone()['data'])
+        inv2, _ = self.register(machine(serial='SECOND-LAPTOP'))
+        target = dict(device_id=inv2['hardware_uuid'], disk_key=inventory(inv2)['disks'][0]['key'], employee_id='WFQ101755')
+        pv = self.join_post('/pc-deploy/api/jobs/preview', dict(profile_id=original['profile']['id'], targets=[target]))
+        self.assertEqual(pv.json['targets'][0]['computer_name'], 'WFQ101755A')
+        committed = self.join_post('/pc-deploy/api/jobs/commit',
+            dict(preview_id=pv.json['id'], confirmation='YES', physical_confirmed=True))
+        self.assertEqual(committed.status_code, 200, committed.json)
+        assigned = self.join_post(route, dict(hardware_uuid=inv['hardware_uuid'], unavailable_name='WFQ101755'), token)
+        self.assertEqual(assigned.json['computer_name'], 'WFQ101755B')
+        for letter in 'BCDEFGHIJKLMNOPQRSTUVWXY':
+            assigned = self.join_post(route,
+                dict(hardware_uuid=inv['hardware_uuid'], unavailable_name='WFQ101755'+letter), token)
+            self.assertEqual(assigned.status_code, 200, assigned.json)
+        self.assertEqual(assigned.json['computer_name'], 'WFQ101755Z')
+        exhausted = self.join_post(route,
+            dict(hardware_uuid=inv['hardware_uuid'], unavailable_name='WFQ101755Z'), token)
+        self.assertEqual(exhausted.status_code, 400)
+        self.assertIn('均已占用', exhausted.json['error'])
+        with self.store.connect() as c:
+            after = json.loads(c.execute('SELECT data FROM jobs WHERE id=?', (job,)).fetchone()['data'])
+        self.assertEqual(after['target']['employee_id'], 'WFQ101755')
+        self.assertEqual(after['target']['computer_name'], 'WFQ101755Z')
+
+    def test_domain_join_credentials_are_private_and_authorization_is_task_scoped(self):
+        inv, reg, job, token, authorization = self.join_fixtures()
+        password = 'Test-only-domain-password'
+        public = self.client.get('/pc-deploy/api/dashboard').get_data(as_text=True)
+        self.assertNotIn(password, public)
+        self.assertNotIn(password, json.dumps(authorization))
+        route = f'/pc-deploy/api/agent/jobs/{job}/domain-join/config'
+        payload = dict(hardware_uuid=inv['hardware_uuid'])
+        self.assertEqual(self.post(route, payload, token).status_code, 400)
+        self.assertEqual(self.join_post(route, payload, reg['token']).status_code, 400)
+        self.assertEqual(self.join_post(route, dict(hardware_uuid=str(uuid.uuid4())), token).status_code, 400)
+        result = self.join_post(route, payload, token)
+        self.assertEqual(result.status_code, 200, result.json)
+        self.assertEqual(result.json['computer_name'], 'WFQ101755')
+        self.assertEqual(result.json['password'], password)
+        self.assertEqual(result.headers['Cache-Control'], 'no-store')
+        with self.store.connect() as c:
+            encrypted = c.execute('SELECT secret FROM jobs WHERE id=?', (job,)).fetchone()['secret']
+        self.assertNotIn(password, encrypted)
+
+    def test_domain_join_does_not_complete_until_trust_is_verified(self):
+        inv, _, job, token, _ = self.join_fixtures()
+        route = f'/pc-deploy/api/agent/jobs/{job}'
+        payload = dict(hardware_uuid=inv['hardware_uuid'], computer_name='WFQ101755', os_build=26100,
+                       image_state='IMAGE_STATE_COMPLETE', oobe_done=True)
+        self.assertEqual(self.join_post(route+'/finish', payload, token).status_code, 400)
+        verified = dict(hardware_uuid=inv['hardware_uuid'], stage='verified', domain='corp.test',
+                        computer_name='WFQ101755', secure_channel=True)
+        for bad_stage in ({}, []):
+            self.assertEqual(self.join_post(route+'/domain-join/status',
+                dict(hardware_uuid=inv['hardware_uuid'], stage=bad_stage), token).status_code, 400)
+        for patch in ({'domain':'other.test'}, {'computer_name':'OTHER'}, {'secure_channel':False}, {'domain':{}}):
+            self.assertEqual(self.join_post(route+'/domain-join/status', dict(verified, **patch), token).status_code, 400)
+        for stage in ('checking', 'joining', 'restarting'):
+            result = self.join_post(route+'/domain-join/status', dict(hardware_uuid=inv['hardware_uuid'], stage=stage), token)
+            self.assertEqual(result.status_code, 200, result.json)
+        self.assertEqual(self.join_post(route+'/domain-join/config', dict(hardware_uuid=inv['hardware_uuid']), token).status_code, 400)
+        self.assertEqual(self.join_post(route+'/domain-join/status', dict(hardware_uuid=inv['hardware_uuid'], stage='checking'), token).status_code, 400)
+        self.assertEqual(self.join_post(route+'/domain-join/status', verified, token).status_code, 200)
+        payload.update(domain_name='corp.test', domain_join_verified=True)
+        self.assertEqual(self.join_post(route+'/finish', payload, token).status_code, 200)
+        item = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
+        self.assertEqual(item['state'], 'completed')
+        self.assertEqual(item['domain_join']['state'], 'verified')
+
+    def test_domain_join_bootstrap_fits_with_root_certificate_and_preserves_scripts(self):
+        ca = '-----BEGIN CERTIFICATE-----\n' + base64.b64encode(bytes(range(256))*6).decode() + '\n-----END CERTIFICATE-----'
+        cfg = dict(job_id=str(uuid.uuid4()), server_url='https://deployment.example.test/pc-deploy',
+                   hardware_uuid=str(uuid.uuid4()), token='T'*54, ca_pem=ca,
+                   domain_join=dict(domain='corp.example.test', computer_name='WFQ101755', employee_id='WFQ101755'))
+        command = finalizer_command(cfg)
+        self.assertLess(len(command), 30000)
+        bootstrap = base64.b64decode(command.rsplit(' ', 1)[1]).decode('utf-16le')
+        scripts = re.findall(r"Write-DeploymentScript '([^']+)' '([^']+)'", bootstrap)
+        self.assertEqual({name for name, _ in scripts}, {'Finalize.ps1', 'DomainJoin.ps1'})
+        for name, encoded in scripts:
+            expected = (Path(__file__).parent/'pc_deploy'/'agent'/name).read_text(encoding='utf-8-sig')
+            actual = gzip.decompress(base64.b64decode(encoded)).decode('utf-8-sig')
+            self.assertEqual(actual.replace('\r\n', '\n'), expected)
+        encoded_config = bootstrap.split("(Join-Path $p 'config.json'),[Convert]::FromBase64String('", 1)[1].split("')", 1)[0]
+        self.assertEqual(json.loads(base64.b64decode(encoded_config)), cfg)
+        if os.name == 'nt':
+            # Run the actual PS5.1 extraction while intercepting every scheduling/ACL command.
+            mock = """$ErrorActionPreference='Stop'
+function icacls.exe { $global:LASTEXITCODE=0 }
+function New-ScheduledTaskAction {}
+function New-ScheduledTaskTrigger {}
+function Register-ScheduledTask {}
+function Start-ScheduledTask {}
+"""
+            with tempfile.TemporaryDirectory(prefix='pcdeploy-bootstrap-test-') as directory:
+                environment = dict(os.environ, ProgramData=directory)
+                encoded = base64.b64encode((mock+bootstrap).encode('utf-16le')).decode()
+                powershell = Path(os.environ['SystemRoot'])/'System32'/'WindowsPowerShell'/'v1.0'/'powershell.exe'
+                result = subprocess.run([str(powershell), '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
+                                        env=environment, capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                folder = Path(directory)/'PCDeploy'/cfg['job_id']
+                self.assertEqual(json.loads((folder/'config.json').read_text(encoding='utf-8')), cfg)
+                for name, _ in scripts:
+                    expected = (Path(__file__).parent/'pc_deploy'/'agent'/name).read_text(encoding='utf-8-sig')
+                    self.assertEqual((folder/name).read_text(encoding='utf-8-sig'), expected)
+
+    def test_domain_join_wim_bootstrap_contains_no_join_password_and_stays_within_command_limit(self):
+        inv, _, job, token, authorization = self.join_fixtures(wim=True)
+        command = authorization['finalizer_command']
+        self.assertLess(len(command), 30000)
+        bootstrap = base64.b64decode(command.rsplit(' ', 1)[1]).decode('utf-16le')
+        self.assertIn('DomainJoin.ps1', bootstrap)
+        self.assertIn('GZipStream', bootstrap)
+        self.assertNotIn('Test-only-domain-password', bootstrap)
+        payload = dict(hardware_uuid=inv['hardware_uuid'], computer_name='WFQ101755',
+                       os_build=22631, image_state='IMAGE_STATE_COMPLETE', oobe_done=True,
+                       domain_name='corp.test', domain_join_verified=True)
+        verified = dict(hardware_uuid=inv['hardware_uuid'], stage='verified', domain='corp.test',
+                        computer_name='WFQ101755', secure_channel=True)
+        self.assertEqual(self.join_post(f'/pc-deploy/api/agent/jobs/{job}/domain-join/status', verified, token).status_code, 200)
+        self.assertEqual(self.join_post(f'/pc-deploy/api/agent/jobs/{job}/finish', payload, token).status_code, 400)
+        payload['os_build'] = 26100
+        self.assertEqual(self.join_post(f'/pc-deploy/api/agent/jobs/{job}/finish', payload, token).status_code, 200)
+
+    def test_domain_join_failure_reports_installed_windows_and_redacts_password(self):
+        inv, _, job, token, _ = self.join_fixtures()
+        route = f'/pc-deploy/api/agent/jobs/{job}'
+        failed = dict(hardware_uuid=inv['hardware_uuid'], stage='failed',
+                      detail='Access denied Test-only-domain-password')
+        result = self.join_post(route+'/domain-join/status', failed, token)
+        self.assertEqual(result.status_code, 200, result.json)
+        events = self.client.get(f'/pc-deploy/api/jobs/{job}/events').json
+        self.assertEqual(events['job']['state'], 'failed')
+        self.assertTrue(events['job']['domain_join']['os_installed'])
+        self.assertNotIn('Test-only-domain-password', json.dumps(events))
+        self.assertIn('[redacted]', events['job']['domain_join']['detail'])
+        self.assertEqual(self.join_post(route+'/domain-join/status', failed, token).status_code, 200)
+        repeated = self.client.get(f'/pc-deploy/api/jobs/{job}/events').json
+        self.assertEqual(repeated['events'], events['events'])
+        self.assertNotIn('Test-only-domain-password', json.dumps(repeated))
+        self.assertEqual(self.join_post(route+'/domain-join/config', dict(hardware_uuid=inv['hardware_uuid']), token).status_code, 400)
 
     def test_default_is_read_only_and_empty(self):
         d = self.client.get('/pc-deploy/api/dashboard').json

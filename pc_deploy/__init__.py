@@ -27,6 +27,7 @@ from .deployment import (ACTIVE, ERRORS, STATES, Invalid, answer_file, canonical
                         integer, inventory, profile_record, public_url, source_record,
                         target_check, text, partition_target, finalizer_command)
 from .storage import Store
+from .domain_join import available_name, computer_name, employee_id, join_record
 from .media import register_media_routes, media_dashboard
 
 ROOT = Path(__file__).parent
@@ -175,7 +176,15 @@ def register_pc_deploy(host_app, current_user, touch_session):
             raise Invalid('任务凭据已过期，请人工核对；不会自动重装')
         return row, data
 
-    def snapshot_target(c, target, profile, source):
+    def reserved_computer_names(c, domain, exclude=None):
+        names = set()
+        for row in c.execute('SELECT id,data FROM jobs WHERE state IN (?,?,?,?)', ACTIVE):
+            other = json.loads(row['data'])
+            if row['id'] != exclude and other.get('domain_join', {}).get('domain') == domain:
+                names.add(other['target']['computer_name'])
+        return names
+
+    def snapshot_target(c, target, profile, source, reserved_names=None):
         if not isinstance(target.get('device_id'), str):
             raise Invalid('设备 ID 无效')
         row = c.execute('SELECT * FROM devices WHERE id=?', (target.get('device_id'),)).fetchone()
@@ -198,6 +207,15 @@ def register_pc_deploy(host_app, current_user, touch_session):
             if profile.get('disk_mode') == 'system_partition':
                 result['partition_key'] = target.get('partition_key')
                 result['partitions'] = partition_target(disk, result['partition_key'])
+        if profile.get('domain_join'):
+            if not secure_request() or urlsplit(store.setting(c, 'public_url')).scheme != 'https':
+                raise Invalid('自动加域需要 HTTPS 网页和 HTTPS 平台地址')
+            employee = employee_id(target.get('employee_id'))
+            reserved = reserved_computer_names(c, profile['domain_join']['domain']) | set(reserved_names or ())
+            name = available_name(employee, reserved)
+            result.update(employee_id=employee, computer_name=name)
+            if reserved_names is not None:
+                reserved_names.add(name)
         return result
 
     @app.errorhandler(Invalid)
@@ -264,6 +282,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
                     state=row['state'], state_name=STATES[row['state']], created=row['created'],
                     updated=row['updated'], stale=row['state'] in ACTIVE and now-row['updated'] > 600,
                     progress=data.get('progress'), kind=data['source'].get('kind', 'setup'), review=data.get('review'),
+                    domain_join=data.get('domain_join'), computer_name=data['target'].get('computer_name'),
                     **{k: data['target']['inventory'].get(k, '') for k in
                        ('manufacturer', 'system_family', 'product_name', 'product_version')},
                     started_at=timing.get('started_at'),
@@ -287,6 +306,8 @@ def register_pc_deploy(host_app, current_user, touch_session):
             jobs = [public_job(r, now, timings.get(r['id'])) for r in job_rows]
             settings = {k: store.setting(c, k) for k in ('public_url', 'enabled', 'concurrency', 'ca_pem')}
             settings['enrollment_days'] = store.setting(c, 'enrollment_days', 7)
+            settings['domain_defaults'] = dict(domain='.'.join(re.findall(r'(?:^|,)DC=([^,]+)', host_app.config.get('AD_BASE_DN', ''), re.I)),
+                                               ou_path=host_app.config.get('AD_COMPUTER_OU', ''))
             media = media_dashboard(c)
             enrollments = [dict(id=r['token_hash'], expires_at=None if r['expires'] == -1 else r['expires'], uses=r['uses'])
                            for r in c.execute('SELECT * FROM enrollments ORDER BY expires DESC')]
@@ -362,6 +383,11 @@ def register_pc_deploy(host_app, current_user, touch_session):
         with store.connect(write=True) as c:
             _, source = load(c, 'sources', data.get('source_id'))
             value = profile_record(data, source)
+            joining = join_record(data.get('domain_join'))
+            if joining:
+                if not secure_request() or urlsplit(store.setting(c, 'public_url')).scheme != 'https':
+                    raise Invalid('保存加域凭据需要 HTTPS 网页和 HTTPS 平台地址')
+                value['domain_join'] = joining
             old = load(c, 'profiles', identity)[0] if identity else None
             old_secret = store.decrypt(old['secret']) if old else {}
             if isinstance(old_secret, str):
@@ -386,7 +412,17 @@ def register_pc_deploy(host_app, current_user, touch_session):
                 product_key = ''
             if not isinstance(product_key, str) or (product_key and not re.fullmatch(r'(?:[A-Za-z0-9]{5}-){4}[A-Za-z0-9]{5}', product_key)):
                 raise Invalid('安装密钥格式无效，请使用与你的版本匹配的合法密钥')
-            secret = store.encrypt(dict(password=saved_password, product_key=product_key.upper()))
+            private = dict(password=saved_password, product_key=product_key.upper())
+            if joining:
+                join_password = data.get('domain_join_password', '')
+                old_join = json.loads(old['data']).get('domain_join', {}) if old else {}
+                if not join_password and all(old_join.get(k) == joining[k] for k in ('domain', 'username')):
+                    join_password = old_secret.get('domain_join_password', '')
+                if not isinstance(join_password, str) or not 1 <= len(join_password) <= 128 or any(ord(ch) < 32 for ch in join_password):
+                    raise Invalid('请填写专用加域账号密码；更换域或账号后必须重新填写')
+                private['domain_join_password'] = join_password
+                value['has_domain_join_password'] = True
+            secret = store.encrypt(private)
             value['has_product_key'] = bool(product_key)
             identity = identity or str(uuid.uuid4())
             value.update(id=identity, revision=secrets.token_hex(12))
@@ -441,7 +477,8 @@ def register_pc_deploy(host_app, current_user, touch_session):
         with store.connect(write=True) as c:
             _, profile = load(c, 'profiles', data.get('profile_id'))
             _, source = load(c, 'sources', profile['source_id'])
-            chosen = [snapshot_target(c, t, profile, source) for t in targets]
+            reserved_names = set()
+            chosen = [snapshot_target(c, t, profile, source, reserved_names) for t in targets]
             value = dict(profile_id=profile['id'], profile_revision=profile['revision'],
                          source_revision=source['revision'], targets=chosen)
             identity = str(uuid.uuid4())
@@ -449,6 +486,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
             c.execute('INSERT INTO previews VALUES(?,?,?,?,0)',
                       (identity, canonical(value), time.time()+180, session['pc_deploy_session_id']))
         return jsonify(id=identity, profile=profile['name'], source=source['name'], targets=chosen,
+                       domain_join=profile.get('domain_join'),
                        expires_in=180, warning=(
                            '只格式化明确选中的 Windows 分区，其数据将丢失；保留其他分区，更新同盘 EFI 引导文件。'
                            if profile.get('disk_mode') == 'system_partition' else
@@ -472,8 +510,9 @@ def register_pc_deploy(host_app, current_user, touch_session):
             if profile['revision'] != pv['profile_revision'] or source['revision'] != pv['source_revision']:
                 raise Invalid('方案或安装源已变化，请重新预览')
             targets = []
+            reserved_names = set()
             for before in pv['targets']:
-                current = snapshot_target(c, before, profile, source)
+                current = snapshot_target(c, before, profile, source, reserved_names)
                 if current != before:
                     raise Invalid('硬件或启动会话已变化，请重新预览')
                 targets.append(current)
@@ -487,6 +526,12 @@ def register_pc_deploy(host_app, current_user, touch_session):
                 secret = dict(source_password=store.decrypt(sr['secret']),
                               local_password=profile_secret['password'], product_key=profile_secret.get('product_key', ''),
                               finish_token=secrets.token_urlsafe(40))
+                if profile.get('domain_join'):
+                    payload['domain_join'] = dict(state='pending', domain=profile['domain_join']['domain'],
+                                                  computer_name=target['computer_name'])
+                    if not profile_secret.get('domain_join_password'):
+                        raise Invalid('加域方案凭据缺失，请重新保存方案')
+                    secret['domain_join_password'] = profile_secret['domain_join_password']
                 now = time.time()
                 c.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?)',
                           (identity, target['device_id'], target['boot_id'], 'queued', canonical(payload),
@@ -716,6 +761,8 @@ def register_pc_deploy(host_app, current_user, touch_session):
             if not row or not store.setting(c, 'enabled', False):
                 return jsonify(job=None)
             data = json.loads(row['data'])
+            if data.get('domain_join') and not secure_request():
+                raise Invalid('该任务需要 HTTPS；请更新 PE 平台连接地址，尚未授权安装')
             if row['boot_id'] != dev['boot_id'] or digest(inv) != data['target']['inventory_hash']:
                 raise Invalid('设备硬件已变化，请取消旧任务并重新预览')
             if row['state'] not in ('queued', 'preflight') or dev['consumed']:
@@ -747,6 +794,12 @@ def register_pc_deploy(host_app, current_user, touch_session):
                              allow_http=http_allowed() and urlsplit(store.setting(c, 'public_url')).scheme == 'http',
                              hardware_uuid=dev['id'], token=secret['finish_token'],
                              ca_pem=store.setting(c, 'ca_pem', ''))
+            if data.get('domain_join'):
+                if not secure_request() or urlsplit(finalizer['server_url']).scheme != 'https':
+                    raise Invalid('自动加域任务的 PE 安装授权只允许 HTTPS')
+                finalizer['domain_join'] = dict(domain=data['domain_join']['domain'],
+                                               computer_name=data['target']['computer_name'],
+                                               employee_id=data['target']['employee_id'])
             if data['source'].get('kind') == 'wim':
                 if inv.get('wim_apply_v1') is not True:
                     raise Invalid('客户端不支持封装 WIM 还原')
@@ -824,6 +877,100 @@ def register_pc_deploy(host_app, current_user, touch_session):
                 event(c, state, message, identity)
         return jsonify(ok=True)
 
+    def domain_completion(c, identity, value):
+        if not secure_request() or urlsplit(store.setting(c, 'public_url')).scheme != 'https':
+            raise Invalid('自动加域接口只接受 HTTPS，禁止明文下发加域凭据')
+        row, job = load(c, 'jobs', identity)
+        secret = store.decrypt(row['secret'])
+        if not hmac.compare_digest(bearer(), secret['finish_token']) or row['expires'] < time.time():
+            raise Invalid('安装后任务凭据失效')
+        retry_failure = (row['state'] == 'failed' and value.get('stage') == 'failed'
+                         and job.get('domain_join', {}).get('state') == 'failed')
+        if (row['state'] not in ('installing', 'awaiting_report') and not retry_failure) or not job.get('domain_join'):
+            raise Invalid('任务未启用自动加域，或已结束')
+        if value.get('hardware_uuid') != row['device_id']:
+            raise Invalid('加域设备身份不匹配')
+        return row, job, secret
+
+    @app.post('/api/agent/jobs/<identity>/domain-join/config')
+    def domain_join_config(identity):
+        value = body()
+        with store.connect() as c:
+            _, job, secret = domain_completion(c, identity, value)
+            password = secret.get('domain_join_password')
+            if not password or job['domain_join']['state'] not in ('pending', 'checking', 'joining'):
+                raise Invalid('加域凭据已回收，禁止重新发起加域')
+            result = dict(job['profile']['domain_join'], password=password,
+                          computer_name=job['target']['computer_name'], employee_id=job['target']['employee_id'])
+        return jsonify(result)
+
+    @app.post('/api/agent/jobs/<identity>/domain-join/name')
+    def domain_join_name(identity):
+        value = body()
+        unavailable = computer_name(value.get('unavailable_name'))
+        with store.connect(write=True) as c:
+            row, job, _ = domain_completion(c, identity, value)
+            current = job['domain_join']
+            if current['state'] not in ('pending', 'checking'):
+                raise Invalid('加域已启动，禁止再次更换电脑名')
+            # A lost response may repeat the previous conflict; return the same assigned name.
+            if unavailable == current['computer_name']:
+                occupied = set(current.get('unavailable_names', []))
+                occupied.add(unavailable)
+                reserved = reserved_computer_names(c, current['domain'], identity)
+                name = available_name(job['target']['employee_id'], occupied | reserved)
+                current.update(computer_name=name, unavailable_names=sorted(occupied))
+                job['target']['computer_name'] = name
+                c.execute('UPDATE jobs SET data=?,updated=? WHERE id=?',
+                          (canonical(job), time.time(), identity))
+                event(c, 'domain_join', '域内电脑名 '+unavailable+' 已存在，自动改用 '+name+'；未修改已有电脑', identity)
+            name = current['computer_name']
+        return jsonify(computer_name=name)
+
+    @app.post('/api/agent/jobs/<identity>/domain-join/status')
+    def domain_join_status(identity):
+        value = body()
+        stage = value.get('stage')
+        messages = dict(checking='Windows 已安装，正在检查域 DNS 与电脑名',
+                        joining='Windows 已安装，正在加入 AD 域',
+                        restarting='加域命令已成功，正在重启，等待验证域信任',
+                        verified='重启后域身份与安全通道验证通过',
+                        failed='Windows 已安装，自动加域失败；不会重新装机或自动再次加域')
+        if not isinstance(stage, str) or stage not in messages:
+            raise Invalid('加域阶段无效')
+        with store.connect(write=True) as c:
+            row, job, secret = domain_completion(c, identity, value)
+            current = job['domain_join']
+            if current['state'] == 'failed':
+                return jsonify(ok=True)
+            order = dict(pending=0, checking=1, joining=2, restarting=3, verified=4, failed=5)
+            if order[stage] < order[current['state']]:
+                raise Invalid('旧加域阶段不允许覆盖新结果')
+            if stage == 'verified' and (not isinstance(value.get('domain'), str)
+                    or value['domain'].lower() != current['domain']
+                    or not isinstance(value.get('computer_name'), str)
+                    or value['computer_name'].upper() != current['computer_name']
+                    or value.get('secure_channel') is not True):
+                raise Invalid('加域结果未通过身份与安全通道核对')
+            detail = value.get('detail', '')
+            if not isinstance(detail, str) or len(detail) > 4000:
+                raise Invalid('加域诊断内容格式错误')
+            for sensitive in (secret.get('domain_join_password'), secret.get('source_password'), secret.get('local_password')):
+                if sensitive:
+                    detail = detail.replace(sensitive, '[redacted]')
+            detail = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', detail)
+            changed = stage != current['state'] or detail != current.get('detail', '')
+            current.update(state=stage, detail=detail, updated=time.time(), os_installed=True)
+            state = 'failed' if stage == 'failed' else 'awaiting_report'
+            if stage in ('restarting', 'verified', 'failed'):
+                secret.pop('domain_join_password', None)
+            c.execute('UPDATE jobs SET state=?,data=?,secret=?,updated=? WHERE id=?',
+                      (state, canonical(job), store.encrypt(secret), time.time(), identity))
+            if changed:
+                event(c, 'failed' if stage == 'failed' else 'domain_join',
+                      messages[stage] + ('\n'+detail if detail else ''), identity)
+        return jsonify(ok=True)
+
     @app.post('/api/agent/jobs/<identity>/finish')
     def finish(identity):
         tls_required()
@@ -840,13 +987,22 @@ def register_pc_deploy(host_app, current_user, touch_session):
             build = integer(value.get('os_build'), '系统版本', 19041, 99999)
             expected = data['profile']['computer_prefix'] + '-' + digest(data['target']['inventory']['hardware_uuid'])[:8].upper()
             preserved_name = data['source'].get('kind') == 'wim'
+            if data.get('domain_join'):
+                if not secure_request():
+                    raise Invalid('自动加域任务的安装后回报只接受 HTTPS')
+                expected = data['target']['computer_name']
+                preserved_name = False
+                if (data['domain_join']['state'] != 'verified' or value.get('domain_join_verified') is not True
+                        or not isinstance(value.get('domain_name'), str)
+                        or value['domain_name'].lower() != data['domain_join']['domain']):
+                    raise Invalid('系统已安装，但加域与重启后验证尚未完成')
             if (value.get('hardware_uuid') != row['device_id']
                     or (not preserved_name and value.get('computer_name') != expected)
                     or (preserved_name and (not isinstance(value.get('computer_name'), str)
                                             or not re.fullmatch(r'[A-Za-z0-9_-]{1,63}', value['computer_name'])))
                     or value.get('image_state') != 'IMAGE_STATE_COMPLETE' or value.get('oobe_done') is not True
                     or (data['source']['family'] == 'windows11') != (build >= 22000)
-                    or (preserved_name and build != next(i['build'] for i in data['source']['images']
+                    or (data['source'].get('kind') == 'wim' and build != next(i['build'] for i in data['source']['images']
                                                         if i['index'] == data['profile']['image_index']))):
                 raise Invalid('安装后系统、设备身份或 OOBE 状态未通过核对')
             c.execute('UPDATE jobs SET state=?,updated=? WHERE id=?', ('completed', time.time(), identity))

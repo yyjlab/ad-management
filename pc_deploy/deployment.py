@@ -1,5 +1,6 @@
 """Validation and Windows Setup documents. This module never touches a disk."""
 import base64
+import gzip
 import hashlib
 import json
 import re
@@ -302,13 +303,27 @@ def finalizer_command(config):
     script = (Path(__file__).parent / 'agent' / 'Finalize.ps1').read_text(encoding='utf-8-sig')
     script_b64 = base64.b64encode(script.encode()).decode()
     config_b64 = base64.b64encode(canonical(config).encode()).decode()
+    script_write = f"[IO.File]::WriteAllBytes((Join-Path $p 'Finalize.ps1'),[Convert]::FromBase64String('{script_b64}'))"
+    if config.get('domain_join'):
+        helper = (Path(__file__).parent / 'agent' / 'DomainJoin.ps1').read_bytes()
+        helper_b64 = base64.b64encode(gzip.compress(helper)).decode()
+        finalizer_b64 = base64.b64encode(gzip.compress(script.encode())).decode()
+        # Compress both scripts so a real HTTPS root certificate still fits the command limit.
+        script_write = f"""function Write-DeploymentScript($name,$encoded) {{
+$m=[IO.MemoryStream]::new([Convert]::FromBase64String($encoded))
+$z=[IO.Compression.GZipStream]::new($m,[IO.Compression.CompressionMode]::Decompress)
+$f=[IO.File]::Create((Join-Path $p $name))
+try{{$z.CopyTo($f)}}finally{{$f.Dispose();$z.Dispose();$m.Dispose()}}
+}}
+Write-DeploymentScript 'Finalize.ps1' '{finalizer_b64}'
+Write-DeploymentScript 'DomainJoin.ps1' '{helper_b64}'"""
     # Only constant code and base64-encoded JSON enter the command, never user shell syntax.
     bootstrap = f"""$ErrorActionPreference='Stop'
 $p=Join-Path $env:ProgramData 'PCDeploy\\{config['job_id']}'
 New-Item -ItemType Directory -Path $p -Force | Out-Null
 & icacls.exe $p /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
 if($LASTEXITCODE -ne 0){{throw 'Cannot protect finalizer directory'}}
-[IO.File]::WriteAllBytes((Join-Path $p 'Finalize.ps1'),[Convert]::FromBase64String('{script_b64}'))
+{script_write}
 [IO.File]::WriteAllBytes((Join-Path $p 'config.json'),[Convert]::FromBase64String('{config_b64}'))
 $a=New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -ExecutionPolicy Bypass -File "'+$p+'\\Finalize.ps1"')
 $t=New-ScheduledTaskTrigger -AtStartup

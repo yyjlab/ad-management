@@ -14,6 +14,10 @@ if ($server.Scheme -eq 'https' -and $cfg.ca_pem) {
     $store = New-Object Security.Cryptography.X509Certificates.X509Store -ArgumentList @('Root','LocalMachine')
     try { $store.Open('ReadWrite'); $store.Add($cert) } finally { $store.Close(); $cert.Dispose() }
 }
+if ($cfg.domain_join) {
+    if ($server.Scheme -ne 'https') { throw 'Automatic domain join requires HTTPS.' }
+    . "$PSScriptRoot\DomainJoin.ps1"
+}
 $deadline = [DateTime]::UtcNow.AddHours(2)
 while ([DateTime]::UtcNow -lt $deadline) {
     try {
@@ -24,7 +28,19 @@ while ([DateTime]::UtcNow -lt $deadline) {
             if ($hardware -cne $cfg.hardware_uuid) { throw 'Machine identity mismatch.' }
             $build = [int](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').CurrentBuildNumber
             $body = @{hardware_uuid=$hardware; computer_name=$env:COMPUTERNAME; os_build=$build;
-                image_state=$state; oobe_done=$true} | ConvertTo-Json -Compress
+                image_state=$state; oobe_done=$true}
+            if ($cfg.domain_join) {
+                $join = Invoke-DeploymentDomainJoin $cfg $hardware
+                if ($join -eq 'wait') { Start-Sleep -Seconds 20; continue }
+                if ($join -eq 'failed') {
+                    Unregister-ScheduledTask -TaskName ('PCDeploy-' + $cfg.job_id) -Confirm:$false
+                    Remove-Item -LiteralPath "$PSScriptRoot\config.json"
+                    exit 1
+                }
+                $body.domain_name = $cfg.domain_join.domain
+                $body.domain_join_verified = $true
+            }
+            $body = $body | ConvertTo-Json -Compress
             Invoke-RestMethod -Method Post -Uri ($cfg.server_url + '/api/agent/jobs/' + $cfg.job_id + '/finish') `
                 -Headers @{Authorization=('Bearer ' + $cfg.token)} -ContentType 'application/json' -Body $body -TimeoutSec 30 | Out-Null
             Unregister-ScheduledTask -TaskName ('PCDeploy-' + $cfg.job_id) -Confirm:$false
@@ -34,5 +50,11 @@ while ([DateTime]::UtcNow -lt $deadline) {
         }
     } catch { }
     Start-Sleep -Seconds 20
+}
+if ($cfg.domain_join) {
+    try {
+        Save-JoinJournal 'failed' '' 'Post-install domain DNS or trust verification timed out; no automatic reinstall or second domain join.'
+        Send-JoinState $cfg $cfg.hardware_uuid 'failed' 'Post-install domain DNS or trust verification timed out; no automatic reinstall or second domain join.'
+    } catch { }
 }
 exit 1

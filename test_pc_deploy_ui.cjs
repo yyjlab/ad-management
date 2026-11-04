@@ -31,15 +31,21 @@ async function run() {
       if(url.pathname==='/api/admin/check') return route.fulfill({json:{logged_in:true,username:'test-admin',role,
         permissions:['view_user','view_dashboard','view_computers','view_logs','manage_admins','system_settings','password_policy']}});
       if(url.pathname==='/pc-deploy/api/session') return route.fulfill(expired ? {status:401,json:{error:'请先登录 AD 管理后台'}} : {json:{authenticated:true,username:'test-admin',csrf:'fixture-csrf',test_mode:true}});
-      if(url.pathname==='/pc-deploy/api/profiles' && request.method()==='POST') {
+      if(/^\/pc-deploy\/api\/profiles(?:\/[^/]+)?$/.test(url.pathname) && ['POST','PUT'].includes(request.method())) {
         profilePayload=request.postDataJSON();
         return route.fulfill({json:{ok:true,id:'new-profile'}});
       }
       if(url.pathname==='/pc-deploy/api/jobs/preview') {
         previewPayload=request.postDataJSON();
-        const disk=fixture.devices[0].disks[0];
+        const profile=fixture.profiles.find(p=>p.id===previewPayload.profile_id);
+        const previewNames=new Set();
+        const targets=previewPayload.targets.map(t=>{const device=fixture.devices.find(d=>d.id===t.device_id),disk=device.disks[0];
+          let name=t.employee_id;
+          if(/^\d+$/.test(name)||previewNames.has(name))name+='A';
+          previewNames.add(name);
+          return {serial:device.serial,boot_code:device.boot_code,disk,partitions:{windows:disk.partitions[0]},employee_id:t.employee_id,computer_name:name};});
         return route.fulfill({json:{id:'preview-1',profile:'WIM preserve',source:'Custom WIM',warning:'只格式化所选 Windows 分区，保留其他分区，更新同盘 EFI。',
-          targets:[{serial:'TEST-LAPTOP',boot_code:'ABC123',disk,partitions:{windows:disk.partitions[0]}}]}});
+          domain_join:profile.domain_join,targets}});
       }
       if(url.pathname==='/pc-deploy/api/enrollments/'+'a'.repeat(64)+'/extend'){
         assert.equal(request.method(),'POST');
@@ -492,6 +498,119 @@ async function run() {
     assert.equal(await page.locator('#job-log img').count(),0);checks++;
     assert.equal(await page.evaluate(()=>window.reviewInjected),undefined);checks++;
     await page.locator('#close-modal').click();
+
+    // Optional domain join binds the operator's employee ID to each specific device.
+    const joinSettings={domain:'corp.test',ou_path:'OU=Workstations,DC=corp,DC=test',username:'join-service@corp.test'};
+    fixture.profiles[1].domain_join=joinSettings;
+    fixture.profiles[1].has_domain_join_password=true;
+    settings.public_url='https://deploy.test/pc-deploy';
+    await page.locator('#refresh').click();
+    await page.locator('[data-view=profiles]').click();
+    await page.locator('[data-action=edit-profile][data-id=wim-profile]').click();
+    assert.ok(await page.locator('#domain-join-enabled').isChecked());checks++;
+    assert.equal(await page.locator('[name=join_password]').inputValue(),'');checks++;
+    assert.ok(await page.locator('[name=join_password]').evaluate(el=>!el.required));checks++;
+    assert.ok(await page.locator('[name=join_password]').isDisabled());checks++;
+    const priorProfilePayload=profilePayload;
+    await page.locator('#profile-form [type=submit]').click();
+    await page.locator('#form-error').filter({hasText:'HTTPS'}).waitFor();
+    assert.equal(profilePayload,priorProfilePayload);checks++;
+    await page.locator('#profile-form [data-action=close]').click();
+
+    await page.goto('https://ad-menu.test/pc-deploy/');
+    await page.locator('#workspace:not([hidden])').waitFor();
+    await page.locator('#profile-choice').selectOption('wim-profile');
+    const employee=page.locator('[data-employee=laptop-1]');
+    assert.ok(await employee.isVisible());checks++;
+    await page.locator('[data-disk=laptop-1]').selectOption('disk-7');
+    await page.locator('[data-partition=laptop-1]').selectOption('partition-3');
+    await page.locator('[data-device=laptop-1]').check();
+    const previewsBefore=requests.filter(p=>p==='/pc-deploy/api/jobs/preview').length;
+    await page.locator('#preview-button').click();
+    await page.locator('#toast').filter({hasText:'请为每台选中的电脑填写员工工号'}).waitFor();
+    assert.equal(requests.filter(p=>p==='/pc-deploy/api/jobs/preview').length,previewsBefore);checks++;
+    await employee.fill('BAD/ID');
+    await page.locator('#preview-button').click();
+    await page.locator('#toast').filter({hasText:'工号须为 1–14 位'}).waitFor();
+    assert.equal(requests.filter(p=>p==='/pc-deploy/api/jobs/preview').length,previewsBefore);checks++;
+    await employee.fill('12345');
+    await page.locator('#preview-button').click();
+    await page.locator('#commit-form').waitFor();
+    assert.equal(previewPayload.targets[0].employee_id,'12345');checks++;
+    assert.ok((await page.locator('#modal-body').textContent()).includes('预计 12345A'));checks++;
+    await page.locator('#commit-form [data-action=close]').click();
+    await employee.fill('wfq101755');
+    await employee.evaluate(el=>el.setSelectionRange(3,3));
+    await page.evaluate(()=>refresh());
+    assert.equal(await employee.evaluate(el=>document.activeElement===el&&el.selectionStart===3),true);checks++;
+    await page.waitForFunction(()=>document.querySelector('[data-employee=laptop-1]')?.value==='WFQ101755');
+    assert.equal(await employee.inputValue(),'WFQ101755');checks++;
+    await page.locator('#preview-button').click();
+    await page.locator('#commit-form').waitFor();
+    assert.equal(previewPayload.targets[0].employee_id,'WFQ101755');checks++;
+    assert.ok((await page.locator('#modal-body').textContent()).includes('WFQ101755'));checks++;
+    assert.ok((await page.locator('#modal-body').textContent()).includes('corp.test'));checks++;
+    assert.ok(await page.locator('#commit-form [type=submit]').isDisabled());checks++;
+    await page.locator('#commit-form [data-action=close]').click();
+    fixture.devices.push({...fixture.devices[0],id:'laptop-2',serial:'SECOND-LAPTOP'});
+    await page.locator('#refresh').click();
+    await page.locator('[data-employee=laptop-2]').waitFor();
+    await page.locator('[data-disk=laptop-2]').selectOption('disk-7');
+    await page.locator('[data-partition=laptop-2]').selectOption('partition-3');
+    await page.locator('[data-employee=laptop-2]').fill('WFQ101755');
+    await page.locator('[data-device=laptop-2]').check();
+    await page.locator('#preview-button').click();
+    await page.locator('#commit-form').waitFor();
+    assert.deepEqual(previewPayload.targets.map(t=>t.employee_id),['WFQ101755','WFQ101755']);checks++;
+    assert.ok((await page.locator('#modal-body').textContent()).includes('预计 WFQ101755A'));checks++;
+    assert.ok((await page.locator('#modal-body').textContent()).includes('最终名称同步到任务与日志'));checks++;
+    const previewsAfterDuplicate=requests.filter(p=>p==='/pc-deploy/api/jobs/preview').length;
+    await page.locator('#commit-form [data-action=close]').click();
+    await page.locator('[data-employee=laptop-2]').fill('WFQ101756');
+    await page.locator('#preview-button').click();
+    await page.locator('#commit-form').waitFor();
+    assert.equal(requests.filter(p=>p==='/pc-deploy/api/jobs/preview').length,previewsAfterDuplicate+1);checks++;
+    assert.deepEqual(previewPayload.targets.map(t=>[t.device_id,t.employee_id]),
+      [['laptop-1','WFQ101755'],['laptop-2','WFQ101756']]);checks++;
+    assert.ok((await page.locator('#modal-body').textContent()).includes('SECOND-LAPTOP'));checks++;
+    await page.locator('#commit-form [data-action=close]').click();
+
+    await page.locator('[data-view=profiles]').click();
+    await page.locator('[data-action=edit-profile][data-id=wim-profile]').click();
+    await page.locator('[name=join_password]').fill('Fixture-only-join-password');
+    await page.locator('#profile-form [type=submit]').click();
+    await page.locator('#modal').waitFor({state:'hidden'});
+    assert.equal(profilePayload.domain_join.domain,'corp.test');checks++;
+    assert.equal(profilePayload.domain_join_password,'Fixture-only-join-password');checks++;
+    assert.ok(!('join_password' in profilePayload));checks++;
+    assert.ok(!('password' in profilePayload));checks++;
+
+    Object.assign(fixture.jobs[0],{state:'awaiting_report',review:null,computer_name:'WFQ101755',updated:1793347900,
+      domain_join:{state:'joining',domain:'corp.test',computer_name:'WFQ101755',updated:1793347900,os_installed:true}});
+    fixture.server_time=1793347910;
+    await page.locator('#refresh').click();
+    await page.locator('[data-view=jobs]').click();
+    await page.getByText('自动加域中',{exact:true}).waitFor();
+    assert.ok((await page.locator('.job-row').first().textContent()).includes('工号电脑名：WFQ101755'));checks++;
+    await page.locator('[data-action=job-logs][data-id=progress-job]').click();
+    await page.locator('#job-log').getByText('自动加域中',{exact:true}).waitFor();
+    assert.ok((await page.locator('#job-log').textContent()).includes('正在加入 AD 域'));checks++;
+    fixture.jobs[0].state='completed';
+    fixture.jobs[0].domain_join.state='verified';
+    fixture.jobs[0].updated=1793348000;
+    fixture.jobs[0].finished_at=1793348000;
+    fixture.server_time=1793348010;
+    await page.locator('[data-action=refresh-job-logs]').click();
+    await page.locator('#job-log').getByText('安装并加域完成',{exact:true}).waitFor();
+    assert.equal(await page.locator('.job-row').first().locator('.badge').first().textContent(),'安装并加域完成');checks++;
+    await page.locator('#close-modal').click();
+    fixture.jobs[0].state='failed';
+    fixture.jobs[0].domain_join.state='failed';
+    fixture.jobs[0].updated=1793348100;
+    fixture.server_time=1793348110;
+    await page.locator('#refresh').click();
+    await page.getByText('系统已安装，加域失败',{exact:true}).waitFor();
+    assert.ok((await page.locator('.job-row').first().textContent()).includes('不会重新装机'));checks++;
 
     assert.deepEqual(errors,[]);checks++;
     console.log(`${checks} nested menu, embedded page, HTTP form, role, message origin, lifecycle, mobile, WIM restore and per-task log UI checks passed. No live system contacted.`);
