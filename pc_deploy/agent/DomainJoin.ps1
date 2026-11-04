@@ -88,6 +88,19 @@ function Invoke-DeploymentDomainJoin {
             }
             return 'wait'
         }
+        if ($Config.domain_join.mode -eq 'manual' -and
+            $journal.phase -notin @('attempted', 'joined', 'restart_requested', 'verified')) {
+            $setup = Get-ItemProperty 'HKLM:\SYSTEM\Setup'
+            $state = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State').ImageState
+            try {
+                $configuration = Invoke-JoinService $Config 'config' @{
+                    hardware_uuid=$Hardware; computer_name=$env:COMPUTERNAME;
+                    os_build=[int](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').CurrentBuildNumber;
+                    image_state=$state; oobe_done=($setup.SystemSetupInProgress -eq 0 -and $setup.OOBEInProgress -eq 0)
+                }
+            } catch { return 'wait' }
+            if ($configuration.waiting_for_release -is [bool] -and $configuration.waiting_for_release) { return 'wait' }
+        }
         $system = Get-CimInstance Win32_ComputerSystem
         $domain = [string]$Config.domain_join.domain
         $name = [string]$Config.domain_join.computer_name
@@ -121,8 +134,10 @@ function Invoke-DeploymentDomainJoin {
             return 'wait'
         }
         Send-JoinState $Config $Hardware 'checking'
-        try { $configuration = Invoke-JoinService $Config 'config' @{hardware_uuid=$Hardware} }
-        catch { return 'wait' }
+        if (-not $configuration) {
+            try { $configuration = Invoke-JoinService $Config 'config' @{hardware_uuid=$Hardware} }
+            catch { return 'wait' }
+        }
         if ([string]$configuration.domain -cne $domain -or
             [string]$configuration.employee_id -cne [string]$Config.domain_join.employee_id) {
             throw 'Domain join configuration does not match this installation task.'

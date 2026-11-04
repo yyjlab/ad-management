@@ -10,6 +10,7 @@ const embedParams = new URLSearchParams(location.search);
 const embedded = embedParams.get('embedded') === '1' && window.parent !== window;
 if (embedded) document.documentElement.classList.add('embedded');
 let csrf = '', data = null, view = Object.hasOwn(labels, embedParams.get('view')) ? embedParams.get('view') : 'devices', busy = false;
+let joinSelection = new Set();
 let chosen = new Set(), disks = new Map(), partitions = new Map(), employeeIds = new Map(), profileId = '', search = '', filter = 'all', previewId = null;
 let toastTimer, settingsDirty = false, jobLog = null, serverTime = 0, serverSample = 0;
 const jobSnapshots = new Map();
@@ -86,6 +87,7 @@ function modelHint(device) {
 function jobBadge(job) {
   const join=job.domain_join;
   if(join?.state==='verified' && job.state==='completed')return '<span class="badge good">安装并加域完成</span>';
+  if(join?.state==='waiting_release' && activeStates.includes(job.state))return '<span class="badge '+(join.released_at?'blue':'warn')+'">'+(join.released_at?'已授权，等待加域':'Windows 已安装，待统一加域')+'</span>';
   if(join?.state==='failed'&&!job.review)return '<span class="badge bad">系统已安装，加域失败</span>';
   if(join && ['checking','joining','restarting','verified'].includes(join.state) && activeStates.includes(job.state))return '<span class="badge blue">'+(join.state==='restarting'?'加域后重启验证中':join.state==='verified'?'加域已验证，等待完成回报':'自动加域中')+'</span>';
   if (job.state !== 'failed' || !job.review) return badge(job.state);
@@ -146,7 +148,7 @@ function renderSources() {
   $('#page-content').innerHTML = data.sources.length ? `<div class="record-grid">${data.sources.map(s=>`<article class="record"><div class="record-top"><h3>${h(s.name)}</h3><span class="badge blue">${s.family==='windows11'?'Windows 11':'Windows 10'}</span></div><p class="mono">${h(s.path)}${s.kind==='wim'?' / '+h(s.image_file):''}</p><span class="badge muted">${s.kind==='wim'?'封装 WIM 直接还原':'原版 Setup 安装'}</span><span class="badge muted">待装机客户端复核</span><dl><dt>镜像索引</dt><dd>${s.images.length} 个 x64 版本</dd><dt>读取账号</dt><dd>${h(s.smb_user)}</dd><dt>检测方式</dt><dd>快速检测 · 版本与索引</dd></dl><div class="form-actions"><button class="small" data-action="edit-source" data-id="${h(s.id)}">编辑安装源</button></div></article>`).join('')}</div>` : empty('尚未添加安装源','原版 ISO 解压目录和单个封装 WIM 均支持；运行检测脚本后导入清单。');
 }
 function renderProfiles() {
-  $('#page-content').innerHTML = data.profiles.length ? `<div class="record-grid">${data.profiles.map(p=>`<article class="record"><div class="record-top"><h3>${h(p.name)}</h3><span class="badge good">UEFI / GPT</span></div><dl><dt>安装源</dt><dd>${h(data.sources.find(s=>s.id===p.source_id)?.name || '安装源不存在')}</dd><dt>镜像索引</dt><dd>${p.image_index}</dd><dt>分区方案</dt><dd>${p.disk_mode==='system_partition'?'保留分区布局，仅还原所选 Windows 分区':(p.system_gib?`C 盘 ${p.system_gib} GiB + D 盘剩余空间`:'单 C 盘，使用可用空间')}<br><small>${p.disk_mode==='system_partition'?'更新同盘 EFI 引导':'重建 EFI / MSR / 恢复分区'}</small></dd><dt>本地账号</dt><dd>${p.preserve_image_settings?'沿用镜像内账号':h(p.username)+' · 密码已保护'}</dd><dt>计算机名</dt><dd>${p.domain_join?'按每台填写的员工工号':p.preserve_image_settings?'沿用镜像内名称':h(p.computer_prefix)+'-设备标识'}</dd></dl><div class="form-actions"><button class="small" data-action="edit-profile" data-id="${h(p.id)}">编辑方案</button></div></article>`).join('')}</div>` : empty('尚未配置装机方案','先添加安装源，再配置系统版本、分区和临时本地账号。');
+  $('#page-content').innerHTML = data.profiles.length ? `<div class="record-grid">${data.profiles.map(p=>`<article class="record"><div class="record-top"><h3>${h(p.name)}</h3><span class="badge good">UEFI / GPT</span></div><dl><dt>安装源</dt><dd>${h(data.sources.find(s=>s.id===p.source_id)?.name || '安装源不存在')}</dd><dt>镜像索引</dt><dd>${p.image_index}</dd><dt>分区方案</dt><dd>${p.disk_mode==='system_partition'?'保留分区布局，仅还原所选 Windows 分区':(p.system_gib?`C 盘 ${p.system_gib} GiB + D 盘剩余空间`:'单 C 盘，使用可用空间')}<br><small>${p.disk_mode==='system_partition'?'更新同盘 EFI 引导':'重建 EFI / MSR / 恢复分区'}</small></dd><dt>本地账号</dt><dd>${p.preserve_image_settings?'沿用镜像内账号':h(p.username)+' · 密码已保护'}</dd><dt>计算机名</dt><dd>${p.domain_join?'按每台填写的员工工号 · '+(p.domain_join.mode==='manual'?'平台统一加域':'安装后自动加域'):p.preserve_image_settings?'沿用镜像内名称':h(p.computer_prefix)+'-设备标识'}</dd></dl><div class="form-actions"><button class="small" data-action="edit-profile" data-id="${h(p.id)}">编辑方案</button></div></article>`).join('')}</div>` : empty('尚未配置装机方案','先添加安装源，再配置系统版本、分区和临时本地账号。');
 }
 function syncServerClock(seconds) {
   if (Number.isFinite(seconds) && seconds >= serverTime) { serverTime = seconds; serverSample = performance.now(); }
@@ -158,8 +160,9 @@ function duration(seconds) {
 }
 function renderJobTiming(job) {
   const started = Number.isFinite(job.started_at) && job.started_at > 0 ? job.started_at : null;
-  const active = activeStates.includes(job.state);
-  const ended = active ? null : (job.finished_at ?? job.updated ?? job.created);
+  const installedAt = Number.isFinite(job.installed_at) ? job.installed_at : null;
+  const active = activeStates.includes(job.state) && installedAt === null;
+  const ended = installedAt ?? (active ? null : (job.finished_at ?? job.updated ?? job.created));
   return '<div class="job-timing" data-state="'+h(job.state)+'"><strong data-job-timer data-start="'+h(started ?? job.created)+'" data-end="'+h(ended ?? '')+'" data-installed="'+(started !== null)+'" data-active="'+active+'"></strong><small>'+
     (started === null ? '创建：'+h(date(job.created))+' · 尚未开始安装' : '开始：'+h(date(started)))+
     '</small><small class="duration-warning" hidden>已超过 10 分钟，请查看当前阶段与日志</small></div>';
@@ -192,8 +195,8 @@ function restoreJobProgress(root, previous) {
 function renderJobProgress(job) {
   const join=job.domain_join;
   if(join && join.state!=='pending'){
-    const stages={checking:'检查域 DNS 与电脑名',joining:'正在加入 AD 域',restarting:'等待重启后验证域信任',verified:'域信任验证已通过',failed:'加域失败，不会重新装机'};
-    const tone = join.state==='verified' ? ' completed' : join.state==='failed' ? ' stopped' : join.state==='restarting' ? ' pending' : '';
+    const stages={waiting_release:join.released_at?'管理员已授权，等待客户端领取':(job.expires_at && job.expires_at<serverNow()?'等待加域已超时，请查看日志':'可先完成现场设置，再在平台统一加域'),checking:'检查域 DNS 与电脑名',joining:'正在加入 AD 域',restarting:'等待重启后验证域信任',verified:'域信任验证已通过',failed:'加域失败，不会重新装机'};
+    const tone = join.state==='verified' ? ' completed' : join.state==='failed' ? ' stopped' : (join.state==='restarting'||join.state==='waiting_release'&&!join.released_at) ? ' pending' : '';
     return '<div class="job-progress'+tone+'"><span class="job-progress-phase">Windows 已安装 · '+h(stages[join.state]||join.state)+'</span><small>工号电脑名：'+h(join.computer_name)+' · 域：'+h(join.domain)+'</small>'+(join.updated?'<small>最后回报：'+h(date(join.updated))+'</small>':'')+'</div>';
   }
   const progress = job.progress;
@@ -261,10 +264,31 @@ async function openJobLogs(id) {
   jobLog = {id, before:null, result:null, busy:false, error:''};
   await loadJobLogs();
 }
+function canReleaseDomainJoin(job) {
+  return job.state==='awaiting_report' && job.domain_join?.state==='waiting_release' &&
+    !job.domain_join.released_at && Number.isFinite(job.installed_at) && job.expires_at>serverNow();
+}
+function updateJoinSelection() {
+  const button=$('#release-selected-joins'); if(!button)return;
+  button.disabled=joinSelection.size===0;
+  button.textContent='统一加域并重启（'+joinSelection.size+' 台）';
+  const master=$('#select-all-joins'), count=document.querySelectorAll('[data-job-join]').length;
+  if(master){master.checked=count>0&&joinSelection.size===count;master.indeterminate=joinSelection.size>0&&joinSelection.size<count;}
+}
+function releaseJoinModal(ids) {
+  const jobs=data.jobs.filter(job=>ids.includes(job.id)&&canReleaseDomainJoin(job));
+  if(jobs.length!==ids.length||!jobs.length){toast('请刷新后选择已安装完成、待统一加域的电脑');return;}
+  modal('统一加域并重启','<form id="domain-join-release-form"><p>以下电脑已完成 Windows 安装。确认后开始按工号改名、加入各自方案指定的域，并自动重启一次。请先保存现场设置和未保存的文件。</p><ul>'+jobs.map(job=>'<li>'+h(deviceLabel(job))+' · '+h(job.serial)+' · '+h(job.computer_name)+' · '+h(job.domain_join.domain)+'</li>').join('')+'</ul><label class="check-label"><input name="restart_confirmed" type="checkbox" required>已完成并保存这些电脑的设置，允许改名、加域并重启</label><div id="form-error" class="error" role="alert"></div><div class="form-actions"><button type="button" data-action="close">返回</button><button type="submit" class="primary">开始统一加域</button></div></form>');
+  $('#domain-join-release-form').dataset.jobIds=JSON.stringify(ids);
+}
 function renderJobs() {
   const previous = captureJobProgress($('#page-content'));
-  $('#page-content').innerHTML = `<div class="table-wrap">${data.jobs.length?`<table><thead><tr><th>设备</th><th>方案 / 目标盘</th><th>任务状态</th><th>安装时间 / 用时</th><th>操作</th></tr></thead><tbody>${data.jobs.map(j=>`<tr class="job-row" data-state="${h(j.state)}"><td><span class="cell-title">${h(deviceLabel(j))}</span><span class="cell-sub mono">${h(j.serial)}</span>${j.computer_name?'<span class="cell-sub mono">工号电脑名：'+h(j.computer_name)+'</span>':''}${modelHint(j)}</td><td>${h(j.profile)}<span class="cell-sub">磁盘 ${j.disk.number} · ${h(size(j.disk.size_bytes))}</span></td><td>${jobBadge(j)}${renderJobProgress(j)}${j.stale?'<span class="cell-sub error">长时间未回报，需现场核对</span>':''}</td><td>${renderJobTiming(j)}</td><td>${['queued','preflight'].includes(j.state)?`<button class="small" data-action="cancel-job" data-id="${h(j.id)}">取消任务</button>`:j.state==='failed'?`<button class="small" data-action="review-job" data-id="${h(j.id)}">${j.review?'更新核对':'人工核对'}</button>`:activeStates.includes(j.state)&&j.stale?`<button class="small" data-action="reconcile-job" data-id="${h(j.id)}">结束异常记录</button>`:''} <button class="small job-log-button" data-action="job-logs" data-id="${h(j.id)}">查看日志</button></td></tr>`).join('')}</tbody></table>`:empty('暂无安装任务')}</div><div class="subheading"><h3>平台操作记录</h3><small>最近 100 条 · 任务日志请点击对应任务查看</small></div><div class="log-list">${renderLogEvents(data.events) || empty('暂无操作记录')}</div>`;
+  const ready=data.jobs.filter(canReleaseDomainJoin), readyIds=new Set(ready.map(job=>job.id));
+  joinSelection=new Set([...joinSelection].filter(id=>readyIds.has(id)));
+  const releaseToolbar=ready.length?'<div class="notice"><strong>有 '+ready.length+' 台 Windows 已安装，等待统一加域。</strong><p>完成现场设置后，勾选下方电脑，再统一执行。等待期间不会因加域额外重启；请在任务创建后 72 小时内执行。</p><button id="release-selected-joins" data-action="release-joins" class="primary" '+(joinSelection.size?'':'disabled')+'>统一加域并重启（'+joinSelection.size+' 台）</button></div>':'';
+  $('#page-content').innerHTML = releaseToolbar+`<div class="table-wrap">${data.jobs.length?`<table><thead><tr>${ready.length?'<th class="check-cell"><input id="select-all-joins" type="checkbox" aria-label="全选待统一加域电脑" '+(joinSelection.size===ready.length?'checked':'')+'></th>':''}<th>设备</th><th>方案 / 目标盘</th><th>任务状态</th><th>安装时间 / 用时</th><th>操作</th></tr></thead><tbody>${data.jobs.map(j=>`<tr class="job-row" data-state="${h(j.state)}">${ready.length?'<td class="check-cell">'+(canReleaseDomainJoin(j)?'<input type="checkbox" data-job-join="'+h(j.id)+'" aria-label="选择 '+h(j.serial)+' 统一加域" '+(joinSelection.has(j.id)?'checked':'')+'>':'')+'</td>':''}<td><span class="cell-title">${h(deviceLabel(j))}</span><span class="cell-sub mono">${h(j.serial)}</span>${j.computer_name?'<span class="cell-sub mono">工号电脑名：'+h(j.computer_name)+'</span>':''}${modelHint(j)}</td><td>${h(j.profile)}<span class="cell-sub">磁盘 ${j.disk.number} · ${h(size(j.disk.size_bytes))}</span></td><td>${jobBadge(j)}${renderJobProgress(j)}${j.stale?'<span class="cell-sub error">长时间未回报，需现场核对</span>':''}</td><td>${renderJobTiming(j)}</td><td>${canReleaseDomainJoin(j)?'<button class="small" data-action="release-joins" data-id="'+h(j.id)+'">执行加域</button> ':''}${['queued','preflight'].includes(j.state)?`<button class="small" data-action="cancel-job" data-id="${h(j.id)}">取消任务</button>`:j.state==='failed'?`<button class="small" data-action="review-job" data-id="${h(j.id)}">${j.review?'更新核对':'人工核对'}</button>`:activeStates.includes(j.state)&&j.stale?`<button class="small" data-action="reconcile-job" data-id="${h(j.id)}">结束异常记录</button>`:''} <button class="small job-log-button" data-action="job-logs" data-id="${h(j.id)}">查看日志</button></td></tr>`).join('')}</tbody></table>`:empty('暂无安装任务')}</div><div class="subheading"><h3>平台操作记录</h3><small>最近 100 条 · 任务日志请点击对应任务查看</small></div><div class="log-list">${renderLogEvents(data.events) || empty('暂无操作记录')}</div>`;
   restoreJobProgress($('#page-content'), previous);
+  updateJoinSelection();
   updateJobTimers();
 }
 
@@ -304,21 +328,25 @@ function editSource(id) {
 function editProfile(id) {
   if (!data.sources.length) { toast('先添加安装源'); return; }
   const p = data.profiles.find(x=>x.id===id);
-  modal(p?'编辑装机方案':'新建装机方案', `<form id="profile-form" data-id="${h(id||'')}"><div class="form-grid">${field('方案名称','name','text',p?.name||'','','')}<div class="field"><label for="source-choice">安装源</label><select id="source-choice" name="source_id" required>${data.sources.map(s=>`<option value="${h(s.id)}">${h(s.name)}</option>`).join('')}</select></div><div class="field full"><label for="image-choice">Windows 版本</label><select id="image-choice" name="image_index" required></select></div>${field('C 盘容量 GiB（0 = 单 C 盘）','system_gib','number',p?.system_gib??0,'min="0" max="4096" required')}${field('计算机名前缀','computer_prefix','text',p?.computer_prefix||'PC','maxlength="6" required')}${field('临时本地管理员账号','username','text',p?.username||'ITSetup','required maxlength="20"')}${field('临时本地管理员密码','password','password','','autocomplete="new-password" minlength="12" maxlength="64" '+(p?'':'required'))}</div><p id="setup-profile-help" class="modal-help">只清空选中的一块物理硬盘。密码会写入 Windows 安装应答文件，编码不等于加密；装机后请更换，不建议长期共用。</p><div id="form-error" class="error" role="alert"></div><div class="form-actions"><button type="button" data-action="close">取消</button><button class="primary" type="submit">保存方案</button></div></form>`);
+  modal(p?'编辑装机方案':'新建装机方案', `<form id="profile-form" data-id="${h(id||'')}"><div class="form-grid">${field('方案名称','name','text',p?.name||'','','')}<div class="field"><label for="source-choice">安装源</label><select id="source-choice" name="source_id" required>${data.sources.map(s=>`<option value="${h(s.id)}">${h(s.name)}</option>`).join('')}</select></div><div class="field full"><label for="image-choice">Windows 版本</label><select id="image-choice" name="image_index" required></select></div>${field('C 盘容量（GiB）','system_gib','number',p?.system_gib??0,'min="80" max="4096" required')}${field('计算机名前缀','computer_prefix','text',p?.computer_prefix||'PC','maxlength="6" required')}${field('临时本地管理员账号','username','text',p?.username||'ITSetup','required maxlength="20"')}${field('临时本地管理员密码','password','password','','autocomplete="new-password" minlength="12" maxlength="64" '+(p?'':'required'))}</div><p id="setup-profile-help" class="modal-help">只清空选中的一块物理硬盘。密码会写入 Windows 安装应答文件，编码不等于加密；装机后请更换，不建议长期共用。</p><div id="form-error" class="error" role="alert"></div><div class="form-actions"><button type="button" data-action="close">取消</button><button class="primary" type="submit">保存方案</button></div></form>`);
   $('.form-grid', $('#profile-form')).insertAdjacentHTML('beforeend', `<div class="full">${field('合法安装密钥（可选）','product_key','password','','maxlength="29" autocomplete="off" placeholder="留空使用已有 OEM / 企业许可配置"')}${p?.has_product_key?'<label class="check-label"><input name="clear_product_key" type="checkbox">移除已保存的安装密钥</label>':''}<small>此处不提供激活工具或授权。密钥留空不等于自动获得 Windows 授权。</small></div>`);
   $('#profile-form [name=name]').required = true;
   $('#profile-form').dataset.originalWim=String(p?.preserve_image_settings===true);
   if (p) $('#source-choice').value = p.source_id;
   $('.form-grid', $('#profile-form')).insertAdjacentHTML('afterbegin', '<div class="field"><label for="disk-mode">封装 WIM 分区方式</label><select id="disk-mode" name="disk_mode"><option value="wipe_disk">重建所选整盘（清空全部分区）</option><option value="system_partition">仅还原指定 Windows 分区（保留其他分区）</option></select></div><p id="wim-profile-help" class="modal-help full" hidden>沿用镜像内的软件、账号与授权配置。默认保留计算机名；启用自动加域后改为每台填写的员工工号。系统分区数据仍会清空；未做 OOBE 封装的镜像需首次管理员登录后启动安装后步骤。</p>');
   if(p?.disk_mode) $('#disk-mode').value=p.disk_mode;
+  $('#disk-mode').closest('.field').insertAdjacentHTML('afterend','<div id="partition-layout-field" class="field"><label for="partition-layout">自动分盘方案</label><select id="partition-layout" name="partition_layout"><option value="single">单 C 盘：使用所选硬盘的可用空间</option><option value="split">C + D 盘：指定 C 盘容量，剩余空间创建 D 盘</option></select></div><p id="partition-plan-help" class="modal-help full"></p>');
+  $('#partition-layout').value=p?.system_gib?'split':'single';
+  $('#profile-form').dataset.splitGib=String(p?.system_gib||256);
   const join = p?.domain_join, defaults = data.settings.domain_defaults || {};
   $('.form-grid', $('#profile-form')).insertAdjacentHTML('beforeend',
-    '<section class="section full"><label class="check-label"><input id="domain-join-enabled" name="join_enabled" type="checkbox" '+(join?'checked':'')+'>安装后自动按员工工号改名并加入 AD 域</label><p class="modal-help">每台设备在工作台填写员工工号，原工号保留；电脑名重名时依次追加 A–Z，纯数字从 A 开始。需要域 DNS 和具备加域权限的 AD 账号。默认使用 HTTPS；隔离内网临时使用 HTTP 时须明确勾选下方选项。自动检查同名电脑并顺延字母，不覆盖已有电脑。加域成功后额外重启一次并验证。</p><label id="domain-join-http-option" class="check-label"><input id="domain-join-http" name="join_allow_http" type="checkbox" '+(join?.allow_http?'checked':'')+'>允许隔离内网 HTTP 加域（密码将明文传输）</label><p id="domain-join-http-notice" class="error" hidden>本方案已允许 HTTP。AD 账号验证不会加密传输；此设置只作用于使用本方案新建的任务。</p><p id="domain-join-https-error" class="error" hidden></p><div id="domain-join-fields" class="form-grid">'+
+    '<section class="section full"><label class="check-label"><input id="domain-join-enabled" name="join_enabled" type="checkbox" '+(join?'checked':'')+'>按员工工号改名并加入 AD 域</label><p class="modal-help">每台设备在工作台填写员工工号，原工号保留；电脑名重名时依次追加 A–Z，纯数字从 A 开始。需要域 DNS 和具备加域权限的 AD 账号。默认使用 HTTPS；隔离内网临时使用 HTTP 时须明确勾选下方选项。自动检查同名电脑并顺延字母，不覆盖已有电脑。加域成功后额外重启一次并验证。</p><label id="domain-join-http-option" class="check-label"><input id="domain-join-http" name="join_allow_http" type="checkbox" '+(join?.allow_http?'checked':'')+'>允许隔离内网 HTTP 加域（密码将明文传输）</label><p id="domain-join-http-notice" class="error" hidden>本方案已允许 HTTP。AD 账号验证不会加密传输；此设置只作用于使用本方案新建的任务。</p><p id="domain-join-https-error" class="error" hidden></p><div id="domain-join-fields" class="form-grid"><div class="field full"><label for="domain-join-mode">加域执行方式</label><select id="domain-join-mode" name="join_mode"><option value="automatic">安装完成后立即自动加域</option><option value="manual">先完成现场设置，再由平台勾选电脑统一加域</option></select><small>统一加域模式会等待管理员操作，不会提前改名、加域或额外重启；沿用任务创建后 72 小时有效期。</small></div>'+
     field('AD 域 DNS 名称','join_domain','text',join?.domain || defaults.domain || '','maxlength="253" placeholder="例如 corp.example.com"')+
     field('目标 OU（可选）','join_ou','text',join?.ou_path || defaults.ou_path || '','maxlength="500" placeholder="留空使用域默认的电脑位置"')+
     field('AD 加域账号','join_user','text',join?.username || '','maxlength="120" autocomplete="off"')+
     '<div class="field"><label for="field-join_password">加域密码 <span id="domain-join-password-status" class="badge muted"></span></label><input id="field-join_password" name="join_password" type="password" maxlength="128" autocomplete="new-password" aria-describedby="domain-join-password-help"><small id="domain-join-password-help" aria-live="polite"></small></div>'+
     '</div></section>');
+  $('#domain-join-mode').value=join?.mode||'automatic';
   $('#profile-form').dataset.joinPassword=String(p?.has_domain_join_password===true);
   $('#profile-form').dataset.joinDomain=join?.domain || '';
   $('#profile-form').dataset.joinUser=join?.username || '';
@@ -337,7 +365,7 @@ function updateDomainJoinMode() {
   $('#domain-join-https-error').textContent=data.settings.http_allowed===true?'当前网页或客户端地址未启用 HTTPS；可配置 HTTPS，或明确允许本方案使用内网 HTTP。':'服务器禁止 HTTP 加域，请使用 HTTPS 网页和客户端地址。';
   $('#domain-join-https-error').hidden=!enabled||ready;
   $('#domain-join-fields').hidden=!enabled;
-  $('#domain-join-fields').querySelectorAll('input').forEach(input=>{
+  $('#domain-join-fields').querySelectorAll('input,select').forEach(input=>{
     input.disabled=!enabled||!ready;
     input.required=enabled && ready && (input.name==='join_domain'||input.name==='join_user');
   });
@@ -373,8 +401,23 @@ function updateProfileMode() {
     if(name==='password') el.required=!wim&&(!form.dataset.id||form.dataset.originalWim==='true');
   }
   const preserve=wim&&$('#disk-mode').value==='system_partition';
-  form.elements.system_gib.disabled=preserve;
-  if(preserve)form.elements.system_gib.value=0;
+  updatePartitionLayout(preserve);
+}
+function updatePartitionLayout(preserve) {
+  const form=$('#profile-form'); if(!form)return;
+  if(preserve===undefined)preserve=!$('#disk-mode').disabled&&$('#disk-mode').value==='system_partition';
+  const layout=form.elements.partition_layout, capacity=form.elements.system_gib;
+  if(Number(capacity.value)>0)form.dataset.splitGib=capacity.value;
+  layout.disabled=preserve; $('#partition-layout-field').hidden=preserve;
+  const split=!preserve&&layout.value==='split';
+  capacity.disabled=!split; capacity.required=split; capacity.closest('.field').hidden=!split;
+  if(split&&!Number(capacity.value))capacity.value=form.dataset.splitGib||'256';
+  if(!split)capacity.value='0';
+  $('#partition-plan-help').textContent=preserve?'保留现有 D 盘及其他分区，只重装明确选中的 Windows 分区；此模式不调整 C 盘容量。':'将重建所选整块硬盘，旧 C/D 盘数据都会清空。'+(split?'C 盘 '+capacity.value+' GiB，扣除引导和恢复分区后，其余空间自动创建 D 盘。':'除引导和恢复分区外，其余空间作为 C 盘。')+' 其他物理硬盘不处理，请先备份。';
+}
+function partitionPlan(profile) {
+  if(profile?.disk_mode==='system_partition')return '保留 D 盘及其他分区，仅重装所选 Windows 分区，不调整 C 盘容量。';
+  return '整盘重建：旧 C/D 数据全部清空。'+(profile?.system_gib?'C 盘 '+profile.system_gib+' GiB，扣除引导和恢复分区后，剩余空间创建 D 盘。':'扣除引导和恢复分区后，其余空间作为单 C 盘。');
 }
 async function preview() {
   const joining=!!selectedProfile()?.domain_join;
@@ -384,7 +427,7 @@ async function preview() {
   if(targets.some(t=>!t.disk_key)) { toast('请为每台选中的电脑明确选择目标硬盘'); return; }
   if(preservesPartitions()&&targets.some(t=>!t.partition_key)){toast('请明确选择每台电脑要格式化的 Windows 分区');return;}
   const r = await api('/api/jobs/preview','POST',{profile_id:profileId,targets}); previewId = r.id;
-  modal('确认批量安装', `<div class="notice danger">${h(r.warning)}<br>请先完成备份；启动安装后不能远程取消，也不会自动恢复原数据。</div><p>${h(r.profile)} · ${h(r.source)} · <strong>${r.targets.length} 台电脑</strong></p>${r.domain_join?'<p class="notice">安装后按以下员工工号改名并加入域 '+h(r.domain_join.domain)+'，加域成功后额外重启一次。同名时依次追加 A–Z，最终名称同步到任务与日志；不会覆盖已有电脑。'+(r.domain_join.allow_http?'<br><strong>本方案允许内网 HTTP 加域，密码将明文传输。</strong>':'')+'</p>':''}<div class="table-wrap"><table class="modal-table"><thead><tr><th>整机序列号</th><th>屏幕校验码</th>${r.domain_join?'<th>工号 / 预计电脑名</th>':''}<th>将处理的硬盘 / 分区</th></tr></thead><tbody>${r.targets.map(t=>`<tr><td class="mono">${h(t.serial)}</td><td class="mono">${h(t.boot_code)}</td>${r.domain_join?'<td class="mono">'+h(t.employee_id)+'<span class="cell-sub">预计 '+h(t.computer_name)+'</span></td>':''}<td>磁盘 ${t.disk.number} · ${h(t.disk.model)} · ${h(size(t.disk.size_bytes))}<span class="cell-sub mono">${h(t.disk.serial || t.disk.unique_id)}</span>${t.partitions?`<strong>只格式化分区 ${t.partitions.windows.number} · ${h(size(t.partitions.windows.size_bytes))}</strong><span class="cell-sub mono">${h(t.partitions.windows.guid)}</span>`:''}</td></tr>`).join('')}</tbody></table></div><form id="commit-form"><div class="section"><label class="check-label"><input name="physical_confirmed" type="checkbox" required>已现场核对整机序列号、屏幕校验码和硬盘，${preservesPartitions()?'确认所选 Windows 分区数据可删除，允许更新同盘 EFI 引导':'确认所选硬盘全部数据可删除'}</label></div>${field('输入 YES 确认本批安装','confirmation','text','','required autocomplete="off" pattern="YES"')}<div id="form-error" class="error" role="alert"></div>${!data.settings.enabled?'<p class="error">真实下发尚未开启。完成隔离验证后，在启动与设置中开启。</p>':''}<div class="form-actions"><button type="button" data-action="close">返回检查</button><button class="danger-button" type="submit" ${!data.settings.enabled?'disabled':''}>确认并执行安装</button></div></form>`);
+  modal('确认批量安装', `<div class="notice danger">${h(r.warning)}<br>请先完成备份；启动安装后不能远程取消，也不会自动恢复原数据。</div><p>${h(r.profile)} · ${h(r.source)} · <strong>${r.targets.length} 台电脑</strong></p><p class="notice">${h(partitionPlan(selectedProfile()))}</p>${r.domain_join?'<p class="notice">按以下员工工号改名并加入域 '+h(r.domain_join.domain)+(r.domain_join.mode==='manual'?'。先完成 Windows 安装和现场设置，再由平台统一加域；确认执行后才会额外重启一次。':'。安装完成后自动加域，成功后额外重启一次。')+'同名时依次追加 A–Z，最终名称同步到任务与日志；不会覆盖已有电脑。'+(r.domain_join.allow_http?'<br><strong>本方案允许内网 HTTP 加域，密码将明文传输。</strong>':'')+'</p>':''}<div class="table-wrap"><table class="modal-table"><thead><tr><th>整机序列号</th><th>屏幕校验码</th>${r.domain_join?'<th>工号 / 预计电脑名</th>':''}<th>将处理的硬盘 / 分区</th></tr></thead><tbody>${r.targets.map(t=>`<tr><td class="mono">${h(t.serial)}</td><td class="mono">${h(t.boot_code)}</td>${r.domain_join?'<td class="mono">'+h(t.employee_id)+'<span class="cell-sub">预计 '+h(t.computer_name)+'</span></td>':''}<td>磁盘 ${t.disk.number} · ${h(t.disk.model)} · ${h(size(t.disk.size_bytes))}<span class="cell-sub mono">${h(t.disk.serial || t.disk.unique_id)}</span>${t.partitions?`<strong>只格式化分区 ${t.partitions.windows.number} · ${h(size(t.partitions.windows.size_bytes))}</strong><span class="cell-sub mono">${h(t.partitions.windows.guid)}</span>`:''}</td></tr>`).join('')}</tbody></table></div><form id="commit-form"><div class="section"><label class="check-label"><input name="physical_confirmed" type="checkbox" required>已现场核对整机序列号、屏幕校验码和硬盘，${preservesPartitions()?'确认所选 Windows 分区数据可删除，允许更新同盘 EFI 引导':'确认所选硬盘全部数据可删除'}</label></div>${field('输入 YES 确认本批安装','confirmation','text','','required autocomplete="off" pattern="YES"')}<div id="form-error" class="error" role="alert"></div>${!data.settings.enabled?'<p class="error">真实下发尚未开启。完成隔离验证后，在启动与设置中开启。</p>':''}<div class="form-actions"><button type="button" data-action="close">返回检查</button><button class="danger-button" type="submit" ${!data.settings.enabled?'disabled':''}>确认并执行安装</button></div></form>`);
 }
 function deviceDetail(id) {
   const d = data.devices.find(x=>x.id===id); if(!d)return;
@@ -423,6 +466,7 @@ document.addEventListener('click', async e=>{
       const days=entry.expires_at===null?null:Math.max(1,Math.ceil((entry.expires_at-data.server_time)/86400));
       modal('修改现有登记包有效期','<form id="enrollment-validity-form" data-id="'+h(id)+'"><p>仅修改此登记包，现有 ISO 无需重做。有限期从保存时重新计算。</p>'+validityFields(days)+'<button type="submit" class="primary">保存此包有效期</button></form>');
     }
+    else if(a==='release-joins')releaseJoinModal(id?[id]:[...joinSelection]);
     else if(a==='revoke-enrollment')modal('撤销登记包','<form id="revoke-enrollment-form" data-id="'+h(id)+'"><p>此包不能再用于新 PE 报到，已登记客户端不受影响。</p><button type="submit" class="primary">确认撤销此包</button></form>');
     else if(a==='builder-package')modal('安装 Windows 制作端','<form id="builder-package-form">'+field('制作电脑名称','builder_name','text','','required maxlength="80"')+'<p>下载后解压，在 Windows 管理员 PowerShell 7 中运行 Install-Builder.ps1，完成一次性设置。</p><button type="submit" class="primary">下载安装包</button></form>');
     else if(a==='revoke-builder'||a==='cancel-media')modal(a==='revoke-builder'?'停用制作端':'结束制作记录','<form id="media-action-form" data-id="'+h(id)+'" data-kind="'+h(a)+'"><p>停止发布该任务产物，不关机、不删除文件，也不修改其他任务。</p><button type="submit" class="primary">确认</button></form>');
@@ -452,6 +496,9 @@ document.addEventListener('change',async e=>{
   if(el.id==='select-all'){filteredDevices().filter(selectable).forEach(d=>el.checked?chosen.add(d.id):chosen.delete(d.id));renderDeviceRows();}
   if(el.id==='source-choice')updateImages();
   if(el.id==='disk-mode')updateProfileMode();
+  if(el.id==='partition-layout'||el.name==='system_gib')updatePartitionLayout();
+  if(el.dataset.jobJoin){el.checked?joinSelection.add(el.dataset.jobJoin):joinSelection.delete(el.dataset.jobJoin);updateJoinSelection();}
+  if(el.id==='select-all-joins'){data.jobs.filter(canReleaseDomainJoin).forEach(job=>el.checked?joinSelection.add(job.id):joinSelection.delete(job.id));document.querySelectorAll('[data-job-join]').forEach(box=>box.checked=el.checked);updateJoinSelection();}
   if(el.id==='manifest-file'&&el.files[0]){try{if(el.files[0].size>128000)throw new Error('清单文件过大');const value=JSON.parse(await el.files[0].text());$('#manifest').value=JSON.stringify(value,null,2);}catch(err){$('#form-error').textContent='清单读取失败：'+err.message;}}
 });
 document.addEventListener('submit',async e=>{
@@ -464,12 +511,13 @@ document.addEventListener('submit',async e=>{
       if(f.join_enabled){
         const allowHttp=!!f.join_allow_http&&data.settings.http_allowed===true;
         if((location.protocol!=='https:'||!data.settings.public_url.startsWith('https://'))&&!allowHttp)throw new Error('请使用 HTTPS，或明确允许本方案使用内网 HTTP 加域');
-        f.domain_join={enabled:true,domain:f.join_domain,ou_path:f.join_ou||'',username:f.join_user,allow_http:allowHttp};
+        f.domain_join={enabled:true,domain:f.join_domain,ou_path:f.join_ou||'',username:f.join_user,allow_http:allowHttp,mode:f.join_mode||'automatic'};
         f.domain_join_password=f.join_password||'';
       }else f.domain_join={enabled:false};
-      for(const key of ['join_enabled','join_allow_http','join_domain','join_ou','join_user','join_password'])delete f[key];
+      for(const key of ['join_enabled','join_allow_http','join_mode','join_domain','join_ou','join_user','join_password','partition_layout'])delete f[key];
       await api('/api/profiles'+(form.dataset.id?'/'+form.dataset.id:''),form.dataset.id?'PUT':'POST',f);
     }
+    else if(form.id==='domain-join-release-form'){await api('/api/jobs/domain-join/release','POST',{job_ids:JSON.parse(form.dataset.jobIds),restart_confirmed:!!f.restart_confirmed});joinSelection.clear();}
     else if(form.id==='commit-form'){await api('/api/jobs/commit','POST',{preview_id:previewId,confirmation:f.confirmation,physical_confirmed:!!f.physical_confirmed});chosen.clear();view='jobs';}
     else if(form.id==='enrollment-policy-form'){await api('/api/enrollment-policy','POST',chosenValidity(f));settingsDirty=false;}
     else if(form.id==='enrollment-validity-form')await api('/api/enrollments/'+encodeURIComponent(form.dataset.id)+'/validity','POST',chosenValidity(f));

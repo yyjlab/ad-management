@@ -106,7 +106,7 @@ class PlatformTests(unittest.TestCase):
             headers['Authorization'] = 'Bearer ' + token
         return self.client.open(path, base_url='https://localhost', method=method, json=data or {}, headers=headers)
 
-    def join_fixtures(self, commit=True, wim=False, allow_http=False):
+    def join_fixtures(self, commit=True, wim=False, allow_http=False, manual=False):
         inv, reg, source, profile = self.fixtures()
         self.enable()
         join_request = self.post if allow_http else self.join_post
@@ -130,6 +130,8 @@ class PlatformTests(unittest.TestCase):
             payload['password'] = ''
         if allow_http:
             payload['domain_join']['allow_http'] = True
+        if manual:
+            payload['domain_join']['mode'] = 'manual'
         saved = join_request('/pc-deploy/api/profiles', payload)
         self.assertEqual(saved.status_code, 200, saved.json)
         profile = saved.json['id']
@@ -148,6 +150,120 @@ class PlatformTests(unittest.TestCase):
             row = c.execute('SELECT secret FROM jobs WHERE id=?', (job,)).fetchone()
             token = self.store.decrypt(row['secret'])['finish_token']
         return inv, reg, job, token, started.json
+
+
+    def test_manual_domain_join_waits_for_admin_and_completes_after_release(self):
+        inv, _, job, token, authorization = self.join_fixtures(manual=True)
+        route = f'/pc-deploy/api/agent/jobs/{job}'
+        ready = dict(hardware_uuid=inv['hardware_uuid'], computer_name='OLD-IMAGE',
+                     os_build=26100, image_state='IMAGE_STATE_COMPLETE', oobe_done=True)
+        self.assertEqual(self.join_post(route+'/domain-join/config', {'hardware_uuid':inv['hardware_uuid']}, token).status_code, 400)
+        for patch in ({'hardware_uuid':str(uuid.uuid4())}, {'os_build':19045}, {'oobe_done':False}):
+            self.assertEqual(self.join_post(route+'/domain-join/config', dict(ready, **patch), token).status_code, 400)
+        self.assertEqual(self.join_post(route+'/domain-join/config', ready, 'wrong-token').status_code, 400)
+        waiting = self.join_post(route+'/domain-join/config', ready, token)
+        self.assertEqual(waiting.status_code, 200, waiting.json)
+        self.assertIs(waiting.json['waiting_for_release'], True)
+        self.assertNotIn('password', waiting.json)
+        self.assertNotIn('Test-only-domain-password', json.dumps(waiting.json))
+        self.assertEqual(self.join_post(route+'/domain-join/config', ready, token).status_code, 200)
+        before = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
+        self.assertEqual(before['domain_join']['state'], 'waiting_release')
+        self.assertIsInstance(before['installed_at'], (float, int))
+        self.assertEqual(self.join_post(route+'/domain-join/status', dict(hardware_uuid=inv['hardware_uuid'], stage='checking'), token).status_code, 400)
+        self.assertEqual(self.join_post(route+'/domain-join/name', dict(hardware_uuid=inv['hardware_uuid'], unavailable_name='WFQ101755'), token).status_code, 400)
+        action = {'job_ids':[job], 'restart_confirmed':True}
+        self.assertEqual(self.join_post('/pc-deploy/api/jobs/domain-join/release', dict(action, restart_confirmed=False)).status_code, 400)
+        released = self.join_post('/pc-deploy/api/jobs/domain-join/release', action)
+        self.assertEqual(released.status_code, 200, released.json)
+        self.assertNotIn('password', released.json)
+        self.assertEqual(self.join_post('/pc-deploy/api/jobs/domain-join/release', action).status_code, 200)
+        credentials = self.join_post(route+'/domain-join/config', ready, token)
+        self.assertEqual(credentials.json['password'], 'Test-only-domain-password')
+        self.assertEqual(credentials.json['mode'], 'manual')
+        payload = dict(hardware_uuid=inv['hardware_uuid'])
+        for stage in ('checking', 'joining', 'restarting'):
+            self.assertEqual(self.join_post(route+'/domain-join/status', dict(payload, stage=stage), token).status_code, 200)
+        verified = dict(payload, stage='verified', domain='corp.test', computer_name='WFQ101755', secure_channel=True)
+        self.assertEqual(self.join_post(route+'/domain-join/status', verified, token).status_code, 200)
+        finished = dict(ready, computer_name='WFQ101755', domain_name='corp.test', domain_join_verified=True)
+        self.assertEqual(self.join_post(route+'/finish', finished, token).status_code, 200)
+        after = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
+        self.assertEqual(after['state'], 'completed')
+        self.assertEqual(before['installed_at'], after['installed_at'])
+        with self.store.connect() as c:
+            events = [row['message'] for row in c.execute('SELECT message FROM events WHERE job_id=?', (job,))]
+        self.assertEqual(sum('等待管理员统一加域' in message for message in events), 1)
+        self.assertEqual(sum('管理员已确认设置完成' in message for message in events), 1)
+        self.assertNotIn('Test-only-domain-password', '\n'.join(events))
+
+    def test_manual_join_release_is_atomic_authorized_and_expiry_bound(self):
+        inv, _, job, token, _ = self.join_fixtures(manual=True)
+        route = f'/pc-deploy/api/agent/jobs/{job}/domain-join/config'
+        action = {'job_ids':[job], 'restart_confirmed':True}
+        self.assertEqual(self.join_post('/pc-deploy/api/jobs/domain-join/release', action).status_code, 400)
+        ready = dict(hardware_uuid=inv['hardware_uuid'], computer_name='OLD-IMAGE',
+                     os_build=26100, image_state='IMAGE_STATE_COMPLETE', oobe_done=True)
+        self.assertEqual(self.join_post(route, ready, token).status_code, 200)
+        for patch in ({'job_ids':[job, str(uuid.uuid4())]}, {'job_ids':[job, job]},
+                      {'job_ids':job}, {'restart_confirmed':'true'}):
+            self.assertEqual(self.join_post('/pc-deploy/api/jobs/domain-join/release', dict(action, **patch)).status_code, 400)
+        with self.store.connect() as c:
+            data = json.loads(c.execute('SELECT data FROM jobs WHERE id=?', (job,)).fetchone()['data'])
+            self.assertNotIn('released_at', data['domain_join'])
+        forbidden = self.client.post('/pc-deploy/api/jobs/domain-join/release', base_url='https://localhost', json=action)
+        self.assertEqual(forbidden.status_code, 403)
+        with self.client.session_transaction() as session_data:
+            session_data['admin_role'] = 'viewer'
+        self.assertEqual(self.join_post('/pc-deploy/api/jobs/domain-join/release', action).status_code, 403)
+        with self.client.session_transaction() as session_data:
+            session_data['admin_role'] = 'super_admin'
+        with self.store.connect(write=True) as c:
+            c.execute('UPDATE jobs SET expires=? WHERE id=?', (time.time()-1, job))
+        self.assertEqual(self.join_post('/pc-deploy/api/jobs/domain-join/release', action).status_code, 400)
+        self.assertEqual(self.join_post(route, ready, token).status_code, 400)
+
+    def test_waiting_manual_join_does_not_block_next_installation(self):
+        inv, _, job, token, _ = self.join_fixtures(manual=True)
+        other, other_reg = self.register(machine(serial='NEXT-INSTALL'))
+        profile = next(profile for profile in self.client.get('/pc-deploy/api/dashboard').json['profiles']
+                       if not profile.get('domain_join'))['id']
+        preview = self.preview(other, profile).json
+        committed = self.post('/pc-deploy/api/jobs/commit',
+                              dict(preview_id=preview['id'], confirmation='YES', physical_confirmed=True))
+        self.assertEqual(committed.status_code, 200, committed.json)
+        with self.store.connect(write=True) as c:
+            self.store.put(c, 'concurrency', 1)
+        self.assertIsNone(self.post('/pc-deploy/api/agent/poll', other, other_reg['token']).json['job'])
+        ready = dict(hardware_uuid=inv['hardware_uuid'], computer_name='OLD-IMAGE',
+                     os_build=26100, image_state='IMAGE_STATE_COMPLETE', oobe_done=True)
+        self.assertEqual(self.join_post(f'/pc-deploy/api/agent/jobs/{job}/domain-join/config', ready, token).status_code, 200)
+        next_job = self.post('/pc-deploy/api/agent/poll', other, other_reg['token'])
+        self.assertEqual(next_job.json['job']['id'], committed.json['ids'][0])
+
+    def test_manual_join_wim_http_gate_keeps_credentials_private_until_release(self):
+        inv, _, job, token, authorization = self.join_fixtures(wim=True, allow_http=True, manual=True)
+        route = f'/pc-deploy/api/agent/jobs/{job}/domain-join/config'
+        bootstrap = base64.b64decode(authorization['finalizer_command'].rsplit(' ', 1)[1]).decode('utf-16le')
+        self.assertNotIn('Test-only-domain-password', bootstrap)
+        self.assertLess(len(authorization['finalizer_command']), 30000)
+        encoded = re.search(r"config.json'\),\[Convert\]::FromBase64String\('([^']+)'", bootstrap)
+        self.assertIsNotNone(encoded)
+        config = json.loads(base64.b64decode(encoded.group(1)))
+        self.assertEqual(config['domain_join']['mode'], 'manual')
+        self.assertGreater(config['expires_at'], time.time())
+        ready = dict(hardware_uuid=inv['hardware_uuid'], computer_name='OLD-IMAGE',
+                     os_build=26100, image_state='IMAGE_STATE_COMPLETE', oobe_done=True)
+        pending = self.post(route, ready, token)
+        self.assertEqual(pending.status_code, 200, pending.json)
+        self.assertNotIn('password', pending.json)
+        self.app.config['PC_DEPLOY_ALLOW_HTTP'] = False
+        self.assertEqual(self.post('/pc-deploy/api/jobs/domain-join/release',
+                                   {'job_ids':[job], 'restart_confirmed':True}).status_code, 400)
+        self.app.config['PC_DEPLOY_ALLOW_HTTP'] = True
+        self.assertEqual(self.post('/pc-deploy/api/jobs/domain-join/release',
+                                   {'job_ids':[job], 'restart_confirmed':True}).status_code, 200)
+        self.assertEqual(self.post(route, ready, token).json['password'], 'Test-only-domain-password')
 
     def test_domain_join_http_opt_in_completes_with_scoped_credentials_and_unchanged_pe(self):
         inv, reg, job, token, authorization = self.join_fixtures(wim=True, allow_http=True)

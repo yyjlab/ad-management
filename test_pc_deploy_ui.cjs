@@ -12,7 +12,7 @@ async function run() {
     const errors=[], requests=[];
     page.on('pageerror',error=>errors.push(error.message));
     let role='super_admin',expired=false,saves=0,extensions=0,policyPayload=null,validityPayload=null,mediaPayload=null,enrollmentExpires=1793433600,fixture=null,profilePayload=null,previewPayload=null;
-    const jobLogEvents={};let jobLogError=false,jobLogGate=null,dashboardGate=null,jobReviewPayload=null;
+    const jobLogEvents={};let releasePayload=null,jobLogError=false,jobLogGate=null,dashboardGate=null,jobReviewPayload=null;
     const settings={public_url:'http://ad-menu.test/pc-deploy',enabled:false,concurrency:2,ca_pem:'',http_allowed:true};
     const media={builders:[{id:'test-builder',name:'测试制作电脑',online:true,template_name:'WinPE',driver_name:'ASIX'}],builds:[]};
     const adHtml=fs.readFileSync(path.join(__dirname,'admin_manage.html'),'utf8');
@@ -34,6 +34,15 @@ async function run() {
       if(/^\/pc-deploy\/api\/profiles(?:\/[^/]+)?$/.test(url.pathname) && ['POST','PUT'].includes(request.method())) {
         profilePayload=request.postDataJSON();
         return route.fulfill({json:{ok:true,id:'new-profile'}});
+      }
+      if(url.pathname==='/pc-deploy/api/jobs/domain-join/release') {
+        assert.equal(request.headers()['x-csrf-token'],'fixture-csrf');
+        releasePayload=request.postDataJSON();
+        for(const id of releasePayload.job_ids){
+          const job=fixture.jobs.find(job=>job.id===id);
+          job.domain_join.released_at=fixture.server_time;job.updated=fixture.server_time;
+        }
+        return route.fulfill({json:{ok:true,count:releasePayload.job_ids.length}});
       }
       if(url.pathname==='/pc-deploy/api/jobs/preview') {
         previewPayload=request.postDataJSON();
@@ -692,6 +701,70 @@ async function run() {
     await page.locator('#refresh').click();
     await page.getByText('系统已安装，加域失败',{exact:true}).waitFor();
     assert.ok((await page.locator('.job-row').first().textContent()).includes('不会重新装机'));checks++;
+
+
+    // Manual mode keeps installed devices idle until an explicit, confirmed batch release.
+    fixture.profiles[1].domain_join={...joinSettings,mode:'manual'};
+    await page.locator('[data-view=profiles]').click();
+    await page.locator('#refresh').click();
+    await page.locator('[data-action=edit-profile][data-id=wim-profile]').click();
+    assert.equal(await page.locator('#domain-join-mode').inputValue(),'manual');checks++;
+    assert.equal(await page.locator('#domain-join-password-status').textContent(),'已保存');checks++;
+    await page.locator('#disk-mode').selectOption('wipe_disk');
+    await page.locator('#partition-layout').selectOption('split');
+    assert.equal(await page.locator('[name=system_gib]').inputValue(),'256');checks++;
+    await page.locator('[name=system_gib]').fill('320');
+    await page.locator('[name=system_gib]').blur();
+    assert.ok((await page.locator('#partition-plan-help').textContent()).includes('旧 C/D 盘数据都会清空'));checks++;
+    await page.locator('#profile-form [type=submit]').click();
+    await page.locator('#modal').waitFor({state:'hidden'});
+    assert.equal(profilePayload.system_gib,320);checks++;
+    assert.equal(profilePayload.disk_mode,'wipe_disk');checks++;
+    assert.equal(profilePayload.domain_join.mode,'manual');checks++;
+    assert.ok(!('partition_layout' in profilePayload)&&!('join_mode' in profilePayload));checks++;
+    fixture.profiles[1].system_gib=320;fixture.profiles[1].disk_mode='wipe_disk';
+    await page.locator('#refresh').click();
+    await page.locator('[data-action=edit-profile][data-id=wim-profile]').click();
+    assert.equal(await page.locator('#partition-layout').inputValue(),'split');checks++;
+    await page.locator('#disk-mode').selectOption('system_partition');
+    assert.ok(await page.locator('[name=system_gib]').isDisabled());checks++;
+    assert.ok(await page.locator('#partition-layout').isDisabled());checks++;
+    assert.ok((await page.locator('#partition-plan-help').textContent()).includes('不调整 C 盘容量'));checks++;
+    await page.locator('#disk-mode').selectOption('wipe_disk');
+    assert.equal(await page.locator('[name=system_gib]').inputValue(),'320');checks++;
+    await page.locator('#profile-form [data-action=close]').click();
+
+    const manualTime=fixture.server_time;
+    fixture.jobs=[1,2,3].map(index=>({...fixture.jobs[0],id:'manual-join-'+index,serial:'MANUAL-PC-'+index,
+      state:'awaiting_report',review:null,started_at:manualTime-500,installed_at:manualTime-100,
+      updated:manualTime,expires_at:index===3?manualTime-1:manualTime+7200,computer_name:'WFQ10175'+index,
+      domain_join:{state:'waiting_release',domain:'corp.test',computer_name:'WFQ10175'+index,updated:manualTime,os_installed:true}}));
+    await page.locator('[data-view=jobs]').click();
+    await page.locator('#refresh').click();
+    await page.locator('[data-job-join="manual-join-1"]').waitFor();
+    assert.equal(await page.locator('[data-job-join]').count(),2);checks++;
+    assert.ok(await page.locator('#release-selected-joins').isDisabled());checks++;
+    assert.ok((await page.locator('#page-content').textContent()).includes('Windows 已安装，待统一加域'));checks++;
+    const installedDuration=await page.locator('[data-job-timer]').first().textContent();
+    fixture.server_time+=60;
+    await page.locator('#refresh').click();
+    assert.equal(await page.locator('[data-job-timer]').first().textContent(),installedDuration);checks++;
+    await page.locator('[data-job-join="manual-join-1"]').check();
+    await page.locator('#refresh').click();
+    assert.ok(await page.locator('[data-job-join="manual-join-1"]').isChecked());checks++;
+    await page.locator('#select-all-joins').check();
+    assert.ok((await page.locator('#release-selected-joins').textContent()).includes('2 台'));checks++;
+    await page.locator('#release-selected-joins').click();
+    assert.ok((await page.locator('#modal-body').textContent()).includes('MANUAL-PC-1'));checks++;
+    assert.ok(!(await page.locator('#modal-body').textContent()).includes('MANUAL-PC-3'));checks++;
+    await page.locator('#domain-join-release-form [type=submit]').click();
+    assert.equal(releasePayload,null);checks++;
+    await page.locator('[name=restart_confirmed]').check();
+    await page.locator('#domain-join-release-form [type=submit]').click();
+    await page.locator('#modal').waitFor({state:'hidden'});
+    assert.deepEqual(releasePayload,{job_ids:['manual-join-1','manual-join-2'],restart_confirmed:true});checks++;
+    assert.equal(await page.locator('[data-job-join]').count(),0);checks++;
+    assert.ok((await page.locator('#page-content').textContent()).includes('已授权，等待加域'));checks++;
 
     assert.deepEqual(errors,[]);checks++;
     console.log(`${checks} nested menu, embedded page, HTTP form, role, message origin, lifecycle, mobile, WIM restore and per-task log UI checks passed. No live system contacted.`);

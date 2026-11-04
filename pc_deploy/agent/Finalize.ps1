@@ -19,6 +19,9 @@ if ($cfg.domain_join) {
     Assert-JoinTransport $cfg
 }
 $deadline = [DateTime]::UtcNow.AddHours(2)
+if ($cfg.domain_join.mode -eq 'manual') {
+    $deadline = ([DateTime]'1970-01-01T00:00:00Z').ToUniversalTime().AddSeconds([double]$cfg.expires_at)
+}
 while ([DateTime]::UtcNow -lt $deadline) {
     try {
         $setup = Get-ItemProperty 'HKLM:\SYSTEM\Setup'

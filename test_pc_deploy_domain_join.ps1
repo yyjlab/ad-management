@@ -30,7 +30,7 @@ function Invoke-JoinFixture {
         }
         throw 'Unexpected CIM query'
     }
-    function Get-ItemProperty { param($Path) [pscustomobject]@{EditionID=$(if($Scenario.Home){'Core'}else{'Professional'})} }
+    function Get-ItemProperty { param($Path) [pscustomobject]@{EditionID=$(if($Scenario.Home){'Core'}else{'Professional'});CurrentBuildNumber=26100;ImageState='IMAGE_STATE_COMPLETE';SystemSetupInProgress=0;OOBEInProgress=0} }
     function Resolve-DnsName {
         param($Name,$Type,[switch]$DnsOnly,$ErrorAction)
         if($Scenario.DnsFailure){throw 'fixture DNS unavailable'}
@@ -46,6 +46,8 @@ function Invoke-JoinFixture {
         param($Config,$Action,$Payload)
         $calls.Add(@{action=$Action;payload=$Payload})
         if($Action -eq 'config'){
+            if($Scenario.ConfigFailure){throw 'fixture config unavailable'}
+            if($Scenario.ManualWaiting){return [pscustomobject]@{waiting_for_release=$true}}
             return [pscustomobject]@{domain=$(if($Scenario.WrongConfig){'other.test'}else{'corp.test'});
                 computer_name=$(if($Scenario.ServerName){$Scenario.ServerName}else{$Config.domain_join.computer_name});employee_id=$Config.domain_join.employee_id;username='join-service@corp.test';
                 password='Test-only-sensitive-value';ou_path='OU=Workstations,DC=corp,DC=test'}
@@ -75,7 +77,7 @@ function Invoke-JoinFixture {
     $cfg=[pscustomobject]@{server_url=$(if($Scenario.Http){'http://deploy.test/pc-deploy'}else{'https://deploy.test/pc-deploy'});
         job_id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';token='fixture-only-completion-token';
         allow_http=$Scenario.GlobalHttp;
-        domain_join=@{domain='corp.test';computer_name=$initialName;employee_id=$employee;allow_http=$Scenario.TaskHttp}}
+        domain_join=@{domain='corp.test';computer_name=$initialName;employee_id=$employee;allow_http=$Scenario.TaskHttp;mode=$(if($Scenario.Manual){'manual'}else{'automatic'})}}
     $savedConfig=Join-Path $Directory 'config.json'
     if(Test-Path -LiteralPath $savedConfig){$cfg=[IO.File]::ReadAllText($savedConfig)|ConvertFrom-Json}
     $result=$null;$failure=$null
@@ -157,6 +159,18 @@ try {
     Assert-Join ($approvedHttp.result -eq 'wait' -and $approvedHttp.native.Count -eq 1 -and $approvedHttp.reboots.Count -eq 1) 'Explicit HTTP opt-in did not complete native join once'
     $httpVerified=Invoke-JoinFixture $httpDirectory @{Http=$true;GlobalHttp=$true;TaskHttp=$true;NewBoot=$true;Member=$true;ExpectedName=$true}
     Assert-Join ($httpVerified.result -eq 'ready' -and $httpVerified.native.Count -eq 0) 'HTTP opt-in lost post-reboot trust verification'
+    $manualDirectory=New-JoinCase
+    $waiting=Invoke-JoinFixture $manualDirectory @{Manual=$true;ManualWaiting=$true}
+    Assert-Join ($waiting.result -eq 'wait' -and $waiting.native.Count -eq 0 -and $waiting.reboots.Count -eq 0) 'Manual waiting performed a join or reboot'
+    Assert-Join ($waiting.calls.Count -eq 1 -and $waiting.calls[0].action -eq 'config') 'Manual waiting entered domain work before release'
+    Assert-Join ($waiting.calls[0].payload.os_build -eq 26100 -and $waiting.calls[0].payload.oobe_done) 'Manual readiness omitted the installed OS proof'
+    Assert-Join ($null -eq $waiting.journal) 'Waiting was incorrectly recorded as a native join attempt'
+    $unavailable=Invoke-JoinFixture $manualDirectory @{Manual=$true;ConfigFailure=$true}
+    Assert-Join ($unavailable.result -eq 'wait' -and $unavailable.native.Count -eq 0 -and $unavailable.reboots.Count -eq 0) 'Unavailable release service caused a join or restart'
+    $released=Invoke-JoinFixture $manualDirectory @{Manual=$true}
+    Assert-Join ($released.native.Count -eq 1 -and $released.reboots.Count -eq 1) 'Admin release did not perform exactly one join and reboot'
+    $manualReboot=Invoke-JoinFixture $manualDirectory @{Manual=$true;NewBoot=$true;Member=$true;ExpectedName=$true}
+    Assert-Join ($manualReboot.result -eq 'ready' -and $manualReboot.native.Count -eq 0) 'Manual mode attempted to fetch recycled credentials after reboot'
     Write-Output "$count isolated domain join checks passed. No real directory, machine name, membership or reboot was changed."
 } finally {
     $resolved=[IO.Path]::GetFullPath($taskRoot)

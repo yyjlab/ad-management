@@ -289,6 +289,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
                     updated=row['updated'], stale=row['state'] in ACTIVE and now-row['updated'] > 600,
                     progress=data.get('progress'), kind=data['source'].get('kind', 'setup'), review=data.get('review'),
                     domain_join=data.get('domain_join'), computer_name=data['target'].get('computer_name'),
+                    installed_at=data.get('installed_at'), expires_at=row['expires'],
                     **{k: data['target']['inventory'].get(k, '') for k in
                        ('manufacturer', 'system_family', 'product_name', 'product_version')},
                     started_at=timing.get('started_at'),
@@ -777,7 +778,8 @@ def register_pc_deploy(host_app, current_user, touch_session):
             if row['expires'] < time.time() or (row['state'] == 'queued' and time.time()-row['created'] > 900):
                 raise Invalid('任务已过领取期限，请人工取消后重新确认')
             if row['state'] == 'queued':
-                running = c.execute("SELECT COUNT(*) FROM jobs WHERE state IN ('preflight','installing','awaiting_report')").fetchone()[0]
+                running = sum(not json.loads(item['data']).get('installed_at') for item in
+                              c.execute("SELECT data FROM jobs WHERE state IN ('preflight','installing','awaiting_report')"))
                 if running >= store.setting(c, 'concurrency', 2):
                     return jsonify(job=None)
                 c.execute('UPDATE jobs SET state=?,updated=? WHERE id=?', ('preflight', time.time(), row['id']))
@@ -807,6 +809,9 @@ def register_pc_deploy(host_app, current_user, touch_session):
                                                computer_name=data['target']['computer_name'],
                                                employee_id=data['target']['employee_id'],
                                                allow_http=data['profile']['domain_join'].get('allow_http', False))
+                if data['profile']['domain_join'].get('mode') == 'manual':
+                    finalizer['domain_join']['mode'] = 'manual'
+                    finalizer['expires_at'] = row['expires']
             if data['source'].get('kind') == 'wim':
                 if inv.get('wim_apply_v1') is not True:
                     raise Invalid('客户端不支持封装 WIM 还原')
@@ -898,13 +903,64 @@ def register_pc_deploy(host_app, current_user, touch_session):
             raise Invalid('加域设备身份不匹配')
         return row, job, secret
 
+    @app.post('/api/jobs/domain-join/release')
+    @admin
+    def release_domain_join():
+        value = body()
+        identities = value.get('job_ids')
+        if (not isinstance(identities, list) or not 1 <= len(identities) <= 100
+                or any(not isinstance(item, str) for item in identities)
+                or len(set(identities)) != len(identities)
+                or value.get('restart_confirmed') is not True):
+            raise Invalid('请选择待加域任务，并确认已保存设置、允许加域后重启')
+        with store.connect(write=True) as c:
+            selected = []
+            for identity in identities:
+                row, job = load(c, 'jobs', identity)
+                joining = job.get('domain_join', {})
+                if (job['profile'].get('domain_join', {}).get('mode') != 'manual'
+                        or row['state'] != 'awaiting_report' or row['expires'] < time.time()
+                        or not job.get('installed_at') or joining.get('state') != 'waiting_release'):
+                    raise Invalid('所选任务尚未装好、已开始加域或已过期，请刷新后重新选择')
+                domain_transport_required(c, job['profile']['domain_join'])
+                selected.append((identity, job))
+            now = time.time()
+            for identity, job in selected:
+                if not job['domain_join'].get('released_at'):
+                    job['domain_join']['released_at'] = now
+                    c.execute('UPDATE jobs SET data=?,updated=? WHERE id=?', (canonical(job), now, identity))
+                    event(c, 'domain_join', '管理员已确认设置完成，允许本机改名、加域并重启；等待客户端领取', identity)
+        return jsonify(ok=True, count=len(selected))
+
     @app.post('/api/agent/jobs/<identity>/domain-join/config')
     def domain_join_config(identity):
         value = body()
-        with store.connect() as c:
-            _, job, secret = domain_completion(c, identity, value)
+        with store.connect(write=True) as c:
+            row, job, secret = domain_completion(c, identity, value)
+            current = job['domain_join']
+            if job['profile']['domain_join'].get('mode') == 'manual' and not current.get('released_at'):
+                build = integer(value.get('os_build'), '系统版本', 19041, 99999)
+                if (value.get('image_state') != 'IMAGE_STATE_COMPLETE' or value.get('oobe_done') is not True
+                        or not isinstance(value.get('computer_name'), str)
+                        or not re.fullmatch(r'[A-Za-z0-9_-]{1,63}', value['computer_name'])
+                        or (job['source']['family'] == 'windows11') != (build >= 22000)
+                        or (job['source'].get('kind') == 'wim' and build != next(
+                            image['build'] for image in job['source']['images']
+                            if image['index'] == job['profile']['image_index']))):
+                    raise Invalid('尚未收到匹配本机和系统版本的安装完成回报，不能进入待统一加域')
+                if current['state'] not in ('pending', 'waiting_release'):
+                    raise Invalid('任务已进入其他加域阶段，禁止重新等待')
+                changed = current['state'] != 'waiting_release'
+                now = time.time()
+                current.update(state='waiting_release', os_installed=True, updated=now)
+                job.setdefault('installed_at', now)
+                c.execute('UPDATE jobs SET state=?,data=?,updated=? WHERE id=?',
+                          ('awaiting_report', canonical(job), now, identity))
+                if changed:
+                    event(c, 'domain_join', 'Windows 安装完成，等待管理员统一加域；可先进行现场设置，当前不会执行加域或额外重启', identity)
+                return jsonify(waiting_for_release=True, expires_at=row['expires'])
             password = secret.get('domain_join_password')
-            if not password or job['domain_join']['state'] not in ('pending', 'checking', 'joining'):
+            if not password or current['state'] not in ('pending', 'waiting_release', 'checking', 'joining'):
                 raise Invalid('加域凭据已回收，禁止重新发起加域')
             result = dict(job['profile']['domain_join'], password=password,
                           computer_name=job['target']['computer_name'], employee_id=job['target']['employee_id'])
@@ -917,7 +973,9 @@ def register_pc_deploy(host_app, current_user, touch_session):
         with store.connect(write=True) as c:
             row, job, _ = domain_completion(c, identity, value)
             current = job['domain_join']
-            if current['state'] not in ('pending', 'checking'):
+            if job['profile']['domain_join'].get('mode') == 'manual' and not current.get('released_at'):
+                raise Invalid('等待管理员统一加域，暂不更改电脑名')
+            if current['state'] not in ('pending', 'waiting_release', 'checking'):
                 raise Invalid('加域已启动，禁止再次更换电脑名')
             # A lost response may repeat the previous conflict; return the same assigned name.
             if unavailable == current['computer_name']:
@@ -949,7 +1007,10 @@ def register_pc_deploy(host_app, current_user, touch_session):
             current = job['domain_join']
             if current['state'] == 'failed':
                 return jsonify(ok=True)
-            order = dict(pending=0, checking=1, joining=2, restarting=3, verified=4, failed=5)
+            if (job['profile']['domain_join'].get('mode') == 'manual'
+                    and not current.get('released_at') and stage != 'failed'):
+                raise Invalid('等待管理员统一加域，禁止提前执行加域或重启')
+            order = dict(pending=0, waiting_release=0, checking=1, joining=2, restarting=3, verified=4, failed=5)
             if order[stage] < order[current['state']]:
                 raise Invalid('旧加域阶段不允许覆盖新结果')
             if stage == 'verified' and (not isinstance(value.get('domain'), str)

@@ -43,6 +43,9 @@ def join_record(value):
     allow_http = value.get('allow_http', False)
     if not isinstance(allow_http, bool):
         raise Invalid('请明确选择是否允许内网 HTTP 加域')
+    mode = value.get('mode', 'automatic')
+    if mode not in ('automatic', 'manual'):
+        raise Invalid('请选择安装后自动加域或平台统一加域')
     domain = text(value.get('domain'), 'AD 域 DNS 名称', maximum=253).lower()
     labels = domain.split('.')
     if len(labels) < 2 or any(not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', part) for part in labels):
@@ -69,4 +72,6 @@ def join_record(value):
     result = dict(domain=domain, username=user, ou_path=ou)
     if allow_http:
         result['allow_http'] = True
+    if mode == 'manual':
+        result['mode'] = mode
     return result
