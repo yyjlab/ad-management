@@ -15,8 +15,8 @@ if ($server.Scheme -eq 'https' -and $cfg.ca_pem) {
     try { $store.Open('ReadWrite'); $store.Add($cert) } finally { $store.Close(); $cert.Dispose() }
 }
 if ($cfg.domain_join) {
-    if ($server.Scheme -ne 'https') { throw 'Automatic domain join requires HTTPS.' }
     . "$PSScriptRoot\DomainJoin.ps1"
+    Assert-JoinTransport $cfg
 }
 $deadline = [DateTime]::UtcNow.AddHours(2)
 while ([DateTime]::UtcNow -lt $deadline) {

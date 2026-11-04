@@ -13,7 +13,7 @@ async function run() {
     page.on('pageerror',error=>errors.push(error.message));
     let role='super_admin',expired=false,saves=0,extensions=0,policyPayload=null,validityPayload=null,mediaPayload=null,enrollmentExpires=1793433600,fixture=null,profilePayload=null,previewPayload=null;
     const jobLogEvents={};let jobLogError=false,jobLogGate=null,dashboardGate=null,jobReviewPayload=null;
-    const settings={public_url:'http://ad-menu.test/pc-deploy',enabled:false,concurrency:2,ca_pem:''};
+    const settings={public_url:'http://ad-menu.test/pc-deploy',enabled:false,concurrency:2,ca_pem:'',http_allowed:true};
     const media={builders:[{id:'test-builder',name:'测试制作电脑',online:true,template_name:'WinPE',driver_name:'ASIX'}],builds:[]};
     const adHtml=fs.readFileSync(path.join(__dirname,'admin_manage.html'),'utf8');
     await page.route('**/*',async route=>{
@@ -503,7 +503,7 @@ async function run() {
     const joinSettings={domain:'corp.test',ou_path:'OU=Workstations,DC=corp,DC=test',username:'join-service@corp.test'};
     fixture.profiles[1].domain_join=joinSettings;
     fixture.profiles[1].has_domain_join_password=true;
-    settings.public_url='https://deploy.test/pc-deploy';
+    settings.public_url='http://deploy.test/pc-deploy';
     await page.locator('#refresh').click();
     await page.locator('[data-view=profiles]').click();
     await page.locator('[data-action=edit-profile][data-id=wim-profile]').click();
@@ -515,7 +515,36 @@ async function run() {
     await page.locator('#profile-form [type=submit]').click();
     await page.locator('#form-error').filter({hasText:'HTTPS'}).waitFor();
     assert.equal(profilePayload,priorProfilePayload);checks++;
+    assert.ok(!(await page.locator('#domain-join-http').isChecked()));checks++;
+    await page.locator('#domain-join-http').check();
+    assert.ok(await page.locator('[name=join_user]').isEnabled());checks++;
+    assert.ok(await page.locator('[name=join_password]').isEnabled());checks++;
+    assert.ok(await page.locator('#domain-join-http-notice').isVisible());checks++;
+    assert.ok(await page.locator('#domain-join-https-error').isHidden());checks++;
+    await page.locator('[name=join_password]').fill('Fixture-only-http-join-password');
+    await page.locator('#profile-form [type=submit]').click();
+    await page.locator('#modal').waitFor({state:'hidden'});
+    assert.equal(profilePayload.domain_join.allow_http,true);checks++;
+    assert.equal(profilePayload.domain_join_password,'Fixture-only-http-join-password');checks++;
+    assert.ok(!('join_allow_http' in profilePayload));checks++;
+    fixture.profiles[1].domain_join={...joinSettings,allow_http:true};
+    await page.locator('#refresh').click();
+    await page.locator('[data-action=edit-profile][data-id=wim-profile]').click();
+    assert.ok(await page.locator('#domain-join-http').isChecked());checks++;
+    assert.ok(await page.locator('[name=join_password]').isEnabled());checks++;
+    await page.locator('#domain-join-http').uncheck();
+    assert.ok(await page.locator('[name=join_password]').isDisabled());checks++;
     await page.locator('#profile-form [data-action=close]').click();
+    settings.http_allowed=false;
+    await page.locator('#refresh').click();
+    await page.locator('[data-action=edit-profile][data-id=wim-profile]').click();
+    assert.ok(await page.locator('#domain-join-http').isDisabled());checks++;
+    assert.ok(await page.locator('[name=join_password]').isDisabled());checks++;
+    assert.ok((await page.locator('#domain-join-https-error').textContent()).includes('服务器禁止'));checks++;
+    await page.locator('#profile-form [data-action=close]').click();
+    settings.http_allowed=true;
+    settings.public_url='https://deploy.test/pc-deploy';
+    fixture.profiles[1].domain_join=joinSettings;
 
     await page.goto('https://ad-menu.test/pc-deploy/');
     await page.locator('#workspace:not([hidden])').waitFor();

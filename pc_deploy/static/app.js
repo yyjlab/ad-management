@@ -310,11 +310,11 @@ function editProfile(id) {
   if(p?.disk_mode) $('#disk-mode').value=p.disk_mode;
   const join = p?.domain_join, defaults = data.settings.domain_defaults || {};
   $('.form-grid', $('#profile-form')).insertAdjacentHTML('beforeend',
-    '<section class="section full"><label class="check-label"><input id="domain-join-enabled" name="join_enabled" type="checkbox" '+(join?'checked':'')+'>安装后自动按员工工号改名并加入 AD 域</label><p class="modal-help">每台设备在工作台填写员工工号，原工号保留；电脑名重名时依次追加 A–Z，纯数字从 A 开始。需要域 DNS、HTTPS 和仅获目标 OU 加域权限的专用账号；不使用或复用平台管理员凭据。自动检查同名电脑并顺延字母，不覆盖已有电脑。加域成功后额外重启一次并验证。</p><p id="domain-join-https-error" class="error" hidden>当前网页或客户端平台地址未启用 HTTPS，暂不能填写加域凭据。</p><div id="domain-join-fields" class="form-grid">'+
+    '<section class="section full"><label class="check-label"><input id="domain-join-enabled" name="join_enabled" type="checkbox" '+(join?'checked':'')+'>安装后自动按员工工号改名并加入 AD 域</label><p class="modal-help">每台设备在工作台填写员工工号，原工号保留；电脑名重名时依次追加 A–Z，纯数字从 A 开始。需要域 DNS 和具备加域权限的 AD 账号。默认使用 HTTPS；隔离内网临时使用 HTTP 时须明确勾选下方选项。自动检查同名电脑并顺延字母，不覆盖已有电脑。加域成功后额外重启一次并验证。</p><label id="domain-join-http-option" class="check-label"><input id="domain-join-http" name="join_allow_http" type="checkbox" '+(join?.allow_http?'checked':'')+'>允许隔离内网 HTTP 加域（密码将明文传输）</label><p id="domain-join-http-notice" class="error" hidden>本方案已允许 HTTP。AD 账号验证不会加密传输；此设置只作用于使用本方案新建的任务。</p><p id="domain-join-https-error" class="error" hidden></p><div id="domain-join-fields" class="form-grid">'+
     field('AD 域 DNS 名称','join_domain','text',join?.domain || defaults.domain || '','maxlength="253" placeholder="例如 corp.example.com"')+
-    field('目标 OU（可选）','join_ou','text',join?.ou_path || defaults.ou_path || '','maxlength="500" placeholder="例如 OU=Workstations,DC=corp,DC=example,DC=com"')+
-    field('专用加域账号','join_user','text',join?.username || '','maxlength="120" autocomplete="off"')+
-    field('专用加域密码'+(p?.has_domain_join_password?'（留空保留）':''),'join_password','password','','maxlength="128" autocomplete="new-password"')+
+    field('目标 OU（可选）','join_ou','text',join?.ou_path || defaults.ou_path || '','maxlength="500" placeholder="留空使用域默认的电脑位置"')+
+    field('AD 加域账号','join_user','text',join?.username || '','maxlength="120" autocomplete="off"')+
+    field('加域密码'+(p?.has_domain_join_password?'（留空保留）':''),'join_password','password','','maxlength="128" autocomplete="new-password"')+
     '</div></section>');
   $('#profile-form').dataset.joinPassword=String(p?.has_domain_join_password===true);
   updateDomainJoinMode();
@@ -324,11 +324,17 @@ function updateDomainJoinMode() {
   const form=$('#profile-form'); if(!form)return;
   const enabled=$('#domain-join-enabled').checked;
   const secure=location.protocol==='https:' && data.settings.public_url.startsWith('https://');
-  $('#domain-join-https-error').hidden=!enabled||secure;
+  const toggle=$('#domain-join-http');
+  toggle.disabled=!enabled||data.settings.http_allowed!==true;
+  $('#domain-join-http-option').hidden=!enabled;
+  const allowHttp=toggle.checked&&!toggle.disabled, ready=secure||allowHttp;
+  $('#domain-join-http-notice').hidden=!enabled||!allowHttp;
+  $('#domain-join-https-error').textContent=data.settings.http_allowed===true?'当前网页或客户端地址未启用 HTTPS；可配置 HTTPS，或明确允许本方案使用内网 HTTP。':'服务器禁止 HTTP 加域，请使用 HTTPS 网页和客户端地址。';
+  $('#domain-join-https-error').hidden=!enabled||ready;
   $('#domain-join-fields').hidden=!enabled;
   $('#domain-join-fields').querySelectorAll('input').forEach(input=>{
-    input.disabled=!enabled||!secure;
-    input.required=enabled && secure && (input.name==='join_domain'||input.name==='join_user'||(input.name==='join_password'&&form.dataset.joinPassword!=='true'));
+    input.disabled=!enabled||!ready;
+    input.required=enabled && ready && (input.name==='join_domain'||input.name==='join_user'||(input.name==='join_password'&&form.dataset.joinPassword!=='true'));
   });
 }
 
@@ -358,7 +364,7 @@ async function preview() {
   if(targets.some(t=>!t.disk_key)) { toast('请为每台选中的电脑明确选择目标硬盘'); return; }
   if(preservesPartitions()&&targets.some(t=>!t.partition_key)){toast('请明确选择每台电脑要格式化的 Windows 分区');return;}
   const r = await api('/api/jobs/preview','POST',{profile_id:profileId,targets}); previewId = r.id;
-  modal('确认批量安装', `<div class="notice danger">${h(r.warning)}<br>请先完成备份；启动安装后不能远程取消，也不会自动恢复原数据。</div><p>${h(r.profile)} · ${h(r.source)} · <strong>${r.targets.length} 台电脑</strong></p>${r.domain_join?'<p class="notice">安装后按以下员工工号改名并加入域 '+h(r.domain_join.domain)+'，加域成功后额外重启一次。同名时依次追加 A–Z，最终名称同步到任务与日志；不会覆盖已有电脑。</p>':''}<div class="table-wrap"><table class="modal-table"><thead><tr><th>整机序列号</th><th>屏幕校验码</th>${r.domain_join?'<th>工号 / 预计电脑名</th>':''}<th>将处理的硬盘 / 分区</th></tr></thead><tbody>${r.targets.map(t=>`<tr><td class="mono">${h(t.serial)}</td><td class="mono">${h(t.boot_code)}</td>${r.domain_join?'<td class="mono">'+h(t.employee_id)+'<span class="cell-sub">预计 '+h(t.computer_name)+'</span></td>':''}<td>磁盘 ${t.disk.number} · ${h(t.disk.model)} · ${h(size(t.disk.size_bytes))}<span class="cell-sub mono">${h(t.disk.serial || t.disk.unique_id)}</span>${t.partitions?`<strong>只格式化分区 ${t.partitions.windows.number} · ${h(size(t.partitions.windows.size_bytes))}</strong><span class="cell-sub mono">${h(t.partitions.windows.guid)}</span>`:''}</td></tr>`).join('')}</tbody></table></div><form id="commit-form"><div class="section"><label class="check-label"><input name="physical_confirmed" type="checkbox" required>已现场核对整机序列号、屏幕校验码和硬盘，${preservesPartitions()?'确认所选 Windows 分区数据可删除，允许更新同盘 EFI 引导':'确认所选硬盘全部数据可删除'}</label></div>${field('输入 YES 确认本批安装','confirmation','text','','required autocomplete="off" pattern="YES"')}<div id="form-error" class="error" role="alert"></div>${!data.settings.enabled?'<p class="error">真实下发尚未开启。完成隔离验证后，在启动与设置中开启。</p>':''}<div class="form-actions"><button type="button" data-action="close">返回检查</button><button class="danger-button" type="submit" ${!data.settings.enabled?'disabled':''}>确认并执行安装</button></div></form>`);
+  modal('确认批量安装', `<div class="notice danger">${h(r.warning)}<br>请先完成备份；启动安装后不能远程取消，也不会自动恢复原数据。</div><p>${h(r.profile)} · ${h(r.source)} · <strong>${r.targets.length} 台电脑</strong></p>${r.domain_join?'<p class="notice">安装后按以下员工工号改名并加入域 '+h(r.domain_join.domain)+'，加域成功后额外重启一次。同名时依次追加 A–Z，最终名称同步到任务与日志；不会覆盖已有电脑。'+(r.domain_join.allow_http?'<br><strong>本方案允许内网 HTTP 加域，密码将明文传输。</strong>':'')+'</p>':''}<div class="table-wrap"><table class="modal-table"><thead><tr><th>整机序列号</th><th>屏幕校验码</th>${r.domain_join?'<th>工号 / 预计电脑名</th>':''}<th>将处理的硬盘 / 分区</th></tr></thead><tbody>${r.targets.map(t=>`<tr><td class="mono">${h(t.serial)}</td><td class="mono">${h(t.boot_code)}</td>${r.domain_join?'<td class="mono">'+h(t.employee_id)+'<span class="cell-sub">预计 '+h(t.computer_name)+'</span></td>':''}<td>磁盘 ${t.disk.number} · ${h(t.disk.model)} · ${h(size(t.disk.size_bytes))}<span class="cell-sub mono">${h(t.disk.serial || t.disk.unique_id)}</span>${t.partitions?`<strong>只格式化分区 ${t.partitions.windows.number} · ${h(size(t.partitions.windows.size_bytes))}</strong><span class="cell-sub mono">${h(t.partitions.windows.guid)}</span>`:''}</td></tr>`).join('')}</tbody></table></div><form id="commit-form"><div class="section"><label class="check-label"><input name="physical_confirmed" type="checkbox" required>已现场核对整机序列号、屏幕校验码和硬盘，${preservesPartitions()?'确认所选 Windows 分区数据可删除，允许更新同盘 EFI 引导':'确认所选硬盘全部数据可删除'}</label></div>${field('输入 YES 确认本批安装','confirmation','text','','required autocomplete="off" pattern="YES"')}<div id="form-error" class="error" role="alert"></div>${!data.settings.enabled?'<p class="error">真实下发尚未开启。完成隔离验证后，在启动与设置中开启。</p>':''}<div class="form-actions"><button type="button" data-action="close">返回检查</button><button class="danger-button" type="submit" ${!data.settings.enabled?'disabled':''}>确认并执行安装</button></div></form>`);
 }
 function deviceDetail(id) {
   const d = data.devices.find(x=>x.id===id); if(!d)return;
@@ -421,7 +427,7 @@ document.addEventListener('change',async e=>{
   if(el.dataset.partition)partitions.set(el.dataset.partition,el.value);
   if(el.id==='filter'){filter=el.value;renderDeviceRows();}
   if(el.id==='profile-choice'){profileId=el.value;partitions.clear();renderDevices();}
-  if(el.id==='domain-join-enabled')updateDomainJoinMode();
+  if(el.id==='domain-join-enabled'||el.id==='domain-join-http')updateDomainJoinMode();
   if(el.id==='select-all'){filteredDevices().filter(selectable).forEach(d=>el.checked?chosen.add(d.id):chosen.delete(d.id));renderDeviceRows();}
   if(el.id==='source-choice')updateImages();
   if(el.id==='disk-mode')updateProfileMode();
@@ -435,11 +441,12 @@ document.addEventListener('submit',async e=>{
     else if(form.id==='profile-form'){
       f.image_index=Number(f.image_index);f.system_gib=Number(f.system_gib||0);f.clear_product_key=!!f.clear_product_key;
       if(f.join_enabled){
-        if(location.protocol!=='https:'||!data.settings.public_url.startsWith('https://'))throw new Error('自动加域凭据只能在 HTTPS 网页和 HTTPS 平台地址下保存');
-        f.domain_join={enabled:true,domain:f.join_domain,ou_path:f.join_ou||'',username:f.join_user};
+        const allowHttp=!!f.join_allow_http&&data.settings.http_allowed===true;
+        if((location.protocol!=='https:'||!data.settings.public_url.startsWith('https://'))&&!allowHttp)throw new Error('请使用 HTTPS，或明确允许本方案使用内网 HTTP 加域');
+        f.domain_join={enabled:true,domain:f.join_domain,ou_path:f.join_ou||'',username:f.join_user,allow_http:allowHttp};
         f.domain_join_password=f.join_password||'';
       }else f.domain_join={enabled:false};
-      for(const key of ['join_enabled','join_domain','join_ou','join_user','join_password'])delete f[key];
+      for(const key of ['join_enabled','join_allow_http','join_domain','join_ou','join_user','join_password'])delete f[key];
       await api('/api/profiles'+(form.dataset.id?'/'+form.dataset.id:''),form.dataset.id?'PUT':'POST',f);
     }
     else if(form.id==='commit-form'){await api('/api/jobs/commit','POST',{preview_id:previewId,confirmation:f.confirmation,physical_confirmed:!!f.physical_confirmed});chosen.clear();view='jobs';}

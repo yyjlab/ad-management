@@ -40,6 +40,9 @@ def join_record(value):
         raise Invalid('请明确选择是否在安装后自动加域')
     if not value['enabled']:
         return None
+    allow_http = value.get('allow_http', False)
+    if not isinstance(allow_http, bool):
+        raise Invalid('请明确选择是否允许内网 HTTP 加域')
     domain = text(value.get('domain'), 'AD 域 DNS 名称', maximum=253).lower()
     labels = domain.split('.')
     if len(labels) < 2 or any(not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', part) for part in labels):
@@ -50,7 +53,7 @@ def join_record(value):
         pass
     else:
         raise Invalid('AD 域名不能填写 IP')
-    user = text(value.get('username'), '专用加域账号', maximum=120)
+    user = text(value.get('username'), 'AD 加域账号', maximum=120)
     if not re.fullmatch(r'(?:[A-Za-z0-9._-]+\\[A-Za-z0-9._$-]+|[A-Za-z0-9._$-]+@[A-Za-z0-9.-]+)', user):
         raise Invalid('加域账号请填写 DOMAIN\\user 或 user@domain')
     ou = value.get('ou_path', '')
@@ -63,4 +66,7 @@ def join_record(value):
         if (not ou.lower().endswith(','+suffix.lower())
                 or not re.fullmatch(r'(?:(?:OU|CN)=[^,\\+<>=;"]{1,64},)+(?:DC=[a-z0-9-]+,)*DC=[a-z0-9-]+', ou, re.I)):
             raise Invalid('目标 OU 必须属于所填域；此处支持普通 OU / CN 名称，不支持转义名称')
-    return dict(domain=domain, username=user, ou_path=ou)
+    result = dict(domain=domain, username=user, ou_path=ou)
+    if allow_http:
+        result['allow_http'] = True
+    return result

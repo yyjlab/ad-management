@@ -106,9 +106,13 @@ class PlatformTests(unittest.TestCase):
             headers['Authorization'] = 'Bearer ' + token
         return self.client.open(path, base_url='https://localhost', method=method, json=data or {}, headers=headers)
 
-    def join_fixtures(self, commit=True, wim=False):
+    def join_fixtures(self, commit=True, wim=False, allow_http=False):
         inv, reg, source, profile = self.fixtures()
         self.enable()
+        join_request = self.post if allow_http else self.join_post
+        if allow_http:
+            with self.store.connect(write=True) as c:
+                self.store.put(c, 'public_url', 'http://deploy.test/pc-deploy')
         if wim:
             with self.store.connect(write=True) as c:
                 row, = c.execute('SELECT data FROM sources WHERE id=?', (source,)).fetchall()
@@ -124,24 +128,89 @@ class PlatformTests(unittest.TestCase):
                        domain_join_password='Test-only-domain-password')
         if wim:
             payload['password'] = ''
-        saved = self.join_post('/pc-deploy/api/profiles', payload)
+        if allow_http:
+            payload['domain_join']['allow_http'] = True
+        saved = join_request('/pc-deploy/api/profiles', payload)
         self.assertEqual(saved.status_code, 200, saved.json)
         profile = saved.json['id']
         target = dict(device_id=inv['hardware_uuid'], disk_key=inventory(inv)['disks'][0]['key'], employee_id='wfq101755')
-        preview = self.join_post('/pc-deploy/api/jobs/preview', dict(profile_id=profile, targets=[target]))
+        preview = join_request('/pc-deploy/api/jobs/preview', dict(profile_id=profile, targets=[target]))
         self.assertEqual(preview.status_code, 200, preview.json)
         if not commit:
             return inv, reg, profile, target, payload
-        result = self.join_post('/pc-deploy/api/jobs/commit', dict(preview_id=preview.json['id'], confirmation='YES', physical_confirmed=True))
+        result = join_request('/pc-deploy/api/jobs/commit', dict(preview_id=preview.json['id'], confirmation='YES', physical_confirmed=True))
         self.assertEqual(result.status_code, 200, result.json)
         job = result.json['ids'][0]
-        self.assertEqual(self.join_post('/pc-deploy/api/agent/poll', inv, reg['token']).status_code, 200)
-        started = self.join_post(f'/pc-deploy/api/agent/jobs/{job}/start', inv, reg['token'])
+        self.assertEqual(join_request('/pc-deploy/api/agent/poll', inv, reg['token']).status_code, 200)
+        started = join_request(f'/pc-deploy/api/agent/jobs/{job}/start', inv, reg['token'])
         self.assertEqual(started.status_code, 200, started.json)
         with self.store.connect() as c:
             row = c.execute('SELECT secret FROM jobs WHERE id=?', (job,)).fetchone()
             token = self.store.decrypt(row['secret'])['finish_token']
         return inv, reg, job, token, started.json
+
+    def test_domain_join_http_opt_in_completes_with_scoped_credentials_and_unchanged_pe(self):
+        inv, reg, job, token, authorization = self.join_fixtures(wim=True, allow_http=True)
+        bootstrap = base64.b64decode(authorization['finalizer_command'].rsplit(' ', 1)[1]).decode('utf-16le')
+        encoded = bootstrap.split("(Join-Path $p 'config.json'),[Convert]::FromBase64String('", 1)[1].split("')", 1)[0]
+        config = json.loads(base64.b64decode(encoded))
+        self.assertIs(config['allow_http'], True)
+        self.assertIs(config['domain_join']['allow_http'], True)
+        self.assertTrue(config['server_url'].startswith('http://'))
+        self.assertNotIn('Test-only-domain-password', bootstrap)
+        route = f'/pc-deploy/api/agent/jobs/{job}'
+        identity = dict(hardware_uuid=inv['hardware_uuid'])
+        self.assertEqual(self.post(route+'/domain-join/config', identity, reg['token']).status_code, 400)
+        self.assertEqual(self.post(route+'/domain-join/config', dict(hardware_uuid=str(uuid.uuid4())), token).status_code, 400)
+        credentials = self.post(route+'/domain-join/config', identity, token)
+        self.assertEqual(credentials.status_code, 200, credentials.json)
+        self.assertEqual(credentials.json['username'], 'join-service@corp.test')
+        self.assertEqual(credentials.json['password'], 'Test-only-domain-password')
+        assigned = self.post(route+'/domain-join/name', dict(identity, unavailable_name='WFQ101755'), token)
+        self.assertEqual(assigned.json['computer_name'], 'WFQ101755A')
+        finish = dict(identity, computer_name='WFQ101755A', os_build=26100, image_state='IMAGE_STATE_COMPLETE',
+                      oobe_done=True, domain_name='corp.test', domain_join_verified=True)
+        self.assertEqual(self.post(route+'/finish', finish, token).status_code, 400)
+        for stage in ('checking', 'joining', 'restarting'):
+            reply = self.post(route+'/domain-join/status', dict(identity, stage=stage), token)
+            self.assertEqual(reply.status_code, 200, reply.json)
+        verified = dict(identity, stage='verified', computer_name='WFQ101755A', domain='corp.test', secure_channel=True)
+        self.assertEqual(self.post(route+'/domain-join/status', verified, token).status_code, 200)
+        self.assertEqual(self.post(route+'/finish', finish, token).status_code, 200)
+        events = self.client.get(route.replace('/agent', '')+'/events').json
+        self.assertTrue(any('允许内网 HTTP 加域' in e['message'] for e in events['events']))
+        self.assertNotIn('Test-only-domain-password', json.dumps(events))
+
+    def test_domain_join_http_cannot_override_server_transport_policy(self):
+        inv, _, job, token, _ = self.join_fixtures(allow_http=True)
+        self.app.config['PC_DEPLOY_ALLOW_HTTP'] = False
+        route = f'/pc-deploy/api/agent/jobs/{job}'
+        identity = dict(hardware_uuid=inv['hardware_uuid'], allow_http=True)
+        for suffix, payload in (
+                ('/domain-join/config', identity),
+                ('/domain-join/name', dict(identity, unavailable_name='WFQ101755')),
+                ('/domain-join/status', dict(identity, stage='checking')),
+                ('/finish', dict(identity, computer_name='WFQ101755', os_build=26100))):
+            reply = self.post(route+suffix, payload, token)
+            self.assertEqual(reply.status_code, 400, suffix)
+        self.assertIs(self.client.get('/pc-deploy/api/dashboard').json['settings']['http_allowed'], False)
+
+    def test_domain_join_transport_permission_is_immutable_for_running_job(self):
+        inv, _, job, token, _ = self.join_fixtures()
+        dashboard = self.client.get('/pc-deploy/api/dashboard').json
+        profile = next(p for p in dashboard['profiles'] if p.get('domain_join'))
+        updated = dict(profile, domain_join=dict(profile['domain_join'], enabled=True, allow_http=True))
+        self.assertEqual(self.join_post('/pc-deploy/api/profiles/'+profile['id'], updated, method='PUT').status_code, 200)
+        with self.store.connect(write=True) as c:
+            self.store.put(c, 'public_url', 'http://deploy.test/pc-deploy')
+        route = f'/pc-deploy/api/agent/jobs/{job}'
+        identity = dict(hardware_uuid=inv['hardware_uuid'], allow_http=True)
+        for suffix, payload in (
+                ('/domain-join/config', identity),
+                ('/domain-join/name', dict(identity, unavailable_name='WFQ101755')),
+                ('/domain-join/status', dict(identity, stage='checking')),
+                ('/finish', dict(identity, computer_name='WFQ101755', os_build=26100))):
+            self.assertEqual(self.post(route+suffix, payload, token).status_code, 400, suffix)
 
     def test_domain_join_blocks_http_pe_before_authorization(self):
         inv, reg, profile, target, _ = self.join_fixtures(commit=False)
@@ -175,7 +244,7 @@ class PlatformTests(unittest.TestCase):
     def test_domain_join_validates_domain_account_ou_and_boolean(self):
         _, _, _, _, payload = self.join_fixtures(commit=False)
         for patch in ({'domain':'127.0.0.1'}, {'domain':'http://corp.test'}, {'username':'administrator'},
-                      {'ou_path':'OU=PCs,DC=other,DC=test'}, {'enabled':'true'}):
+                      {'ou_path':'OU=PCs,DC=other,DC=test'}, {'enabled':'true'}, {'allow_http':'true'}, {'allow_http':1}):
             bad = copy.deepcopy(payload)
             bad['domain_join'].update(patch)
             self.assertEqual(self.join_post('/pc-deploy/api/profiles', bad).status_code, 400, patch)

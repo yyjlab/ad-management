@@ -1,6 +1,15 @@
 # Loaded only by the protected post-install finalizer, never by WinPE.
+function Assert-JoinTransport {
+    param($Config)
+    $scheme = ([uri]$Config.server_url).Scheme
+    if ($scheme -eq 'https') { return }
+    if ($scheme -eq 'http' -and $Config.allow_http -is [bool] -and $Config.allow_http -and
+        $Config.domain_join.allow_http -is [bool] -and $Config.domain_join.allow_http) { return }
+    throw 'Domain join requires HTTPS unless HTTP is explicitly approved for this task.'
+}
 function Invoke-JoinService {
     param($Config, [string]$Action, $Payload)
+    Assert-JoinTransport $Config
     Invoke-RestMethod -Method Post -Uri ($Config.server_url + '/api/agent/jobs/' + $Config.job_id + '/domain-join/' + $Action) `
         -Headers @{Authorization=('Bearer ' + $Config.token)} -ContentType 'application/json' `
         -Body ($Payload | ConvertTo-Json -Compress) -TimeoutSec 30
@@ -55,7 +64,7 @@ function Set-JoinComputerName {
 }
 function Invoke-DeploymentDomainJoin {
     param($Config, [string]$Hardware)
-    if (([uri]$Config.server_url).Scheme -ne 'https') { throw 'Domain join requires HTTPS.' }
+    Assert-JoinTransport $Config
     $journalPath = Join-Path $PSScriptRoot 'domain-join-state.json'
     $journal = if (Test-Path -LiteralPath $journalPath) {
         [IO.File]::ReadAllText($journalPath) | ConvertFrom-Json

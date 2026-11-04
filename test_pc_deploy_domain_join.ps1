@@ -74,7 +74,8 @@ function Invoke-JoinFixture {
     $initialName=if($employee -match '^\d+$'){$employee+'A'}else{$employee}
     $cfg=[pscustomobject]@{server_url=$(if($Scenario.Http){'http://deploy.test/pc-deploy'}else{'https://deploy.test/pc-deploy'});
         job_id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';token='fixture-only-completion-token';
-        domain_join=@{domain='corp.test';computer_name=$initialName;employee_id=$employee}}
+        allow_http=$Scenario.GlobalHttp;
+        domain_join=@{domain='corp.test';computer_name=$initialName;employee_id=$employee;allow_http=$Scenario.TaskHttp}}
     $savedConfig=Join-Path $Directory 'config.json'
     if(Test-Path -LiteralPath $savedConfig){$cfg=[IO.File]::ReadAllText($savedConfig)|ConvertFrom-Json}
     $result=$null;$failure=$null
@@ -146,6 +147,16 @@ try {
     Assert-Join ($resumed.result -eq 'wait' -and $resumed.native.Count -eq 0 -and $resumed.reboots.Count -eq 1) 'Resume repeated join'
     $http=Invoke-JoinFixture (New-JoinCase) @{Http=$true}
     Assert-Join ($http.failure -and $http.calls.Count -eq 0 -and $http.native.Count -eq 0) 'HTTP leaked join credentials'
+    foreach($case in @(@{Http=$true;GlobalHttp=$true},@{Http=$true;TaskHttp=$true},
+                       @{Http=$true;GlobalHttp='true';TaskHttp=$true},@{Http=$true;GlobalHttp=$true;TaskHttp='true'})){
+        $blocked=Invoke-JoinFixture (New-JoinCase) $case
+        Assert-Join ($blocked.failure -and $blocked.calls.Count -eq 0 -and $blocked.native.Count -eq 0) 'Incomplete or string HTTP opt-in reached credentials'
+    }
+    $httpDirectory=New-JoinCase
+    $approvedHttp=Invoke-JoinFixture $httpDirectory @{Http=$true;GlobalHttp=$true;TaskHttp=$true}
+    Assert-Join ($approvedHttp.result -eq 'wait' -and $approvedHttp.native.Count -eq 1 -and $approvedHttp.reboots.Count -eq 1) 'Explicit HTTP opt-in did not complete native join once'
+    $httpVerified=Invoke-JoinFixture $httpDirectory @{Http=$true;GlobalHttp=$true;TaskHttp=$true;NewBoot=$true;Member=$true;ExpectedName=$true}
+    Assert-Join ($httpVerified.result -eq 'ready' -and $httpVerified.native.Count -eq 0) 'HTTP opt-in lost post-reboot trust verification'
     Write-Output "$count isolated domain join checks passed. No real directory, machine name, membership or reboot was changed."
 } finally {
     $resolved=[IO.Path]::GetFullPath($taskRoot)

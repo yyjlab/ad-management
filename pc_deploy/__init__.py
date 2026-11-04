@@ -82,6 +82,13 @@ def register_pc_deploy(host_app, current_user, touch_session):
             os.getenv('DEPLOY_TRUST_PROXY') == 'true') is True
         return request.is_secure or (trust_proxy and request.headers.get('X-Forwarded-Proto') == 'https')
 
+    def domain_transport_required(c, joining):
+        if secure_request() and urlsplit(store.setting(c, 'public_url')).scheme == 'https':
+            return
+        if http_allowed() and joining.get('allow_http') is True:
+            return
+        raise Invalid('自动加域需要 HTTPS；隔离内网可在装机方案中明确允许 HTTP 加域')
+
     attempts, lock = defaultdict(deque), threading.Lock()
 
     def limited(key, limit, window=60):
@@ -208,8 +215,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
                 result['partition_key'] = target.get('partition_key')
                 result['partitions'] = partition_target(disk, result['partition_key'])
         if profile.get('domain_join'):
-            if not secure_request() or urlsplit(store.setting(c, 'public_url')).scheme != 'https':
-                raise Invalid('自动加域需要 HTTPS 网页和 HTTPS 平台地址')
+            domain_transport_required(c, profile['domain_join'])
             employee = employee_id(target.get('employee_id'))
             reserved = reserved_computer_names(c, profile['domain_join']['domain']) | set(reserved_names or ())
             name = available_name(employee, reserved)
@@ -306,6 +312,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
             jobs = [public_job(r, now, timings.get(r['id'])) for r in job_rows]
             settings = {k: store.setting(c, k) for k in ('public_url', 'enabled', 'concurrency', 'ca_pem')}
             settings['enrollment_days'] = store.setting(c, 'enrollment_days', 7)
+            settings['http_allowed'] = http_allowed()
             settings['domain_defaults'] = dict(domain='.'.join(re.findall(r'(?:^|,)DC=([^,]+)', host_app.config.get('AD_BASE_DN', ''), re.I)),
                                                ou_path=host_app.config.get('AD_COMPUTER_OU', ''))
             media = media_dashboard(c)
@@ -385,8 +392,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
             value = profile_record(data, source)
             joining = join_record(data.get('domain_join'))
             if joining:
-                if not secure_request() or urlsplit(store.setting(c, 'public_url')).scheme != 'https':
-                    raise Invalid('保存加域凭据需要 HTTPS 网页和 HTTPS 平台地址')
+                domain_transport_required(c, joining)
                 value['domain_join'] = joining
             old = load(c, 'profiles', identity)[0] if identity else None
             old_secret = store.decrypt(old['secret']) if old else {}
@@ -419,7 +425,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
                 if not join_password and all(old_join.get(k) == joining[k] for k in ('domain', 'username')):
                     join_password = old_secret.get('domain_join_password', '')
                 if not isinstance(join_password, str) or not 1 <= len(join_password) <= 128 or any(ord(ch) < 32 for ch in join_password):
-                    raise Invalid('请填写专用加域账号密码；更换域或账号后必须重新填写')
+                    raise Invalid('请填写加域账号密码；更换域或账号后必须重新填写')
                 private['domain_join_password'] = join_password
                 value['has_domain_join_password'] = True
             secret = store.encrypt(private)
@@ -536,7 +542,8 @@ def register_pc_deploy(host_app, current_user, touch_session):
                 c.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?)',
                           (identity, target['device_id'], target['boot_id'], 'queued', canonical(payload),
                            store.encrypt(secret), now, now, now+72*3600))
-                event(c, 'queued', '已确认整机 ' + target['serial'] + '，仅处理所选硬盘', identity)
+                event(c, 'queued', '已确认整机 ' + target['serial'] + '，仅处理所选硬盘' +
+                      ('；本任务允许内网 HTTP 加域' if profile.get('domain_join', {}).get('allow_http') else ''), identity)
                 ids.append(identity)
             c.execute('UPDATE previews SET used=1 WHERE id=?', (row['id'],))
         return jsonify(ok=True, ids=ids)
@@ -761,8 +768,8 @@ def register_pc_deploy(host_app, current_user, touch_session):
             if not row or not store.setting(c, 'enabled', False):
                 return jsonify(job=None)
             data = json.loads(row['data'])
-            if data.get('domain_join') and not secure_request():
-                raise Invalid('该任务需要 HTTPS；请更新 PE 平台连接地址，尚未授权安装')
+            if data.get('domain_join'):
+                domain_transport_required(c, data['profile']['domain_join'])
             if row['boot_id'] != dev['boot_id'] or digest(inv) != data['target']['inventory_hash']:
                 raise Invalid('设备硬件已变化，请取消旧任务并重新预览')
             if row['state'] not in ('queued', 'preflight') or dev['consumed']:
@@ -795,11 +802,11 @@ def register_pc_deploy(host_app, current_user, touch_session):
                              hardware_uuid=dev['id'], token=secret['finish_token'],
                              ca_pem=store.setting(c, 'ca_pem', ''))
             if data.get('domain_join'):
-                if not secure_request() or urlsplit(finalizer['server_url']).scheme != 'https':
-                    raise Invalid('自动加域任务的 PE 安装授权只允许 HTTPS')
+                domain_transport_required(c, data['profile']['domain_join'])
                 finalizer['domain_join'] = dict(domain=data['domain_join']['domain'],
                                                computer_name=data['target']['computer_name'],
-                                               employee_id=data['target']['employee_id'])
+                                               employee_id=data['target']['employee_id'],
+                                               allow_http=data['profile']['domain_join'].get('allow_http', False))
             if data['source'].get('kind') == 'wim':
                 if inv.get('wim_apply_v1') is not True:
                     raise Invalid('客户端不支持封装 WIM 还原')
@@ -878,9 +885,8 @@ def register_pc_deploy(host_app, current_user, touch_session):
         return jsonify(ok=True)
 
     def domain_completion(c, identity, value):
-        if not secure_request() or urlsplit(store.setting(c, 'public_url')).scheme != 'https':
-            raise Invalid('自动加域接口只接受 HTTPS，禁止明文下发加域凭据')
         row, job = load(c, 'jobs', identity)
+        domain_transport_required(c, job['profile'].get('domain_join', {}))
         secret = store.decrypt(row['secret'])
         if not hmac.compare_digest(bearer(), secret['finish_token']) or row['expires'] < time.time():
             raise Invalid('安装后任务凭据失效')
@@ -988,8 +994,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
             expected = data['profile']['computer_prefix'] + '-' + digest(data['target']['inventory']['hardware_uuid'])[:8].upper()
             preserved_name = data['source'].get('kind') == 'wim'
             if data.get('domain_join'):
-                if not secure_request():
-                    raise Invalid('自动加域任务的安装后回报只接受 HTTPS')
+                domain_transport_required(c, data['profile']['domain_join'])
                 expected = data['target']['computer_name']
                 preserved_name = False
                 if (data['domain_join']['state'] != 'verified' or value.get('domain_join_verified') is not True
