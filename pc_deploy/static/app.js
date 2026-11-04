@@ -160,7 +160,7 @@ function renderJobTiming(job) {
   const started = Number.isFinite(job.started_at) && job.started_at > 0 ? job.started_at : null;
   const active = activeStates.includes(job.state);
   const ended = active ? null : (job.finished_at ?? job.updated ?? job.created);
-  return '<div class="job-timing"><strong data-job-timer data-start="'+h(started ?? job.created)+'" data-end="'+h(ended ?? '')+'" data-installed="'+(started !== null)+'" data-active="'+active+'"></strong><small>'+
+  return '<div class="job-timing" data-state="'+h(job.state)+'"><strong data-job-timer data-start="'+h(started ?? job.created)+'" data-end="'+h(ended ?? '')+'" data-installed="'+(started !== null)+'" data-active="'+active+'"></strong><small>'+
     (started === null ? '创建：'+h(date(job.created))+' · 尚未开始安装' : '开始：'+h(date(started)))+
     '</small><small class="duration-warning" hidden>已超过 10 分钟，请查看当前阶段与日志</small></div>';
 }
@@ -170,7 +170,9 @@ function updateJobTimers() {
     const active = el.dataset.active === 'true', installed = el.dataset.installed === 'true';
     const seconds = Math.max(0, (active ? now : Number(el.dataset.end))-Number(el.dataset.start));
     el.textContent = !active && !installed ? '未开始安装' : (installed ? (active?'安装用时 ':'安装耗时 ') : '等待用时 ')+duration(seconds);
-    el.parentElement.querySelector('.duration-warning').hidden = !(active && installed && seconds > 600);
+    const overdue = active && installed && seconds > 600;
+    el.parentElement.classList.toggle('overdue', overdue);
+    el.parentElement.querySelector('.duration-warning').hidden = !overdue;
   });
 }
 function captureJobProgress(root) {
@@ -191,7 +193,8 @@ function renderJobProgress(job) {
   const join=job.domain_join;
   if(join && join.state!=='pending'){
     const stages={checking:'检查域 DNS 与电脑名',joining:'正在加入 AD 域',restarting:'等待重启后验证域信任',verified:'域信任验证已通过',failed:'加域失败，不会重新装机'};
-    return '<div class="job-progress"><span>Windows 已安装 · '+h(stages[join.state]||join.state)+'</span><small>工号电脑名：'+h(join.computer_name)+' · 域：'+h(join.domain)+'</small>'+(join.updated?'<small>最后回报：'+h(date(join.updated))+'</small>':'')+'</div>';
+    const tone = join.state==='verified' ? ' completed' : join.state==='failed' ? ' stopped' : join.state==='restarting' ? ' pending' : '';
+    return '<div class="job-progress'+tone+'"><span class="job-progress-phase">Windows 已安装 · '+h(stages[join.state]||join.state)+'</span><small>工号电脑名：'+h(join.computer_name)+' · 域：'+h(join.domain)+'</small>'+(join.updated?'<small>最后回报：'+h(date(join.updated))+'</small>':'')+'</div>';
   }
   const progress = job.progress;
   if (!progress || (job.state === 'failed' && job.review)) return '';
@@ -203,7 +206,7 @@ function renderJobProgress(job) {
   const percent = completed || restored ? 100 : known && progress.stage === 'applying' ? progress.percent : null;
   const label = completed ? '安装后系统已回报' : (stopped ? '已停止 · ' : '') + stages[progress.stage];
   const tone = completed ? ' completed' : job.state === 'failed' ? ' stopped' : job.state === 'cancelled' ? ' cancelled' : progress.stage === 'awaiting_report' ? ' pending' : '';
-  return '<div class="job-progress'+tone+'"><span>'+h(label)+(percent === null ? ' · 等待真实进度' : ' · '+percent+'%')+'</span>' +
+  return '<div class="job-progress'+tone+'"><div class="job-progress-head"><span class="job-progress-phase">'+h(label)+'</span>'+(percent === null ? '<span class="job-progress-unknown">等待真实进度</span>' : '<strong class="job-progress-percent">'+percent+'%</strong>')+'</div>' +
     '<progress max="100" value="'+(percent ?? 0)+'" data-job-progress="'+h(job.id)+'" aria-label="'+h(label)+'"></progress>'+
     (Number.isFinite(progress.updated) ? '<small>最后回报：'+h(date(progress.updated))+'</small>' : '')+'</div>';
 }
