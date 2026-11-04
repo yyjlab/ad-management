@@ -12,6 +12,7 @@ async function run() {
     const errors=[], requests=[];
     page.on('pageerror',error=>errors.push(error.message));
     let role='super_admin',expired=false,saves=0,extensions=0,policyPayload=null,validityPayload=null,mediaPayload=null,enrollmentExpires=1793433600,fixture=null,profilePayload=null,previewPayload=null;
+    const jobLogEvents={};let jobLogError=false,jobLogGate=null;
     const settings={public_url:'http://ad-menu.test/pc-deploy',enabled:false,concurrency:2,ca_pem:''};
     const media={builders:[{id:'test-builder',name:'测试制作电脑',online:true,template_name:'WinPE',driver_name:'ASIX'}],builds:[]};
     const adHtml=fs.readFileSync(path.join(__dirname,'admin_manage.html'),'utf8');
@@ -67,6 +68,17 @@ async function run() {
         media.builds=[{id:'test-media',builder_id:'test-builder',state:'ready',registration_only:mediaPayload.registration_only,
           created:1793347200,updated:1793347200,stage:'制作完成',enrollment_id:'a'.repeat(64),sha256:'b'.repeat(64)}];
         return route.fulfill({json:{ok:true,id:'test-media'}});
+      }
+
+      if(/^\/pc-deploy\/api\/jobs\/[^/]+\/events$/.test(url.pathname)){
+        if(jobLogError) return route.fulfill({status:503,json:{error:'fixture log unavailable'}});
+        const id=decodeURIComponent(url.pathname.split('/')[4]);
+        const job=fixture?.jobs.find(j=>j.id===id);
+        if(!job) return route.fulfill({status:400,json:{error:'任务不存在'}});
+        const before=url.searchParams.has('before')?Number(url.searchParams.get('before')):Infinity;
+        const events=(jobLogEvents[id]||[]).filter(e=>e.id<before).sort((a,b)=>b.id-a.id);
+        if(jobLogGate){const gate=jobLogGate;jobLogGate=null;await gate;}
+        return route.fulfill({json:{job,events:events.slice(0,100),next_before:events.length>100?events[99].id:null}});
       }
       if(url.pathname==='/pc-deploy/api/dashboard') return route.fulfill({json:fixture||{devices:[],sources:[],profiles:[],jobs:[],events:[],settings,
         boot_files:{wimboot:false,'boot.wim':false,BCD:false,'boot.sdi':false},enrollments:[{id:'a'.repeat(64),expires_at:enrollmentExpires,uses:1}],media,server_time:1793347200}});
@@ -242,7 +254,7 @@ async function run() {
     const failureText='目标磁盘或分区复核、准备失败，已停止\n客户端错误详情：\nError: Access denied\nCommand: Add-PartitionAccessPath\nScript line: 372\n<img src=x onerror="window.logInjected=true">\n'+'x'.repeat(1000);
     fixture.events=[{id:1,kind:'failed',created:1793347200,message:failureText}];
     await page.locator('[data-view=jobs]').click();
-    const failureLog=page.locator('.log span').first();
+    const failureLog=page.locator('.log-message').first();
     assert.equal(await failureLog.textContent(),failureText);checks++;
     assert.equal(await failureLog.evaluate(el=>getComputedStyle(el).whiteSpace),'pre-wrap');checks++;
     assert.equal(await page.locator('.log img').count(),0);checks++;
@@ -289,8 +301,84 @@ async function run() {
     await page.setViewportSize({width:390,height:844});
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));checks++;
 
+
+    // A row opens only its own durable task history, including older attempts on the same PC.
+    fixture.events=[{id:900,job_id:null,kind:'source',created:1793347200,message:'platform source saved'}];
+    fixture.jobs=[{...fixture.jobs[0],id:'progress-job',state:'failed'},
+      {...fixture.jobs[0],id:'older-job',state:'completed',created:1793347100}];
+    jobLogEvents['progress-job']=[{id:306,job_id:'progress-job',kind:'failed',created:1793347400,message:failureText},
+      ...Array.from({length:205},(_,i)=>({id:i+1,job_id:'progress-job',kind:'installing',created:1793347200+i,message:'task step '+i}))];
+    jobLogEvents['older-job']=[];
+    await page.setViewportSize({width:1440,height:1000});
+    await page.locator('#refresh').click();
+    await page.waitForFunction(()=>document.querySelectorAll('[data-action=job-logs]').length===2);
+    assert.equal(await page.locator('[data-action=job-logs]').count(),2);checks++;
+    assert.ok((await page.locator('#page-content').textContent()).includes('平台操作记录'));checks++;
+    assert.ok(!(await page.locator('#page-content').textContent()).includes('Access denied'));checks++;
+    const rowColors=await page.locator('.job-row>td:first-child').evaluateAll(els=>els.map(el=>getComputedStyle(el).borderLeftColor));
+    assert.notEqual(rowColors[0],rowColors[1]);checks++;
+    await page.locator('[data-action=job-logs][data-id=progress-job]').click();
+    await page.locator('#job-log .log').first().waitFor();
+    assert.ok((await page.locator('#job-log').textContent()).includes('TEST-LAPTOP'));checks++;
+    assert.ok((await page.locator('#job-log').textContent()).includes('progress-job'));checks++;
+    assert.equal(await page.locator('#job-log .log').count(),100);checks++;
+    assert.equal(await page.locator('#job-log .log-message').first().textContent(),failureText);checks++;
+    assert.equal(await page.locator('#job-log .log img').count(),0);checks++;
+    assert.equal(await page.locator('#job-log .log-message').first().evaluate(el=>getComputedStyle(el).whiteSpace),'pre-wrap');checks++;
+    assert.notEqual(await page.locator('#job-log .event-bad').first().evaluate(el=>getComputedStyle(el).borderLeftColor),
+      await page.locator('#job-log .event-blue').first().evaluate(el=>getComputedStyle(el).borderLeftColor));checks++;
+    await page.locator('[data-action=older-job-logs]').click();
+    await page.getByText('正在查看历史记录',{exact:true}).waitFor();
+    assert.ok(!(await page.locator('#job-log').textContent()).includes('Access denied'));checks++;
+    await page.locator('[data-action=older-job-logs]').click();
+    await page.locator('[data-action=older-job-logs]').waitFor({state:'visible'});
+    await page.waitForFunction(()=>document.querySelector('#job-log .log-message:last-child') && [...document.querySelectorAll('#job-log .log-message')].some(el=>el.textContent==='task step 0'));
+    assert.ok(await page.locator('[data-action=older-job-logs]').isDisabled());checks++;
+    await page.locator('[data-action=refresh-job-logs]').click();
+    await page.locator('#job-log .event-bad').waitFor();
+    assert.equal(await page.locator('#job-log .log').count(),100);checks++;
+    jobLogError=true;
+    await page.locator('[data-action=refresh-job-logs]').click();
+    await page.locator('#job-log-error:not([hidden])').waitFor();
+    assert.ok((await page.locator('#job-log-error').textContent()).includes('fixture log unavailable'));checks++;
+    assert.equal(await page.locator('#job-log .log-message').first().textContent(),failureText);checks++;
+    jobLogError=false;
+    await page.locator('[data-action=refresh-job-logs]').click();
+    await page.locator('#job-log-error').waitFor({state:'hidden'});
+    await page.setViewportSize({width:390,height:844});
+    assert.ok(await page.locator('#modal').evaluate(el=>el.scrollWidth<=el.clientWidth+1));checks++;
+    await page.locator('#close-modal').click();
+    await page.locator('[data-action=job-logs][data-id=older-job]').click();
+    await page.getByText('此任务暂无操作记录',{exact:true}).waitFor();
+    assert.ok(!(await page.locator('#job-log').textContent()).includes('Access denied'));checks++;
+    await page.locator('#close-modal').click();
+
+    fixture.jobs[0].state='installing';
+    await page.locator('[data-action=job-logs][data-id=progress-job]').click();
+    await page.locator('#job-log .event-bad').waitFor();
+    jobLogEvents['progress-job'].unshift({id:400,job_id:'progress-job',kind:'installing',created:1793347500,message:'automatic task update'});
+    await page.getByText('automatic task update',{exact:true}).waitFor({timeout:12000});
+    assert.equal(await page.locator('#job-log .log-message').first().textContent(),'automatic task update');checks++;
+    await page.locator('#close-modal').click();
+
+    // Late requests from a closed task must not replace another task's dialog.
+    let releaseLog;
+    jobLogGate=new Promise(resolve=>{releaseLog=resolve;});
+    const pendingLog=page.waitForRequest(r=>r.url().includes('/jobs/older-job/events'));
+    await page.locator('[data-action=job-logs][data-id=older-job]').click();
+    await pendingLog;
+    await page.locator('#close-modal').click();
+    await page.locator('[data-action=job-logs][data-id=progress-job]').click();
+    await page.getByText('automatic task update',{exact:true}).waitFor();
+    const lateLog=page.waitForResponse(r=>r.url().includes('/jobs/older-job/events'));
+    releaseLog();
+    await lateLog;
+    assert.ok((await page.locator('#job-log').textContent()).includes('progress-job'));checks++;
+    assert.equal(await page.evaluate(()=>window.logInjected),undefined);checks++;
+    await page.locator('#close-modal').click();
+
     assert.deepEqual(errors,[]);checks++;
-    console.log(`${checks} nested menu, embedded page, HTTP form, role, message origin, lifecycle, mobile and WIM restore UI checks passed. No live system contacted.`);
+    console.log(`${checks} nested menu, embedded page, HTTP form, role, message origin, lifecycle, mobile, WIM restore and per-task log UI checks passed. No live system contacted.`);
   }finally{await browser.close();}
 }
 run().catch(error=>{console.error(error);process.exitCode=1;});

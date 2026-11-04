@@ -11,7 +11,7 @@ const embedded = embedParams.get('embedded') === '1' && window.parent !== window
 if (embedded) document.documentElement.classList.add('embedded');
 let csrf = '', data = null, view = Object.hasOwn(labels, embedParams.get('view')) ? embedParams.get('view') : 'devices', busy = false;
 let chosen = new Set(), disks = new Map(), partitions = new Map(), profileId = '', search = '', filter = 'all', previewId = null;
-let toastTimer, settingsDirty = false;
+let toastTimer, settingsDirty = false, jobLog = null;
 
 function toast(message) { $('#toast').textContent = message; $('#toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').hidden = true, 6000); }
 async function api(path, method = 'GET', payload) {
@@ -103,8 +103,50 @@ function renderJobProgress(job) {
     (stopped && percent === null ? '' : '<progress max="100"'+(percent === null ? '' : ' value="'+percent+'"')+' aria-label="'+h(label)+'"></progress>') +
     (Number.isFinite(progress.updated) ? '<small>最后回报：'+h(date(progress.updated))+'</small>' : '')+'</div>';
 }
+function renderLogEvents(events) {
+  const kinds = {queued:['任务确认','muted'],preflight:['安装前检查','blue'],installing:['安装过程','blue'],
+    awaiting_report:['等待回报','warn'],completed:['完成','good'],failed:['失败','bad'],cancelled:['取消','muted'],
+    security:['执行设置','warn'],device:['设备登记','blue'],source:['安装源','blue'],profile:['装机方案','blue'],bootstrap:['启动包','muted']};
+  return events.map(e => {
+    const [label,tone] = Object.hasOwn(kinds,e.kind) ? kinds[e.kind] : ['操作','muted'];
+    return '<div class="log event-'+tone+'"><time>'+h(date(e.created))+'</time><div class="log-content"><span class="badge '+tone+'">'+h(label)+'</span><span class="log-message">'+h(e.message)+'</span></div></div>';
+  }).join('');
+}
+function renderJobLogs() {
+  const current = jobLog;
+  if (!current || !$('#job-log')) return;
+  const result = current.result, job = result?.job;
+  const scroll = $('#modal').scrollTop;
+  $('#job-log').innerHTML = (job ?
+    '<dl class="detail-grid"><div><dt>设备 / 整机序列号</dt><dd>'+h(job.model)+'<br><span class="mono">'+h(job.serial)+'</span></dd></div><div><dt>任务创建时间</dt><dd>'+h(date(job.created))+'</dd></div><div><dt>方案 / 目标盘</dt><dd>'+h(job.profile)+'<br>磁盘 '+h(job.disk.number)+' · '+h(size(job.disk.size_bytes))+'</dd></div><div><dt>任务状态</dt><dd>'+badge(job.state)+renderJobProgress(job)+'</dd></div></dl><p class="job-log-id">任务编号：<span class="mono">'+h(job.id)+'</span></p>' : '') +
+    '<div class="job-log-toolbar"><small>'+(current.before === null ? '最新记录在前 · 进行中每 8 秒刷新' : '正在查看历史记录')+'</small><div><button class="small" data-action="refresh-job-logs" '+(current.busy?'disabled':'')+'>'+(current.before === null?'刷新日志':'返回最新')+'</button> <button class="small" data-action="older-job-logs" '+(current.busy || !result?.next_before?'disabled':'')+'>更早记录</button></div></div>' +
+    '<p id="job-log-error" class="error" role="alert" '+(current.error?'':'hidden')+'>'+h(current.error)+'</p><div class="log-list job-log-list">'+
+    (result ? renderLogEvents(result.events) || empty('此任务暂无操作记录','尚未收到任务日志；已保存的记录不会因其他任务增多而消失。') : '<p class="modal-help">正在读取此任务日志…</p>')+'</div>';
+  $('#modal').scrollTop = scroll;
+}
+async function loadJobLogs(before = null, automatic = false) {
+  const current = jobLog;
+  if (!current || current.busy || !$('#modal').open || !$('#job-log')) return;
+  current.busy = true;
+  if (!automatic) renderJobLogs();
+  try {
+    const result = await api('/api/jobs/'+encodeURIComponent(current.id)+'/events'+(before === null?'':'?before='+encodeURIComponent(before)));
+    if (jobLog !== current || !$('#modal').open || !$('#job-log')) return;
+    current.before = before; current.result = result; current.error = '';
+  } catch (e) {
+    if (jobLog === current) current.error = '日志读取失败：'+e.message;
+  } finally {
+    current.busy = false;
+    if (jobLog === current && $('#modal').open) renderJobLogs();
+  }
+}
+async function openJobLogs(id) {
+  modal('任务操作日志', '<section id="job-log"></section>');
+  jobLog = {id, before:null, result:null, busy:false, error:''};
+  await loadJobLogs();
+}
 function renderJobs() {
-  $('#page-content').innerHTML = `<div class="table-wrap">${data.jobs.length?`<table><thead><tr><th>设备</th><th>方案 / 目标盘</th><th>任务状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody>${data.jobs.map(j=>`<tr><td><span class="cell-title">${h(j.model)}</span><span class="cell-sub mono">${h(j.serial)}</span></td><td>${h(j.profile)}<span class="cell-sub">磁盘 ${j.disk.number} · ${h(size(j.disk.size_bytes))}</span></td><td>${badge(j.state)}${renderJobProgress(j)}${j.stale?'<span class="cell-sub error">长时间未回报，需现场核对</span>':''}</td><td>${h(date(j.created))}</td><td>${['queued','preflight'].includes(j.state)?`<button class="small" data-action="cancel-job" data-id="${h(j.id)}">取消任务</button>`:activeStates.includes(j.state)?`<button class="small" data-action="reconcile-job" data-id="${h(j.id)}">现场核对</button>`:'—'}</td></tr>`).join('')}</tbody></table>`:empty('暂无安装任务')}</div><div class="subheading"><h3>操作记录</h3><small>最近 100 条</small></div><div class="log-list">${data.events.map(e=>`<div class="log"><time>${h(date(e.created))}</time><span>${h(e.message)}</span></div>`).join('') || empty('暂无操作记录')}</div>`;
+  $('#page-content').innerHTML = `<div class="table-wrap">${data.jobs.length?`<table><thead><tr><th>设备</th><th>方案 / 目标盘</th><th>任务状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody>${data.jobs.map(j=>`<tr class="job-row" data-state="${h(j.state)}"><td><span class="cell-title">${h(j.model)}</span><span class="cell-sub mono">${h(j.serial)}</span></td><td>${h(j.profile)}<span class="cell-sub">磁盘 ${j.disk.number} · ${h(size(j.disk.size_bytes))}</span></td><td>${badge(j.state)}${renderJobProgress(j)}${j.stale?'<span class="cell-sub error">长时间未回报，需现场核对</span>':''}</td><td>${h(date(j.created))}</td><td>${['queued','preflight'].includes(j.state)?`<button class="small" data-action="cancel-job" data-id="${h(j.id)}">取消任务</button>`:activeStates.includes(j.state)?`<button class="small" data-action="reconcile-job" data-id="${h(j.id)}">现场核对</button>`:''} <button class="small job-log-button" data-action="job-logs" data-id="${h(j.id)}">查看日志</button></td></tr>`).join('')}</tbody></table>`:empty('暂无安装任务')}</div><div class="subheading"><h3>平台操作记录</h3><small>最近 100 条 · 任务日志请点击对应任务查看</small></div><div class="log-list">${renderLogEvents(data.events) || empty('暂无操作记录')}</div>`;
 }
 
 function validityLabel(days) { return days === null ? '永不过期' : (days ?? 7) + ' 天'; }
@@ -133,7 +175,7 @@ function renderSettings() {
   const s = data.settings;
   $('#page-content').innerHTML = `<div class="settings-layout"><div><form id="settings-form"><section class="section"><h3>部署服务器</h3><div class="field"><label for="public-url">客户端访问地址</label><input id="public-url" name="public_url" value="${h(s.public_url)}" type="url" required><small>内网支持 HTTP，也支持 HTTPS。填写客户端能够访问的完整平台地址。</small></div><div class="field"><label for="ca-pem">HTTPS 内部根 CA 公共证书（可选，PEM）</label><textarea id="ca-pem" name="ca_pem" placeholder="-----BEGIN CERTIFICATE-----">${h(s.ca_pem)}</textarea><small>使用公开信任证书可留空。不要上传私钥、PFX 或域管理员凭据。</small></div><div class="field"><label for="concurrency">同时安装上限</label><input id="concurrency" name="concurrency" type="number" min="1" max="16" value="${s.concurrency}" required></div></section><section class="section"><h3>执行保护</h3><label class="check-label"><input type="checkbox" name="enabled" ${s.enabled?'checked':''}>启用真实任务下发</label><p class="modal-help">关闭后不再授权新安装；已经启动的 Windows Setup 不会被强行中断。</p><label class="check-label"><input name="isolated_network_confirmed" type="checkbox">已确认是隔离的装机网络，安装源账号仅有读取权限</label><div class="field"><label for="enable-confirm">开启时输入 ENABLE</label><input id="enable-confirm" name="confirmation" autocomplete="off" placeholder="ENABLE"></div></section><div class="error" id="settings-error" role="alert"></div><button type="submit" class="primary">保存设置</button></form><section class="section"><h3>准备客户端</h3><button data-action="bootstrap">下载 WinPE 登记与构建包 ↓</button><p class="modal-help">登记凭据有效期 ${h(validityLabel(s.enrollment_days))}；仅用于 PE 报到，不是装机倒计时。只构建 ISO，不格式化 U 盘；已有 Ventoy 可直接存放该 ISO。</p>${renderEnrollments()}</section>${renderMedia()}</div><aside><h3>引导环境</h3><ul class="requirements"><li><span>支持架构</span><span>UEFI x64</span></li><li><span>网络模式</span><span>现有 iPXE / 备用 Ventoy</span></li><li><span>DHCP</span><span>不托管、不修改</span></li><li><span>Windows 安装</span><span>原版 Setup / 封装 WIM 还原</span></li>${Object.entries(data.boot_files).map(([k,v])=>`<li><span class="mono">${h(k)}</span><span>${v?'已准备':'尚未准备'}</span></li>`).join('')}</ul><p class="modal-help">启动文件需由你授权的 ADK / iPXE 环境准备，平台不自动下载或运行未知二进制。</p><a href="/boot.ipxe" download="boot.ipxe">下载网络启动脚本 ↓</a></aside></div>`;
 }
-function modal(title, html) { $('#modal-title').textContent = title; $('#modal-body').innerHTML = html; $('#modal').showModal(); }
+function modal(title, html) { jobLog = null; $('#modal-title').textContent = title; $('#modal-body').innerHTML = html; $('#modal').showModal(); }
 function field(label, name, type='text', value='', extra='') { const id = `field-${name}`; return `<div class="field"><label for="${id}">${h(label)}</label><input id="${id}" name="${name}" type="${type}" value="${h(value)}" ${extra}></div>`; }
 function editSource(id) {
   const s = data.sources.find(x=>x.id===id);
@@ -201,6 +243,9 @@ document.addEventListener('click', async e=>{
     else if(a==='new-source'||a==='edit-source')editSource(id);
     else if(a==='new-profile'||a==='edit-profile')editProfile(id);
     else if(a==='device-detail')deviceDetail(id);
+    else if(a==='job-logs')await openJobLogs(id);
+    else if(a==='refresh-job-logs')await loadJobLogs();
+    else if(a==='older-job-logs' && jobLog?.result?.next_before)await loadJobLogs(jobLog.result.next_before);
     else if(a==='rearm-device')modal('放行重新登记',`<form id="rearm-form" data-id="${h(id)}"><p>现场核对电脑状态后，允许重新进入 WinPE 登记。旧客户端会话会失效，不会自动创建或执行安装任务。</p>${field('输入 CHECKED','confirmation','text','','required pattern="CHECKED" autocomplete="off"')}<div id="form-error" class="error" role="alert"></div><div class="form-actions"><button type="button" data-action="close">返回</button><button class="primary" type="submit">允许重新登记</button></div></form>`);
     else if(a==='preview')await preview();
     else if(a==='view-jobs'){view='jobs';render();}
@@ -262,7 +307,12 @@ document.addEventListener('submit',async e=>{
 });
 $('#close-modal').addEventListener('click',()=>$('#modal').close());
 $('#refresh').addEventListener('click',refresh);
-setInterval(()=>{if(!document.hidden&&!$('#modal').open)refresh();},8000);
+$('#modal').addEventListener('close',()=>{if(!$('#modal').open)jobLog=null;});
+setInterval(()=>{
+  if (document.hidden) return;
+  if (!$('#modal').open) refresh();
+  else if (jobLog?.before === null && activeStates.includes(jobLog.result?.job.state)) loadJobLogs(null, true);
+},8000);
 window.addEventListener('message', event => {
   if (!embedded || event.origin !== location.origin || event.source !== window.parent) return;
   if (event.data && event.data.type === 'pc-deploy:navigate' && Object.hasOwn(labels, event.data.view)) {

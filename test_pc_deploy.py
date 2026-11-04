@@ -685,28 +685,100 @@ class PlatformTests(unittest.TestCase):
         self.assertIsNone(current['progress'])
         self.assertEqual(current['state'], 'installing')
 
-    def test_dashboard_collapses_legacy_heartbeats_before_log_limit_without_deleting(self):
+    def test_job_logs_collapse_legacy_heartbeats_without_deleting_or_mixing_tasks(self):
+        _, _, job = self.queued()
         with self.store.connect(write=True) as c:
             c.execute('INSERT INTO events(job_id,kind,message,created) VALUES(?,?,?,?)',
-                      ('legacy-a', 'failed', 'older important diagnostic', time.time()))
+                      (job, 'failed', 'older important diagnostic', time.time()))
             for index in range(250):
-                for job in ('legacy-a', 'legacy-b'):
+                for identity in (job, 'another-job'):
                     c.execute('INSERT INTO events(job_id,kind,message,created) VALUES(?,?,?,?)',
-                              (job, 'installing', '正在还原封装 WIM', time.time()))
+                              (identity, 'installing', '正在还原封装 WIM', time.time()))
             c.execute('INSERT INTO events(job_id,kind,message,created) VALUES(?,?,?,?)',
-                      ('legacy-a', 'note', 'keep this intervening event', time.time()))
+                      (job, 'note', 'keep this intervening event', time.time()))
             c.execute('INSERT INTO events(job_id,kind,message,created) VALUES(?,?,?,?)',
-                      ('legacy-a', 'installing', '正在还原封装 WIM', time.time()))
+                      (job, 'installing', '正在还原封装 WIM', time.time()))
             count = c.execute('SELECT COUNT(*) FROM events').fetchone()[0]
-        events = self.client.get('/pc-deploy/api/dashboard').json['events']
+        events = self.client.get(f'/pc-deploy/api/jobs/{job}/events').json['events']
         self.assertIn('older important diagnostic', [e['message'] for e in events])
         self.assertIn('keep this intervening event', [e['message'] for e in events])
-        self.assertEqual(sum(e['job_id'] == 'legacy-a' and e['kind'] == 'installing' for e in events), 2)
-        self.assertEqual(sum(e['job_id'] == 'legacy-b' and e['kind'] == 'installing' for e in events), 1)
+        self.assertEqual(sum(e['kind'] == 'installing' for e in events), 2)
+        self.assertTrue(all(e['job_id'] == job for e in events))
         with self.store.connect() as c:
             self.assertEqual(c.execute('SELECT COUNT(*) FROM events').fetchone()[0], count)
 
-    def test_failure_details_reach_dashboard_without_exposing_job_secrets(self):
+
+    def test_task_history_is_paged_by_job_even_for_the_same_device(self):
+        _, _, job = self.queued()
+        other = str(uuid.uuid4())
+        with self.store.connect(write=True) as c:
+            c.execute("""INSERT INTO jobs SELECT ?,device_id,boot_id,'failed',data,secret,created-60,
+                         updated,expires FROM jobs WHERE id=?""", (other, job))
+            for index in range(205):
+                c.execute('INSERT INTO events(job_id,kind,message,created) VALUES(?,?,?,?)',
+                          (job, 'note', 'task entry ' + str(index), time.time()))
+            for index in range(250):
+                c.execute('INSERT INTO events(job_id,kind,message,created) VALUES(?,?,?,?)',
+                          (other, 'failed', 'other task entry ' + str(index), time.time()))
+        first = self.client.get(f'/pc-deploy/api/jobs/{job}/events').json
+        self.assertEqual(first['job']['id'], job)
+        self.assertEqual(len(first['events']), 100)
+        self.assertIsNotNone(first['next_before'])
+        self.assertNotIn('secret', first['job'])
+        with self.store.connect(write=True) as c:
+            c.execute('INSERT INTO events(job_id,kind,message,created) VALUES(?,?,?,?)',
+                      (job, 'note', 'new head while paging', time.time()))
+        events = list(first['events'])
+        cursor = first['next_before']
+        while cursor is not None:
+            page = self.client.get(f'/pc-deploy/api/jobs/{job}/events?before={cursor}').json
+            self.assertTrue(all(e['id'] < cursor for e in page['events']))
+            events.extend(page['events'])
+            cursor = page['next_before']
+        self.assertEqual(len(events), 206)  # 205 diagnostic rows plus original confirmation.
+        self.assertEqual(len({e['id'] for e in events}), len(events))
+        self.assertTrue(all(e['job_id'] == job for e in events))
+        self.assertIn('task entry 0', [e['message'] for e in events])
+        self.assertNotIn('new head while paging', [e['message'] for e in events])
+        latest = self.client.get(f'/pc-deploy/api/jobs/{job}/events').json
+        self.assertEqual(latest['events'][0]['message'], 'new head while paging')
+        other_result = self.client.get(f'/pc-deploy/api/jobs/{other}/events').json
+        self.assertEqual(other_result['job']['device_id'], first['job']['device_id'])
+        self.assertTrue(all(e['job_id'] == other for e in other_result['events']))
+        dashboard = self.client.get('/pc-deploy/api/dashboard').json
+        self.assertTrue(all(e['job_id'] is None for e in dashboard['events']))
+        self.assertTrue(any(e['kind'] == 'source' for e in dashboard['events']))
+
+    def test_job_event_history_requires_admin_and_rejects_invalid_cursors(self):
+        _, reg, job = self.queued()
+        route = f'/pc-deploy/api/jobs/{job}/events'
+        self.assertEqual(self.app.test_client().get(route, headers={'Authorization':'Bearer '+reg['token']}).status_code, 401)
+        with self.client.session_transaction() as s:
+            s['admin_role'] = 'readonly'
+        self.assertEqual(self.client.get(route).status_code, 403)
+        with self.client.session_transaction() as s:
+            s['admin_role'] = 'super_admin'
+        for before in ('', '0', '-1', '1.5', 'abc', '9223372036854775808', '9'*100):
+            self.assertEqual(self.client.get(route, query_string={'before':before}).status_code, 400)
+        self.assertEqual(self.client.get('/pc-deploy/api/jobs/missing/events').status_code, 400)
+
+    def test_job_history_pagination_collapses_heartbeats_before_the_cursor(self):
+        _, _, job = self.queued()
+        with self.store.connect(write=True) as c:
+            for _ in range(250):
+                c.execute('INSERT INTO events(job_id,kind,message,created) VALUES(?,?,?,?)',
+                          (job, 'installing', '正在还原封装 WIM', time.time()))
+            for index in range(100):
+                c.execute('INSERT INTO events(job_id,kind,message,created) VALUES(?,?,?,?)',
+                          (job, 'note', 'after heartbeat ' + str(index), time.time()))
+        route = f'/pc-deploy/api/jobs/{job}/events'
+        first = self.client.get(route).json
+        second = self.client.get(route, query_string={'before':first['next_before']}).json
+        self.assertEqual(len(first['events']), 100)
+        self.assertEqual(sum(e['kind'] == 'installing' for e in second['events']), 1)
+        self.assertIsNone(second['next_before'])
+
+    def test_failure_details_reach_job_logs_without_exposing_job_secrets(self):
         inv, reg, job = self.queued()
         self.post('/pc-deploy/api/agent/poll', inv, reg['token'])
         self.assertEqual(self.post(f'/pc-deploy/api/agent/jobs/{job}/start', inv, reg['token']).status_code, 200)
@@ -719,12 +791,14 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.json)
         dashboard = self.client.get('/pc-deploy/api/dashboard').json
         self.assertEqual(dashboard['jobs'][0]['state'], 'failed')
-        message = next(e['message'] for e in dashboard['events'] if e['kind'] == 'failed')
+        history = self.client.get(f'/pc-deploy/api/jobs/{job}/events').json
+        message = next(e['message'] for e in history['events'] if e['kind'] == 'failed')
         self.assertIn('客户端错误详情：\nError: access path denied', message)
         self.assertIn('Command: Add-PartitionAccessPath\nScript line: 372', message)
         self.assertIn('[REDACTED]', message)
         for value in sensitive:
             self.assertNotIn(value, json.dumps(dashboard))
+            self.assertNotIn(value, json.dumps(history))
 
     def test_failure_details_are_bounded_and_control_characters_removed(self):
         inv, reg, job = self.wim_queued('system_partition')
@@ -733,7 +807,7 @@ class PlatformTests(unittest.TestCase):
         response = self.post(f'/pc-deploy/api/agent/jobs/{job}/event',
                              dict(code='DISK_CHANGED', detail='Error:\r\n\x00access denied\t' + 'x' * 12000), reg['token'])
         self.assertEqual(response.status_code, 200, response.json)
-        events = self.client.get('/pc-deploy/api/dashboard').json['events']
+        events = self.client.get(f'/pc-deploy/api/jobs/{job}/events').json['events']
         message = next(e['message'] for e in events if e['kind'] == 'failed')
         detail = message.split('\n客户端错误详情：\n', 1)[1]
         self.assertLessEqual(len(detail), 8192)
@@ -750,7 +824,7 @@ class PlatformTests(unittest.TestCase):
                 response = self.post(f'/pc-deploy/api/agent/jobs/{job}/event',
                                      dict(code='DISK_CHANGED', detail=detail), reg['token'])
                 self.assertEqual(response.status_code, 200, response.json)
-                events = self.client.get('/pc-deploy/api/dashboard').json['events']
+                events = self.client.get(f'/pc-deploy/api/jobs/{job}/events').json['events']
                 self.assertIn('客户端未上报有效错误详情', events[0]['message'])
                 self.assertEqual(events[0]['kind'], 'failed')
 

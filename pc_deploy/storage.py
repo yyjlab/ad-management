@@ -29,6 +29,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS one_active_job ON jobs(device_id)
  WHERE state IN ('queued','preflight','installing','awaiting_report');
 CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, job_id TEXT, kind TEXT NOT NULL,
  message TEXT NOT NULL, created REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS events_by_job ON events(job_id,id);
 CREATE TABLE IF NOT EXISTS enrollments (token_hash TEXT PRIMARY KEY, expires REAL NOT NULL,
  uses INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS media_builders (

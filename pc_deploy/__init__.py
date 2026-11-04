@@ -245,6 +245,14 @@ def register_pc_deploy(host_app, current_user, touch_session):
         return jsonify(authenticated=True, username=g.pc_deploy_operator,
                        csrf=session['pc_deploy_csrf'], test_mode=host_app.testing)
 
+    def public_job(row, now):
+        data = json.loads(row['data'])
+        return dict(id=row['id'], device_id=row['device_id'], serial=data['target']['serial'],
+                    model=data['target']['model'], disk=data['target']['disk'], profile=data['profile']['name'],
+                    state=row['state'], state_name=STATES[row['state']], created=row['created'],
+                    updated=row['updated'], stale=row['state'] in ACTIVE and now-row['updated'] > 600,
+                    progress=data.get('progress'))
+
     @app.get('/api/dashboard')
     @admin
     def dashboard():
@@ -258,36 +266,44 @@ def register_pc_deploy(host_app, current_user, touch_session):
                 devices.append(item)
             sources = [dict(json.loads(r['data']), has_password=True) for r in c.execute('SELECT data FROM sources')]
             profiles = [dict(json.loads(r['data']), has_password=True) for r in c.execute('SELECT data FROM profiles')]
-            jobs = []
-            for r in c.execute('SELECT * FROM jobs ORDER BY created DESC LIMIT 200'):
-                d = json.loads(r['data'])
-                jobs.append(dict(id=r['id'], device_id=r['device_id'], serial=d['target']['serial'],
-                                 model=d['target']['model'], disk=d['target']['disk'], profile=d['profile']['name'],
-                                 state=r['state'], state_name=STATES[r['state']], created=r['created'],
-                                 updated=r['updated'], stale=r['state'] in ACTIVE and now-r['updated'] > 600,
-                                 progress=d.get('progress')))
+            jobs = [public_job(r, now) for r in c.execute('SELECT * FROM jobs ORDER BY created DESC LIMIT 200')]
             settings = {k: store.setting(c, k) for k in ('public_url', 'enabled', 'concurrency', 'ca_pem')}
             settings['enrollment_days'] = store.setting(c, 'enrollment_days', 7)
             media = media_dashboard(c)
             enrollments = [dict(id=r['token_hash'], expires_at=None if r['expires'] == -1 else r['expires'], uses=r['uses'])
                            for r in c.execute('SELECT * FROM enrollments ORDER BY expires DESC')]
-            # Collapse legacy per-job progress heartbeats before applying the 100-record limit.
-            # Raw audit rows remain intact, including repeated messages separated by a real event.
-            logs = [dict(r) for r in c.execute("""
-                WITH ordered AS (
-                    SELECT *, LAG(kind) OVER (PARTITION BY job_id ORDER BY id DESC) AS newer_kind,
-                           LAG(message) OVER (PARTITION BY job_id ORDER BY id DESC) AS newer_message
-                    FROM events
-                )
-                SELECT id,job_id,kind,message,created FROM ordered
-                WHERE NOT (job_id IS NOT NULL AND kind='installing' AND message IN (?,?)
-                           AND newer_kind IS kind AND newer_message IS message)
-                ORDER BY id DESC LIMIT 100
-            """, ('正在还原封装 WIM', '正在配置系统引导与安装后回报'))]
+            logs = [dict(r) for r in c.execute(
+                'SELECT id,job_id,kind,message,created FROM events WHERE job_id IS NULL ORDER BY id DESC LIMIT 100')]
         boot = store.root / 'boot'
         files = {n: (boot / n).is_file() for n in ('wimboot', 'boot.wim', 'BCD', 'boot.sdi')}
         return jsonify(devices=devices, sources=sources, profiles=profiles, jobs=jobs, settings=settings,
                        events=logs, boot_files=files, server_time=now, enrollments=enrollments, media=media)
+
+    @app.get('/api/jobs/<identity>/events')
+    @admin
+    def job_events(identity):
+        before = request.args.get('before')
+        if before is not None:
+            if not re.fullmatch(r'[1-9][0-9]{0,18}', before) or int(before) > 9223372036854775807:
+                raise Invalid('日志分页位置无效')
+            before = int(before)
+        with store.connect() as c:
+            row, _ = load(c, 'jobs', identity)
+            # Collapse old heartbeats within this job before paging, without deleting audit rows.
+            logs = [dict(r) for r in c.execute("""
+                WITH ordered AS (
+                    SELECT *, LAG(kind) OVER (ORDER BY id DESC) AS newer_kind,
+                           LAG(message) OVER (ORDER BY id DESC) AS newer_message
+                    FROM events WHERE job_id=?
+                )
+                SELECT id,job_id,kind,message,created FROM ordered
+                WHERE NOT (kind='installing' AND message IN (?,?)
+                           AND newer_kind IS kind AND newer_message IS message)
+                  AND (? IS NULL OR id<?)
+                ORDER BY id DESC LIMIT 101
+            """, (identity, '正在还原封装 WIM', '正在配置系统引导与安装后回报', before, before))]
+            job = public_job(row, time.time())
+        return jsonify(job=job, events=logs[:100], next_before=logs[99]['id'] if len(logs) > 100 else None)
 
     @app.post('/api/sources')
     @app.put('/api/sources/<identity>')
