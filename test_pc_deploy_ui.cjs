@@ -315,7 +315,7 @@ async function run() {
     assert.equal(await page.locator('[data-action=job-logs]').count(),2);checks++;
     assert.ok((await page.locator('#page-content').textContent()).includes('平台操作记录'));checks++;
     assert.ok(!(await page.locator('#page-content').textContent()).includes('Access denied'));checks++;
-    const rowColors=await page.locator('.job-row>td:first-child').evaluateAll(els=>els.map(el=>getComputedStyle(el).borderLeftColor));
+    const rowColors=await page.locator('.job-row>td:nth-child(3)>.badge').evaluateAll(els=>els.map(el=>getComputedStyle(el).color));
     assert.notEqual(rowColors[0],rowColors[1]);checks++;
     await page.locator('[data-action=job-logs][data-id=progress-job]').click();
     await page.locator('#job-log .log').first().waitFor();
@@ -325,8 +325,8 @@ async function run() {
     assert.equal(await page.locator('#job-log .log-message').first().textContent(),failureText);checks++;
     assert.equal(await page.locator('#job-log .log img').count(),0);checks++;
     assert.equal(await page.locator('#job-log .log-message').first().evaluate(el=>getComputedStyle(el).whiteSpace),'pre-wrap');checks++;
-    assert.notEqual(await page.locator('#job-log .event-bad').first().evaluate(el=>getComputedStyle(el).borderLeftColor),
-      await page.locator('#job-log .event-blue').first().evaluate(el=>getComputedStyle(el).borderLeftColor));checks++;
+    assert.notEqual(await page.locator('#job-log .event-bad .badge').first().evaluate(el=>getComputedStyle(el).color),
+      await page.locator('#job-log .event-blue .badge').first().evaluate(el=>getComputedStyle(el).color));checks++;
     await page.locator('[data-action=older-job-logs]').click();
     await page.getByText('正在查看历史记录',{exact:true}).waitFor();
     assert.ok(!(await page.locator('#job-log').textContent()).includes('Access denied'));checks++;

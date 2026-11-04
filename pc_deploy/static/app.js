@@ -99,14 +99,15 @@ function renderJobProgress(job) {
   const completed = job.state === 'completed', stopped = ['failed','cancelled'].includes(job.state);
   const percent = completed ? 100 : progress.stage === 'applying' && Number.isInteger(progress.percent) && progress.percent >= 0 && progress.percent <= 100 ? progress.percent : null;
   const label = completed ? '安装后系统已回报' : (stopped ? '已停止 · ' : '') + stages[progress.stage];
-  return '<div class="job-progress'+(stopped?' stopped':'')+'"><span>'+h(label)+(percent === null ? '' : ' · '+percent+'%')+'</span>' +
+  const tone = completed ? ' completed' : job.state === 'failed' ? ' stopped' : job.state === 'cancelled' ? ' cancelled' : progress.stage === 'awaiting_report' ? ' pending' : '';
+  return '<div class="job-progress'+tone+'"><span>'+h(label)+(percent === null ? '' : ' · '+percent+'%')+'</span>' +
     (stopped && percent === null ? '' : '<progress max="100"'+(percent === null ? '' : ' value="'+percent+'"')+' aria-label="'+h(label)+'"></progress>') +
     (Number.isFinite(progress.updated) ? '<small>最后回报：'+h(date(progress.updated))+'</small>' : '')+'</div>';
 }
 function renderLogEvents(events) {
   const kinds = {queued:['任务确认','muted'],preflight:['安装前检查','blue'],installing:['安装过程','blue'],
     awaiting_report:['等待回报','warn'],completed:['完成','good'],failed:['失败','bad'],cancelled:['取消','muted'],
-    security:['执行设置','warn'],device:['设备登记','blue'],source:['安装源','blue'],profile:['装机方案','blue'],bootstrap:['启动包','muted']};
+    security:['执行设置','warn'],device:['设备登记','muted'],source:['安装源','muted'],profile:['装机方案','muted'],bootstrap:['启动包','muted']};
   return events.map(e => {
     const [label,tone] = Object.hasOwn(kinds,e.kind) ? kinds[e.kind] : ['操作','muted'];
     return '<div class="log event-'+tone+'"><time>'+h(date(e.created))+'</time><div class="log-content"><span class="badge '+tone+'">'+h(label)+'</span><span class="log-message">'+h(e.message)+'</span></div></div>';
