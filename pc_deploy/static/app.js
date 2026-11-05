@@ -167,7 +167,29 @@ function duration(seconds) {
   const total = Math.max(0, Math.floor(seconds)), hours = Math.floor(total/3600), minutes = Math.floor(total%3600/60);
   return (hours ? hours+'小时'+String(minutes).padStart(2,'0') : minutes)+'分'+String(total%60).padStart(2,'0')+'秒';
 }
+function renderPhasedJobTiming(job) {
+  const t=job.timings, stamp=value=>Number.isFinite(value)&&value>0?value:null;
+  const terminal=!activeStates.includes(job.state), finished=stamp(t.finished_at);
+  const requested=stamp(t.requested_at) ?? job.created, restored=stamp(t.restore_finished_at);
+  const ready=stamp(t.windows_ready_at), joinStart=stamp(t.join_started_at), joinEnd=stamp(t.join_finished_at);
+  const row=(key,label,start,end,placeholder='未开始',missing=false)=>{
+    if (missing) return '<div class="job-time-row"><span>'+label+'</span><b>缺少阶段回报</b></div>';
+    if (start===null) return '<div class="job-time-row"><span>'+label+'</span><b>'+placeholder+'</b></div>';
+    const active=end===null&&!terminal, until=end ?? (terminal?finished:null);
+    return '<div class="job-time-row"><span>'+label+'</span><b data-phase-timer="'+key+'" data-start="'+h(start)+'" data-end="'+h(until ?? '')+'" data-active="'+active+'" data-complete="'+(end!==null)+'" data-stopped="'+(terminal&&end===null)+'"></b></div>';
+  };
+  return '<div class="job-timing phased" data-state="'+h(job.state)+'">'+
+    row('restore','① 还原及重启准备',requested,restored,'未开始',restored===null&&ready!==null)+
+    row('windows','② 系统启动',restored,ready,'未开始',restored===null&&ready!==null)+
+    (t.join_enabled?row('join','③ 加域及验证',joinStart,joinEnd,t.waiting_for_release?'等待统一加域':'未开始'):
+      '<div class="job-time-row"><span>③ 加域及验证</span><b>未启用</b></div>')+
+    '<strong data-job-timer data-start="'+h(requested)+'" data-end="'+h(finished ?? '')+'" data-installed="true" data-active="'+!terminal+'" data-timer-label="④ 总耗时 "></strong>'+
+    '<small>下发：'+h(date(requested))+'</small>'+
+    (t.waiting_for_release?'<small>总耗时包含等待统一加域</small>':'')+
+    '<small class="duration-warning" hidden>已超过 10 分钟，请查看当前阶段与日志</small></div>';
+}
 function renderJobTiming(job) {
+  if (job.timings) return renderPhasedJobTiming(job);
   const started = Number.isFinite(job.started_at) && job.started_at > 0 ? job.started_at : null;
   const installedAt = Number.isFinite(job.installed_at) ? job.installed_at : null;
   const active = activeStates.includes(job.state) && installedAt === null;
@@ -196,6 +218,10 @@ function updateJobTimers() {
     const overdue = active && installed && seconds > 600;
     el.parentElement.classList.toggle('overdue', overdue);
     el.parentElement.querySelector('.duration-warning').hidden = !overdue;
+  });
+  document.querySelectorAll('[data-phase-timer]').forEach(el => {
+    const end=el.dataset.active==='true'?now:Number(el.dataset.end);
+    el.textContent=duration(end-Number(el.dataset.start));
   });
   document.querySelectorAll('[data-followup-timer]').forEach(el => {
     const end=el.dataset.active==='true'?now:Number(el.dataset.end);

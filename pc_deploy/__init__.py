@@ -318,20 +318,30 @@ def register_pc_deploy(host_app, current_user, touch_session):
                           partition_count=len(disk['partitions']) if 'partitions' in disk else None)
                           for disk in display.get('disks', [])]
         detail['system_info'] = data.get('system_info') or display.get('system_info', {})
+        finished = None if row['state'] in ACTIVE else timing.get('finished_at') or row['updated']
+        ready = data.get('installed_at') or timing.get('windows_reported_at')
+        joining = data.get('domain_join') or {}
+        manual = (data['profile'].get('domain_join') or {}).get('mode') == 'manual'
+        join_started = (joining.get('released_at') if manual else ready) if joining else None
+        phases = dict(requested_at=row['created'], restore_finished_at=timing.get('deployment_finished_at'),
+                      windows_ready_at=ready, join_enabled=bool(joining),
+                      join_started_at=join_started, join_finished_at=finished if join_started else None,
+                      waiting_for_release=bool(manual and ready and not join_started and finished is None),
+                      finished_at=finished) if data['source'].get('kind') == 'wim' else None
         return dict(id=row['id'], device_id=row['device_id'], serial=data['target']['serial'],
                     model=display.get('model') or data['target']['model'], disk=data['target']['disk'], profile=data['profile']['name'],
                     state=row['state'], state_name=STATES[row['state']], created=row['created'],
                     updated=row['updated'], stale=row['state'] in ACTIVE and now-row['updated'] > 600,
                     progress=data.get('progress'), kind=data['source'].get('kind', 'setup'), review=data.get('review'),
                     domain_join=data.get('domain_join'), computer_name=data['target'].get('computer_name'),
-                    installed_at=data.get('installed_at') or timing.get('windows_reported_at'),
+                    installed_at=ready, timings=phases,
                     image_applied_at=timing.get('image_applied_at'),
                     deployment_finished_at=timing.get('deployment_finished_at'),
                     expires_at=row['expires'], device_info=detail,
                     **{k: display.get(k, '') for k in
                        ('manufacturer', 'system_family', 'product_name', 'product_version', 'oem_model')},
                     started_at=timing.get('started_at'),
-                    finished_at=None if row['state'] in ACTIVE else timing.get('finished_at') or row['updated'])
+                    finished_at=finished)
 
     @app.get('/api/dashboard')
     @admin

@@ -1316,6 +1316,72 @@ function Start-ScheduledTask {}
         return inv, reg, result.json['ids'][0]
 
 
+    def test_four_phase_timing_starts_at_dispatch_and_freezes_each_stage(self):
+        from unittest.mock import patch
+        inv, reg, job, token, _ = self.join_fixtures(wim=True)
+        route = f'/pc-deploy/api/agent/jobs/{job}'
+        initial = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
+        self.assertEqual(initial['timings']['requested_at'], initial['created'])
+        self.assertIsNone(initial['timings']['restore_finished_at'])
+        self.assertIsNone(initial['timings']['join_started_at'])
+        now = time.time()
+        with patch('pc_deploy.time.time', return_value=now+100):
+            self.assertEqual(self.join_post(route+'/event', dict(stage='boot_files'), reg['token']).status_code, 200)
+        with patch('pc_deploy.time.time', return_value=now+120):
+            self.assertEqual(self.join_post(route+'/event', dict(stage='awaiting_report'), reg['token']).status_code, 200)
+        restored = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]['timings']
+        self.assertEqual(restored['restore_finished_at'], now+120)
+        self.assertIsNone(restored['windows_ready_at'])
+        with patch('pc_deploy.time.time', return_value=now+180):
+            self.assertEqual(self.join_post(route+'/domain-join/status',
+                dict(hardware_uuid=inv['hardware_uuid'], stage='checking'), token).status_code, 200)
+        ready = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]['timings']
+        self.assertEqual(ready['windows_ready_at'], now+180)
+        self.assertEqual(ready['join_started_at'], now+180)
+        self.assertIsNone(ready['join_finished_at'])
+        verified = dict(hardware_uuid=inv['hardware_uuid'], stage='verified',
+                        domain='corp.test', computer_name='WFQ101755', secure_channel=True)
+        with patch('pc_deploy.time.time', return_value=now+220):
+            self.assertEqual(self.join_post(route+'/domain-join/status', verified, token).status_code, 200)
+        with self.store.connect() as c:
+            data = json.loads(c.execute('SELECT data FROM jobs WHERE id=?', (job,)).fetchone()['data'])
+        build = next(image['build'] for image in data['source']['images'] if image['index'] == data['profile']['image_index'])
+        finished = dict(hardware_uuid=inv['hardware_uuid'], computer_name='WFQ101755', os_build=build,
+                        image_state='IMAGE_STATE_COMPLETE', oobe_done=True,
+                        domain_name='corp.test', domain_join_verified=True)
+        with patch('pc_deploy.time.time', return_value=now+221):
+            self.assertEqual(self.join_post(route+'/finish', finished, token).status_code, 200)
+        final = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]['timings']
+        self.assertEqual(final['restore_finished_at'], now+120)
+        self.assertEqual(final['windows_ready_at'], now+180)
+        self.assertEqual(final['join_started_at'], now+180)
+        self.assertEqual(final['join_finished_at'], now+221)
+        self.assertEqual(final['finished_at'], now+221)
+        self.assertEqual(self.client.get(f'/pc-deploy/api/jobs/{job}/events').json['job']['timings'], final)
+
+    def test_manual_join_timer_starts_only_at_release(self):
+        from unittest.mock import patch
+        inv, _, job, token, _ = self.join_fixtures(wim=True, manual=True)
+        with self.store.connect() as c:
+            data = json.loads(c.execute('SELECT data FROM jobs WHERE id=?', (job,)).fetchone()['data'])
+        build = next(image['build'] for image in data['source']['images'] if image['index'] == data['profile']['image_index'])
+        ready = dict(hardware_uuid=inv['hardware_uuid'], computer_name='OLD-IMAGE',
+                     os_build=build, image_state='IMAGE_STATE_COMPLETE', oobe_done=True)
+        now = time.time()
+        with patch('pc_deploy.time.time', return_value=now+10):
+            self.assertEqual(self.join_post(f'/pc-deploy/api/agent/jobs/{job}/domain-join/config', ready, token).status_code, 200)
+        waiting = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]['timings']
+        self.assertTrue(waiting['waiting_for_release'])
+        self.assertIsNone(waiting['join_started_at'])
+        self.assertIsNone(waiting['finished_at'])
+        with patch('pc_deploy.time.time', return_value=now+310):
+            self.assertEqual(self.join_post('/pc-deploy/api/jobs/domain-join/release',
+                dict(job_ids=[job], restart_confirmed=True)).status_code, 200)
+        released = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]['timings']
+        self.assertEqual(released['windows_ready_at'], now+10)
+        self.assertEqual(released['join_started_at'], now+310)
+        self.assertFalse(released['waiting_for_release'])
+
     def test_wim_phase_timing_stops_restore_without_claiming_windows_ready(self):
         inv, reg, job = self.wim_queued()
         route = f'/pc-deploy/api/agent/jobs/{job}'
