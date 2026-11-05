@@ -70,7 +70,7 @@ function firmwareText(value) {
   return /^(unknown|none|not (?:specified|applicable)|default string|system (?:manufacturer|family|product name|version)|to be filled by o\.?e\.?m\.?)$/i.test(text) ? '' : text;
 }
 function knownModel(raw, vendor) {
-  // Huawei's official model list maps HKD to MateBook 14s; keep the firmware code for verification.
+  // Huawei's official model list maps HKD to MateBook 14s.
   // https://consumer.huawei.com/cn/support/content/zh-cn15945089/
   return /^HKD(?:-|$)/i.test(raw)&&(!vendor||/huawei|华为/i.test(vendor))?'HUAWEI MateBook 14s':'';
 }
@@ -86,7 +86,6 @@ function deviceLabel(device) {
   if (vendor && !main.toLowerCase().includes(vendor.toLowerCase())) parts.push(vendor);
   if (code && family && !main.toLowerCase().includes(family.toLowerCase())) parts.push(family);
   parts.push(main);
-  if (main !== raw && !main.toLowerCase().includes(raw.toLowerCase())) parts.push('('+raw+')');
   return parts.join(' ');
 }
 function modelHint(device) {
