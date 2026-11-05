@@ -303,12 +303,15 @@ def finalizer_command(config):
     script = (Path(__file__).parent / 'agent' / 'Finalize.ps1').read_text(encoding='utf-8-sig')
     script_b64 = base64.b64encode(script.encode()).decode()
     config_b64 = base64.b64encode(canonical(config).encode()).decode()
+    config_write = f"[IO.File]::WriteAllBytes((Join-Path $p 'config.json'),[Convert]::FromBase64String('{config_b64}'))"
     script_write = f"[IO.File]::WriteAllBytes((Join-Path $p 'Finalize.ps1'),[Convert]::FromBase64String('{script_b64}'))"
     if config.get('domain_join'):
         helper = (Path(__file__).parent / 'agent' / 'DomainJoin.ps1').read_bytes()
         helper_b64 = base64.b64encode(gzip.compress(helper)).decode()
         finalizer_b64 = base64.b64encode(gzip.compress(script.encode())).decode()
-        # Compress both scripts so a real HTTPS root certificate still fits the command limit.
+        # Compress scripts and configuration so HTTPS certificates fit the command limit.
+        compressed_config = base64.b64encode(gzip.compress(canonical(config).encode())).decode()
+        config_write = f"Write-DeploymentScript 'config.json' '{compressed_config}'"
         script_write = f"""function Write-DeploymentScript($name,$encoded) {{
 $m=[IO.MemoryStream]::new([Convert]::FromBase64String($encoded))
 $z=[IO.Compression.GZipStream]::new($m,[IO.Compression.CompressionMode]::Decompress)
@@ -324,7 +327,7 @@ New-Item -ItemType Directory -Path $p -Force | Out-Null
 & icacls.exe $p /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
 if($LASTEXITCODE -ne 0){{throw 'Cannot protect finalizer directory'}}
 {script_write}
-[IO.File]::WriteAllBytes((Join-Path $p 'config.json'),[Convert]::FromBase64String('{config_b64}'))
+{config_write}
 $a=New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -ExecutionPolicy Bypass -File "'+$p+'\\Finalize.ps1"')
 $t=New-ScheduledTaskTrigger -AtStartup
 Register-ScheduledTask -TaskName 'PCDeploy-{config['job_id']}' -Action $a -Trigger $t -User 'SYSTEM' -RunLevel Highest -Force | Out-Null

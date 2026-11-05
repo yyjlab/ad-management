@@ -280,18 +280,35 @@ def register_pc_deploy(host_app, current_user, touch_session):
             FROM events WHERE job_id IN ({placeholders}) GROUP BY job_id
         """, identities)}
 
+    def completion_display(job, value):
+        incoming = value.get('device_info')
+        if not isinstance(incoming, dict):
+            return False
+        fields = ('model', 'manufacturer', 'system_family', 'product_name', 'product_version', 'oem_model')
+        clean = {}
+        for key in fields:
+            raw = incoming.get(key)
+            if isinstance(raw, str):
+                item = re.sub(r'[\x00-\x1f\x7f]', ' ', raw).strip()[:160]
+                if item:
+                    clean[key] = item
+        before = dict(job.get('display_info', {}))
+        job.setdefault('display_info', {}).update(clean)
+        return before != job['display_info']
+
     def public_job(row, now, timing):
         data = json.loads(row['data'])
         timing = timing or {}
+        display = dict(data['target']['inventory'], **data.get('display_info', {}))
         return dict(id=row['id'], device_id=row['device_id'], serial=data['target']['serial'],
-                    model=data['target']['model'], disk=data['target']['disk'], profile=data['profile']['name'],
+                    model=display.get('model') or data['target']['model'], disk=data['target']['disk'], profile=data['profile']['name'],
                     state=row['state'], state_name=STATES[row['state']], created=row['created'],
                     updated=row['updated'], stale=row['state'] in ACTIVE and now-row['updated'] > 600,
                     progress=data.get('progress'), kind=data['source'].get('kind', 'setup'), review=data.get('review'),
                     domain_join=data.get('domain_join'), computer_name=data['target'].get('computer_name'),
                     installed_at=data.get('installed_at'), expires_at=row['expires'],
-                    **{k: data['target']['inventory'].get(k, '') for k in
-                       ('manufacturer', 'system_family', 'product_name', 'product_version')},
+                    **{k: display.get(k, '') for k in
+                       ('manufacturer', 'system_family', 'product_name', 'product_version', 'oem_model')},
                     started_at=timing.get('started_at'),
                     finished_at=None if row['state'] in ACTIVE else timing.get('finished_at') or row['updated'])
 
@@ -954,6 +971,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
                 now = time.time()
                 current.update(state='waiting_release', os_installed=True, updated=now)
                 job.setdefault('installed_at', now)
+                completion_display(job, value)
                 c.execute('UPDATE jobs SET state=?,data=?,updated=? WHERE id=?',
                           ('awaiting_report', canonical(job), now, identity))
                 if changed:
@@ -962,7 +980,9 @@ def register_pc_deploy(host_app, current_user, touch_session):
             password = secret.get('domain_join_password')
             if not password or current['state'] not in ('pending', 'waiting_release', 'checking', 'joining'):
                 raise Invalid('加域凭据已回收，禁止重新发起加域')
-            result = dict(job['profile']['domain_join'], password=password,
+            if completion_display(job, value):
+                c.execute('UPDATE jobs SET data=?,updated=? WHERE id=?', (canonical(job), time.time(), identity))
+            result = dict(job['profile']['domain_join'], password=password, join_state=current['state'],
                           computer_name=job['target']['computer_name'], employee_id=job['target']['employee_id'])
         return jsonify(result)
 
@@ -1027,6 +1047,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
                     detail = detail.replace(sensitive, '[redacted]')
             detail = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', detail)
             changed = stage != current['state'] or detail != current.get('detail', '')
+            completion_display(job, value)
             current.update(state=stage, detail=detail, updated=time.time(), os_installed=True)
             state = 'failed' if stage == 'failed' else 'awaiting_report'
             if stage in ('restarting', 'verified', 'failed'):
@@ -1071,7 +1092,8 @@ def register_pc_deploy(host_app, current_user, touch_session):
                     or (data['source'].get('kind') == 'wim' and build != next(i['build'] for i in data['source']['images']
                                                         if i['index'] == data['profile']['image_index']))):
                 raise Invalid('安装后系统、设备身份或 OOBE 状态未通过核对')
-            c.execute('UPDATE jobs SET state=?,updated=? WHERE id=?', ('completed', time.time(), identity))
+            completion_display(data, value)
+            c.execute('UPDATE jobs SET state=?,data=?,updated=? WHERE id=?', ('completed', canonical(data), time.time(), identity))
             event(c, 'completed', '安装后客户端报告 OOBE 已结束，系统版本与设备身份匹配；不等于驱动/业务验收', identity)
         return jsonify(ok=True)
 

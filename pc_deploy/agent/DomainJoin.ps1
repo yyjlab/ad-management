@@ -10,9 +10,26 @@ function Assert-JoinTransport {
 function Invoke-JoinService {
     param($Config, [string]$Action, $Payload)
     Assert-JoinTransport $Config
-    Invoke-RestMethod -Method Post -Uri ($Config.server_url + '/api/agent/jobs/' + $Config.job_id + '/domain-join/' + $Action) `
-        -Headers @{Authorization=('Bearer ' + $Config.token)} -ContentType 'application/json' `
-        -Body ($Payload | ConvertTo-Json -Compress) -TimeoutSec 30
+    $json = $Payload | ConvertTo-Json -Depth 8 -Compress
+    Invoke-RestMethod -UseBasicParsing -Method Post -Uri ($Config.server_url + '/api/agent/jobs/' + $Config.job_id + '/domain-join/' + $Action) `
+        -Headers @{Authorization=('Bearer ' + $Config.token)} -ContentType 'application/json; charset=utf-8' `
+        -Body ([Text.Encoding]::UTF8.GetBytes($json)) -TimeoutSec 30
+}
+function Get-JoinFailureDetail {
+    param([Management.Automation.ErrorRecord]$Failure, $Config, [string]$Stage,
+          [string]$Password = '', [string]$Controller = '')
+    $lines = @(('Stage: ' + $Stage), ('Platform: ' + $Config.server_url),
+        ('Target AD domain: ' + $Config.domain_join.domain),
+        ('Domain controller: ' + $(if ($Controller) { $Controller } else { '(not resolved)' })),
+        ('Error: ' + $Failure.Exception.Message),
+        ('Error ID: ' + $Failure.FullyQualifiedErrorId),
+        ('Script line: ' + $Failure.InvocationInfo.ScriptLineNumber))
+    $detail = $lines -join [Environment]::NewLine
+    foreach ($secret in @($Password, $Config.token)) {
+        if ($secret) { $detail = $detail.Replace([string]$secret, '[redacted]') }
+    }
+    if ($detail.Length -gt 4000) { $detail = $detail.Substring(0,4000) }
+    return $detail
 }
 function Save-JoinJournal {
     param([string]$Phase, [string]$Boot, [string]$Detail = '')
@@ -22,6 +39,7 @@ function Save-JoinJournal {
 function Send-JoinState {
     param($Config, [string]$Hardware, [string]$Stage, [string]$Detail = '')
     $payload = @{hardware_uuid=$Hardware; stage=$Stage; detail=$Detail}
+    if ($Config.device_info) { $payload.device_info = $Config.device_info }
     if ($Stage -eq 'verified') {
         $payload.domain = $Config.domain_join.domain
         $payload.computer_name = $Config.domain_join.computer_name
@@ -71,7 +89,7 @@ function Invoke-DeploymentDomainJoin {
     } else { $null }
     $os = Get-CimInstance Win32_OperatingSystem
     $boot = ([DateTime]$os.LastBootUpTime).ToUniversalTime().ToString('o')
-    $configuration = $null; $credential = $null
+    $configuration = $null; $credential = $null; $controller = ''; $operation = 'initial_checks'
     try {
         if ($journal.phase -eq 'failed') {
             Send-JoinState $Config $Hardware 'failed' $journal.detail
@@ -82,7 +100,11 @@ function Invoke-DeploymentDomainJoin {
         if ($edition -match '^(Core|Home)') { throw 'This Windows edition cannot join an AD domain. Use Pro, Enterprise or Education.' }
         if ($journal.phase -in @('joined', 'restart_requested') -and $journal.boot -ceq $boot) {
             if ($journal.phase -eq 'joined') {
-                Send-JoinState $Config $Hardware 'restarting'
+                try { Send-JoinState $Config $Hardware 'restarting' }
+                catch {
+                    Save-JoinJournal 'joined' $boot (Get-JoinFailureDetail $_ $Config 'platform_status_restarting')
+                    return 'wait'
+                }
                 Save-JoinJournal 'restart_requested' $boot
                 Restart-Computer -Force -ErrorAction Stop
             }
@@ -96,9 +118,13 @@ function Invoke-DeploymentDomainJoin {
                 $configuration = Invoke-JoinService $Config 'config' @{
                     hardware_uuid=$Hardware; computer_name=$env:COMPUTERNAME;
                     os_build=[int](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').CurrentBuildNumber;
-                    image_state=$state; oobe_done=($setup.SystemSetupInProgress -eq 0 -and $setup.OOBEInProgress -eq 0)
+                    image_state=$state; oobe_done=($setup.SystemSetupInProgress -eq 0 -and $setup.OOBEInProgress -eq 0);
+                    device_info=$Config.device_info
                 }
-            } catch { return 'wait' }
+            } catch {
+                Save-JoinJournal 'waiting_network' $boot (Get-JoinFailureDetail $_ $Config 'platform_config')
+                return 'wait'
+            }
             if ($configuration.waiting_for_release -is [bool] -and $configuration.waiting_for_release) { return 'wait' }
         }
         $system = Get-CimInstance Win32_ComputerSystem
@@ -112,11 +138,13 @@ function Invoke-DeploymentDomainJoin {
             try { $trusted = [bool](Test-ComputerSecureChannel -ErrorAction Stop) } catch { }
             if (-not $trusted) {
                 $stage = if ($journal.phase -in @('joined', 'restart_requested', 'verified')) { 'restarting' } else { 'checking' }
-                Send-JoinState $Config $Hardware $stage 'Waiting for the domain controller and a valid machine secure channel.'
+                try { Send-JoinState $Config $Hardware $stage 'Waiting for the domain controller and a valid machine secure channel.' }
+                catch { return 'wait' }
                 return 'wait'
             }
             if ($journal.phase -ne 'verified') {
-                Send-JoinState $Config $Hardware 'verified'
+                try { Send-JoinState $Config $Hardware 'verified' }
+                catch { return 'wait' }
                 Save-JoinJournal 'verified' $boot
             }
             return 'ready'
@@ -130,22 +158,36 @@ function Invoke-DeploymentDomainJoin {
             if (-not $record) { throw 'No domain controller SRV record was returned.' }
             $controller = ([string]$record.NameTarget).TrimEnd('.')
         } catch {
-            Send-JoinState $Config $Hardware 'checking' 'Domain DNS lookup failed. Check DHCP/domain DNS; network connectivity alone is insufficient.'
+            $detail = Get-JoinFailureDetail $_ $Config 'domain_dns_lookup'
+            Save-JoinJournal 'waiting_network' $boot $detail
+            try { Send-JoinState $Config $Hardware 'checking' $detail } catch { }
             return 'wait'
         }
-        Send-JoinState $Config $Hardware 'checking'
         if (-not $configuration) {
-            try { $configuration = Invoke-JoinService $Config 'config' @{hardware_uuid=$Hardware} }
-            catch { return 'wait' }
+            try { $configuration = Invoke-JoinService $Config 'config' @{hardware_uuid=$Hardware;device_info=$Config.device_info} }
+            catch {
+                Save-JoinJournal 'waiting_network' $boot (Get-JoinFailureDetail $_ $Config 'platform_config' '' $controller)
+                return 'wait'
+            }
         }
         if ([string]$configuration.domain -cne $domain -or
             [string]$configuration.employee_id -cne [string]$Config.domain_join.employee_id) {
             throw 'Domain join configuration does not match this installation task.'
         }
+        if ($configuration.join_state -ne 'joining') {
+            $previous = if ($journal.phase -eq 'waiting_network') { $journal.detail } else { '' }
+            try { Send-JoinState $Config $Hardware 'checking' $previous }
+            catch {
+                Save-JoinJournal 'waiting_network' $boot (Get-JoinFailureDetail $_ $Config 'platform_status_checking' $configuration.password $controller)
+                return 'wait'
+            }
+            if ($journal.phase -eq 'waiting_network') { Save-JoinJournal 'checking' $boot }
+        }
         Set-JoinComputerName $Config ([string]$configuration.computer_name)
         $name = [string]$Config.domain_join.computer_name
         $secret = ConvertTo-SecureString $configuration.password -AsPlainText -Force
         $credential = New-Object Management.Automation.PSCredential($configuration.username, $secret)
+        $operation = 'ad_computer_name_lookup'
         $available = $false
         for ($attempt = 0; $attempt -lt 27; $attempt++) {
             if (-not (Test-JoinNameExists $controller $domain $name $credential)) { $available = $true; break }
@@ -161,20 +203,23 @@ function Invoke-DeploymentDomainJoin {
             $name = [string]$Config.domain_join.computer_name
         }
         if (-not $available) { throw 'The employee computer name and A-Z suffixes are occupied. No existing AD account was replaced.' }
-        Send-JoinState $Config $Hardware 'joining'
+        try { Send-JoinState $Config $Hardware 'joining' }
+        catch {
+            Save-JoinJournal 'waiting_network' $boot (Get-JoinFailureDetail $_ $Config 'platform_status_joining' $configuration.password $controller)
+            return 'wait'
+        }
         # Persist before the native join: a crash must never cause a blind second join.
         Save-JoinJournal 'attempted' $boot
         $parameters = @{DomainName=$domain; Credential=$credential; Server=$controller;
             Force=$true; PassThru=$true; ErrorAction='Stop'}
         if ([string]$system.Name -ine $name) { $parameters.NewName=$name; $parameters.Options='AccountCreate,JoinWithNewName' }
         if ($configuration.ou_path) { $parameters.OUPath=[string]$configuration.ou_path }
+        $operation = 'native_domain_join'
         $joined = Add-Computer @parameters
         if (-not $joined.HasSucceeded) { throw 'Add-Computer did not report success.' }
         Save-JoinJournal 'joined' $boot
     } catch {
-        $detail = [string]$_.Exception.Message
-        if ($configuration.password) { $detail = $detail.Replace([string]$configuration.password, '[redacted]') }
-        if ($detail.Length -gt 4000) { $detail = $detail.Substring(0,4000) }
+        $detail = Get-JoinFailureDetail $_ $Config $operation $configuration.password $controller
         Save-JoinJournal 'failed' $boot $detail
         Send-JoinState $Config $Hardware 'failed' $detail
         return 'failed'

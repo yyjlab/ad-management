@@ -23,6 +23,14 @@ from pc_deploy.deployment import (Invalid, NAMESPACE, answer_file, canonical, di
                         public_url, source_record, target_check, unc_path)
 
 
+def bootstrap_config(bootstrap):
+    compressed = re.search(r"Write-DeploymentScript 'config.json' '([^']+)'", bootstrap)
+    if compressed:
+        return json.loads(gzip.decompress(base64.b64decode(compressed.group(1))))
+    encoded = re.search(r"config.json'\),\[Convert\]::FromBase64String\('([^']+)'", bootstrap)
+    return json.loads(base64.b64decode(encoded.group(1)))
+
+
 def machine(number=3, serial='TEST-LAPTOP-001', hardware=None, bus='NVMe'):
     return dict(hardware_uuid=hardware or str(uuid.uuid4()), boot_id=str(uuid.uuid4()),
                 model='Test workstation', serial=serial, firmware='UEFI', architecture='amd64',
@@ -247,9 +255,7 @@ class PlatformTests(unittest.TestCase):
         bootstrap = base64.b64decode(authorization['finalizer_command'].rsplit(' ', 1)[1]).decode('utf-16le')
         self.assertNotIn('Test-only-domain-password', bootstrap)
         self.assertLess(len(authorization['finalizer_command']), 30000)
-        encoded = re.search(r"config.json'\),\[Convert\]::FromBase64String\('([^']+)'", bootstrap)
-        self.assertIsNotNone(encoded)
-        config = json.loads(base64.b64decode(encoded.group(1)))
+        config = bootstrap_config(bootstrap)
         self.assertEqual(config['domain_join']['mode'], 'manual')
         self.assertGreater(config['expires_at'], time.time())
         ready = dict(hardware_uuid=inv['hardware_uuid'], computer_name='OLD-IMAGE',
@@ -265,11 +271,57 @@ class PlatformTests(unittest.TestCase):
                                    {'job_ids':[job], 'restart_confirmed':True}).status_code, 200)
         self.assertEqual(self.post(route, ready, token).json['password'], 'Test-only-domain-password')
 
+
+    def test_postinstall_display_metadata_is_separate_from_approved_inventory(self):
+        inv, _, job, token, _ = self.join_fixtures()
+        route = f'/pc-deploy/api/agent/jobs/{job}'
+        with self.store.connect() as c:
+            original = json.loads(c.execute('SELECT data FROM jobs WHERE id=?', (job,)).fetchone()['data'])
+        info = dict(model='HKD-WXX', manufacturer='HUAWEI', system_family='MateBook',
+                    product_name='HKD-WXX', product_version='M1010', oem_model='HUAWEI MateBook 14s',
+                    ignored_secret='not-a-display-field')
+        identity = dict(hardware_uuid=inv['hardware_uuid'], device_info=info)
+        self.assertEqual(self.join_post(route+'/domain-join/config',
+                                       dict(identity, hardware_uuid=str(uuid.uuid4())), token).status_code, 400)
+        reply = self.join_post(route+'/domain-join/config', identity, token)
+        self.assertEqual(reply.status_code, 200, reply.json)
+        self.assertEqual(reply.json['join_state'], 'pending')
+        for stage in ('checking', 'joining', 'restarting'):
+            self.assertEqual(self.join_post(route+'/domain-join/status', dict(identity, stage=stage), token).status_code, 200)
+        dashboard = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
+        logs = self.client.get(route.replace('/api/agent/', '/api/')+'/events').json['job']
+        self.assertEqual(dashboard['model'], 'HKD-WXX')
+        self.assertEqual(dashboard['manufacturer'], 'HUAWEI')
+        self.assertEqual(logs['oem_model'], 'HUAWEI MateBook 14s')
+        self.assertNotIn('not-a-display-field', json.dumps(dashboard))
+        with self.store.connect() as c:
+            current = json.loads(c.execute('SELECT data FROM jobs WHERE id=?', (job,)).fetchone()['data'])
+            device = json.loads(c.execute('SELECT data FROM devices WHERE id=?', (inv['hardware_uuid'],)).fetchone()['data'])
+        self.assertEqual(current['target'], original['target'])
+        self.assertEqual(device['model'], inv['model'])
+        verified = dict(identity, stage='verified', domain='corp.test', computer_name='WFQ101755', secure_channel=True)
+        self.assertEqual(self.join_post(route+'/domain-join/status', verified, token).status_code, 200)
+        finish = dict(identity, computer_name='WFQ101755', os_build=26100, image_state='IMAGE_STATE_COMPLETE',
+                      oobe_done=True, domain_name='corp.test', domain_join_verified=True)
+        self.assertEqual(self.join_post(route+'/finish', finish, token).status_code, 200)
+        self.assertEqual(self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]['oem_model'], info['oem_model'])
+
+    def test_join_diagnostics_keep_platform_host_distinct_from_target_domain(self):
+        inv, _, job, token, _ = self.join_fixtures()
+        route = f'/pc-deploy/api/agent/jobs/{job}'
+        detail = "Stage: platform_status_checking\nPlatform: https://ad.example.test/pc-deploy\nTarget AD domain: corp.test\nError: 无法解析此远程名称: 'ad.example.test'"
+        response = self.join_post(route+'/domain-join/status',
+                                  dict(hardware_uuid=inv['hardware_uuid'], stage='checking', detail=detail), token)
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]['domain_join']['domain'], 'corp.test')
+        messages = self.client.get(route.replace('/api/agent/', '/api/')+'/events').json['events']
+        self.assertTrue(any(detail in event['message'] for event in messages))
+        self.assertTrue(all(event['kind'] != 'failed' for event in messages))
+
     def test_domain_join_http_opt_in_completes_with_scoped_credentials_and_unchanged_pe(self):
         inv, reg, job, token, authorization = self.join_fixtures(wim=True, allow_http=True)
         bootstrap = base64.b64decode(authorization['finalizer_command'].rsplit(' ', 1)[1]).decode('utf-16le')
-        encoded = bootstrap.split("(Join-Path $p 'config.json'),[Convert]::FromBase64String('", 1)[1].split("')", 1)[0]
-        config = json.loads(base64.b64decode(encoded))
+        config = bootstrap_config(bootstrap)
         self.assertIs(config['allow_http'], True)
         self.assertIs(config['domain_join']['allow_http'], True)
         self.assertTrue(config['server_url'].startswith('http://'))
@@ -500,14 +552,15 @@ class PlatformTests(unittest.TestCase):
         command = finalizer_command(cfg)
         self.assertLess(len(command), 30000)
         bootstrap = base64.b64decode(command.rsplit(' ', 1)[1]).decode('utf-16le')
-        scripts = re.findall(r"Write-DeploymentScript '([^']+)' '([^']+)'", bootstrap)
+        scripts = [(name, encoded) for name, encoded in
+                   re.findall(r"Write-DeploymentScript '([^']+)' '([^']+)'", bootstrap)
+                   if name.endswith('.ps1')]
         self.assertEqual({name for name, _ in scripts}, {'Finalize.ps1', 'DomainJoin.ps1'})
         for name, encoded in scripts:
             expected = (Path(__file__).parent/'pc_deploy'/'agent'/name).read_text(encoding='utf-8-sig')
             actual = gzip.decompress(base64.b64decode(encoded)).decode('utf-8-sig')
             self.assertEqual(actual.replace('\r\n', '\n'), expected)
-        encoded_config = bootstrap.split("(Join-Path $p 'config.json'),[Convert]::FromBase64String('", 1)[1].split("')", 1)[0]
-        self.assertEqual(json.loads(base64.b64decode(encoded_config)), cfg)
+        self.assertEqual(bootstrap_config(bootstrap), cfg)
         if os.name == 'nt':
             # Run the actual PS5.1 extraction while intercepting every scheduling/ACL command.
             mock = """$ErrorActionPreference='Stop'

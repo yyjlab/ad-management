@@ -27,11 +27,22 @@ while ([DateTime]::UtcNow -lt $deadline) {
         $setup = Get-ItemProperty 'HKLM:\SYSTEM\Setup'
         $state = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State').ImageState
         if ($state -eq 'IMAGE_STATE_COMPLETE' -and $setup.SystemSetupInProgress -eq 0 -and $setup.OOBEInProgress -eq 0) {
-            $hardware = ([guid](Get-CimInstance Win32_ComputerSystemProduct).UUID).ToString().ToLowerInvariant()
+            $product = Get-CimInstance Win32_ComputerSystemProduct
+            $hardware = ([guid]$product.UUID).ToString().ToLowerInvariant()
             if ($hardware -cne $cfg.hardware_uuid) { throw 'Machine identity mismatch.' }
             $build = [int](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').CurrentBuildNumber
+            $display = @{}
+            try {
+                $computer = Get-CimInstance Win32_ComputerSystem
+                $display = @{model=[string]$computer.Model;manufacturer=[string]$computer.Manufacturer;
+                    system_family=[string]$computer.SystemFamily;product_name=[string]$product.Name;
+                    product_version=[string]$product.Version}
+                $oem = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\OEMInformation' -ErrorAction SilentlyContinue
+                if ($oem.Model) { $display.oem_model=[string]$oem.Model }
+            } catch { }
+            $cfg | Add-Member -NotePropertyName device_info -NotePropertyValue $display -Force
             $body = @{hardware_uuid=$hardware; computer_name=$env:COMPUTERNAME; os_build=$build;
-                image_state=$state; oobe_done=$true}
+                image_state=$state; oobe_done=$true; device_info=$display}
             if ($cfg.domain_join) {
                 $join = Invoke-DeploymentDomainJoin $cfg $hardware
                 if ($join -eq 'wait') { Start-Sleep -Seconds 20; continue }
@@ -43,9 +54,9 @@ while ([DateTime]::UtcNow -lt $deadline) {
                 $body.domain_name = $cfg.domain_join.domain
                 $body.domain_join_verified = $true
             }
-            $body = $body | ConvertTo-Json -Compress
-            Invoke-RestMethod -Method Post -Uri ($cfg.server_url + '/api/agent/jobs/' + $cfg.job_id + '/finish') `
-                -Headers @{Authorization=('Bearer ' + $cfg.token)} -ContentType 'application/json' -Body $body -TimeoutSec 30 | Out-Null
+            $body = [Text.Encoding]::UTF8.GetBytes(($body | ConvertTo-Json -Depth 8 -Compress))
+            Invoke-RestMethod -UseBasicParsing -Method Post -Uri ($cfg.server_url + '/api/agent/jobs/' + $cfg.job_id + '/finish') `
+                -Headers @{Authorization=('Bearer ' + $cfg.token)} -ContentType 'application/json; charset=utf-8' -Body $body -TimeoutSec 30 | Out-Null
             Unregister-ScheduledTask -TaskName ('PCDeploy-' + $cfg.job_id) -Confirm:$false
             # Remove only this task's one-time token, not its diagnostic script or logs.
             Remove-Item -LiteralPath "$PSScriptRoot\config.json"

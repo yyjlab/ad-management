@@ -485,9 +485,9 @@ async function run() {
     fixture.jobs[0].product_version='M1010';
     fixture.jobs[0].stale=false;
     await page.locator('#refresh').click();
-    await page.waitForFunction(()=>document.querySelector('.job-row .cell-title')?.textContent==='HUAWEI MateBook HKD-WXX');
+    await page.waitForFunction(()=>document.querySelector('.job-row .cell-title')?.textContent==='HUAWEI MateBook 14s (HKD-WXX)');
     await page.locator('[data-action=review-job][data-id=progress-job]').waitFor();
-    assert.ok((await page.locator('.job-row').first().textContent()).includes('HUAWEI MateBook HKD-WXX'));checks++;
+    assert.ok((await page.locator('.job-row').first().textContent()).includes('HUAWEI MateBook 14s (HKD-WXX)'));checks++;
     assert.equal(await page.locator('[data-action=reconcile-job]').count(),0);checks++;
     await page.locator('[data-action=review-job][data-id=progress-job]').click();
     assert.equal(await page.locator('#job-review-form [name=confirmation]').count(),0);checks++;
@@ -765,6 +765,23 @@ async function run() {
     assert.deepEqual(releasePayload,{job_ids:['manual-join-1','manual-join-2'],restart_confirmed:true});checks++;
     assert.equal(await page.locator('[data-job-join]').count(),0);checks++;
     assert.ok((await page.locator('#page-content').textContent()).includes('已授权，等待加域'));checks++;
+
+
+    // A historical firmware-only Huawei code has a verified product-family label.
+    fixture.jobs=[{...fixture.jobs[0],id:'model-history',model:'HKD-WXX',manufacturer:'',system_family:'',
+      product_name:'',product_version:'',oem_model:'',serial:'MODEL-CHECK',state:'failed',review:null,
+      updated:fixture.server_time+1,domain_join:{state:'failed',domain:'corp.test',computer_name:'WFQ101755',updated:fixture.server_time}}];
+    await page.locator('#refresh').click();
+    await page.locator('[data-action=job-logs][data-id=model-history]').waitFor();
+    await page.locator('.job-row .cell-title').filter({hasText:'HUAWEI MateBook 14s'}).waitFor();
+    assert.ok((await page.locator('.job-row .cell-title').textContent()).includes('(HKD-WXX)'));checks++;
+    await page.locator('[data-action=job-logs][data-id=model-history]').click();
+    await page.waitForFunction(()=>document.querySelector('#job-log .detail-grid dd')?.textContent.includes('HUAWEI MateBook 14s (HKD-WXX)'));
+    assert.ok((await page.locator('#job-log').textContent()).includes('域：corp.test'));checks++;
+    await page.locator('#close-modal').click();
+    assert.ok(!(await page.evaluate(()=>deviceLabel({model:'HKD-WXX',manufacturer:'Dell'}))).includes('MateBook'));checks++;
+    assert.equal(await page.evaluate(()=>deviceLabel({model:'VENDOR-123',manufacturer:'Vendor',
+      oem_model:'Vendor Product 15',product_version:'1.0'})),'Vendor Product 15 (VENDOR-123)');checks++;
 
     assert.deepEqual(errors,[]);checks++;
     console.log(`${checks} nested menu, embedded page, HTTP form, role, message origin, lifecycle, mobile, WIM restore and per-task log UI checks passed. No live system contacted.`);

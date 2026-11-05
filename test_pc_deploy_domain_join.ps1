@@ -50,7 +50,7 @@ function Invoke-JoinFixture {
             if($Scenario.ManualWaiting){return [pscustomobject]@{waiting_for_release=$true}}
             return [pscustomobject]@{domain=$(if($Scenario.WrongConfig){'other.test'}else{'corp.test'});
                 computer_name=$(if($Scenario.ServerName){$Scenario.ServerName}else{$Config.domain_join.computer_name});employee_id=$Config.domain_join.employee_id;username='join-service@corp.test';
-                password='Test-only-sensitive-value';ou_path='OU=Workstations,DC=corp,DC=test'}
+                password='Test-only-sensitive-value';ou_path='OU=Workstations,DC=corp,DC=test';join_state=$(if($Scenario.JoiningState){'joining'}else{'checking'})}
         }
         if($Action -eq 'name'){
             if($Scenario.NameTimeout){throw 'fixture response lost after name assignment'}
@@ -171,6 +171,49 @@ try {
     Assert-Join ($released.native.Count -eq 1 -and $released.reboots.Count -eq 1) 'Admin release did not perform exactly one join and reboot'
     $manualReboot=Invoke-JoinFixture $manualDirectory @{Manual=$true;NewBoot=$true;Member=$true;ExpectedName=$true}
     Assert-Join ($manualReboot.result -eq 'ready' -and $manualReboot.native.Count -eq 0) 'Manual mode attempted to fetch recycled credentials after reboot'
+
+    $checkingDirectory=New-JoinCase
+    $checkingOffline=Invoke-JoinFixture $checkingDirectory @{FailStatus='checking'}
+    Assert-Join ($checkingOffline.result -eq 'wait' -and $checkingOffline.native.Count -eq 0 -and $checkingOffline.reboots.Count -eq 0) 'Platform checking failure became a terminal domain failure'
+    Assert-Join ($checkingOffline.journal.phase -eq 'waiting_network') 'Platform outage did not preserve a resumable diagnostic'
+    Assert-Join ($checkingOffline.journal.detail.Contains('Stage: platform_status_checking') -and $checkingOffline.journal.detail.Contains('Target AD domain: corp.test')) 'Diagnostic confused the platform endpoint with the AD domain'
+    $checkingRecovered=Invoke-JoinFixture $checkingDirectory
+    Assert-Join ($checkingRecovered.native.Count -eq 1 -and $checkingRecovered.reboots.Count -eq 1) 'Recovered checking connection did not perform the first join once'
+    $joiningDirectory=New-JoinCase
+    $joiningOffline=Invoke-JoinFixture $joiningDirectory @{FailStatus='joining'}
+    Assert-Join ($joiningOffline.result -eq 'wait' -and $joiningOffline.native.Count -eq 0) 'Lost pre-join acknowledgement performed a native join'
+    $joiningRecovered=Invoke-JoinFixture $joiningDirectory @{JoiningState=$true}
+    Assert-Join ($joiningRecovered.native.Count -eq 1 -and $joiningRecovered.reboots.Count -eq 1) 'Lost joining acknowledgement did not resume safely'
+    Assert-Join (@($joiningRecovered.calls | Where-Object {$_.payload.stage -eq 'checking'}).Count -eq 0) 'Resume tried to regress a server joining state'
+    $repeatDirectory=New-JoinCase
+    $repeatFirst=Invoke-JoinFixture $repeatDirectory @{FailStatus='restarting'}
+    $repeatOffline=Invoke-JoinFixture $repeatDirectory @{FailStatus='restarting'}
+    Assert-Join ($repeatOffline.result -eq 'wait' -and $repeatOffline.journal.phase -eq 'joined' -and $repeatOffline.native.Count -eq 0) 'Repeated callback outage discarded a successful native join'
+    $repeatRecovered=Invoke-JoinFixture $repeatDirectory
+    Assert-Join ($repeatRecovered.native.Count -eq 0 -and $repeatRecovered.reboots.Count -eq 1) 'Successful join was repeated after reconnect'
+    $verifyDirectory=New-JoinCase
+    $verifyFirst=Invoke-JoinFixture $verifyDirectory
+    $verifyOffline=Invoke-JoinFixture $verifyDirectory @{NewBoot=$true;Member=$true;ExpectedName=$true;FailStatus='verified'}
+    Assert-Join ($verifyOffline.result -eq 'wait' -and $verifyOffline.journal.phase -eq 'restart_requested') 'Lost verification callback became a false native failure'
+    $verifyRecovered=Invoke-JoinFixture $verifyDirectory @{NewBoot=$true;Member=$true;ExpectedName=$true}
+    Assert-Join ($verifyRecovered.result -eq 'ready' -and $verifyRecovered.native.Count -eq 0) 'Verification reconnect repeated the domain join'
+
+    function Test-JoinWire {
+        . $taskSource
+        $capture=@{}
+        function Invoke-RestMethod {
+            param($Method,$Uri,$Headers,$ContentType,$Body,$TimeoutSec,[switch]$UseBasicParsing)
+            $capture.type=$ContentType;$capture.body=$Body
+            return @{ok=$true}
+        }
+        $text=-join ([char[]]@(0x57df,0x540d,0x89e3,0x6790,0x5931,0x8d25))
+        $config=[pscustomobject]@{server_url='https://deploy.test/pc-deploy';job_id='fixture';token='fixture-only-token'}
+        Invoke-JoinService $config 'status' @{detail=$text} | Out-Null
+        Assert-Join ($capture.body -is [byte[]] -and $capture.type -match 'charset=utf-8') 'Unicode diagnostics were sent with a default string encoding'
+        $parsed=[Text.Encoding]::UTF8.GetString($capture.body)|ConvertFrom-Json
+        Assert-Join ($parsed.detail -ceq $text) 'Chinese diagnostics did not survive the outgoing JSON bytes'
+    }
+    Test-JoinWire
     Write-Output "$count isolated domain join checks passed. No real directory, machine name, membership or reboot was changed."
 } finally {
     $resolved=[IO.Path]::GetFullPath($taskRoot)

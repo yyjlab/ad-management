@@ -68,11 +68,19 @@ function firmwareText(value) {
   const text = String(value ?? '').trim();
   return /^(unknown|none|not (?:specified|applicable)|default string|system (?:manufacturer|family|product name|version)|to be filled by o\.?e\.?m\.?)$/i.test(text) ? '' : text;
 }
+function knownModel(raw, vendor) {
+  // Huawei's official model list maps HKD to MateBook 14s; keep the firmware code for verification.
+  // https://consumer.huawei.com/cn/support/content/zh-cn15945089/
+  return /^HKD(?:-|$)/i.test(raw)&&(!vendor||/huawei|华为/i.test(vendor))?'HUAWEI MateBook 14s':'';
+}
 function deviceLabel(device) {
+  const current = device.id && data?.jobs.find(job=>job.device_id===device.id);
+  const meta = key => firmwareText(device[key]) || firmwareText(current?.[key]);
   const raw = firmwareText(device.model) || firmwareText(device.product_name) || '型号未提供';
-  const vendor = firmwareText(device.manufacturer), family = firmwareText(device.system_family);
-  const version = firmwareText(device.product_version), code = /^[a-z0-9][a-z0-9._-]{2,30}$/i.test(raw);
-  const main = vendor.toLowerCase() === 'lenovo' && version ? version : raw;
+  const vendor = meta('manufacturer'), family = meta('system_family');
+  const version = meta('product_version'), code = /^[a-z0-9][a-z0-9._-]{2,30}$/i.test(raw);
+  const readable = [meta('oem_model'),version,meta('product_name')].find(value=>value!==vendor&&value!==family&&/[A-Za-z\u4e00-\u9fff]/.test(value)&&/[\s\u4e00-\u9fff]/.test(value));
+  const main = code && (readable||knownModel(raw,vendor)) || (vendor.toLowerCase() === 'lenovo' && version ? version : raw);
   const parts = [];
   if (vendor && !main.toLowerCase().includes(vendor.toLowerCase())) parts.push(vendor);
   if (code && family && !main.toLowerCase().includes(family.toLowerCase())) parts.push(family);
@@ -81,7 +89,7 @@ function deviceLabel(device) {
   return parts.join(' ');
 }
 function modelHint(device) {
-  return /^[a-z0-9][a-z0-9._-]{2,30}$/i.test(device.model || '') && !firmwareText(device.manufacturer) ?
+  return /^[a-z0-9][a-z0-9._-]{2,30}$/i.test(device.model || '') && !firmwareText(device.manufacturer) && !knownModel(device.model, '') ?
     '<span class="cell-sub">BIOS 上报型号；品牌 / 系列未上报</span>' : '';
 }
 function jobBadge(job) {
