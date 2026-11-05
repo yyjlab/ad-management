@@ -612,7 +612,7 @@ async function run() {
     assert.equal(await page.locator('.job-row').first().getAttribute('data-state'),'awaiting_report');checks++;
     assert.equal(await page.locator('.job-row .job-progress progress').getAttribute('value'),'100');checks++;
     assert.equal(await page.locator('.job-row .job-progress').first().textContent(),await page.locator('#job-log .job-progress').textContent());checks++;
-    assert.equal(await page.locator('#job-log .badge').first().textContent(),'等待安装后回报');checks++;
+    assert.equal(await page.locator('#job-log .detail-grid>div:nth-child(4)>dd>.badge').first().textContent(),'等待安装后回报');checks++;
     assert.ok(await page.evaluate(()=>window.savedTableProgress===document.querySelector('.job-row .job-progress progress')));checks++;
 
     // An older dashboard response arriving after a newer log must not roll the task back.
@@ -633,7 +633,7 @@ async function run() {
     releaseDashboard();
     await delayedRefresh;
     assert.equal(await page.locator('.job-row').first().getAttribute('data-state'),'completed');checks++;
-    assert.equal(await page.locator('#job-log .badge').first().textContent(),'安装后已回报');checks++;
+    assert.equal(await page.locator('#job-log .detail-grid>div:nth-child(4)>dd>.badge').first().textContent(),'安装后已回报');checks++;
     assert.equal(await page.locator('.job-row .job-progress').first().textContent(),await page.locator('#job-log .job-progress').textContent());checks++;
 
     // Closing the log immediately refreshes other rows, without waiting for the poll timer.
@@ -863,7 +863,7 @@ async function run() {
     await page.locator('#refresh').click();
     await page.locator('[data-view=jobs]').click();
     await page.getByText('自动加域中',{exact:true}).waitFor();
-    assert.ok((await page.locator('.job-row').first().textContent()).includes('工号电脑名：WFQ101755'));checks++;
+    assert.ok((await page.locator('.job-row').first().textContent()).includes('计划电脑名：WFQ101755'));checks++;
     await page.locator('[data-action=job-logs][data-id=progress-job]').click();
     await page.locator('#job-log').getByText('自动加域中',{exact:true}).waitFor();
     assert.ok((await page.locator('#job-log').textContent()).includes('正在加入 AD 域'));checks++;
@@ -874,7 +874,7 @@ async function run() {
     fixture.server_time=1793348010;
     await page.locator('[data-action=refresh-job-logs]').click();
     await page.locator('#job-log').getByText('安装并加域完成',{exact:true}).waitFor();
-    assert.equal(await page.locator('.job-row').first().locator('.badge').first().textContent(),'安装并加域完成');checks++;
+    assert.equal(await page.locator('.job-row').first().locator('td:nth-child(3)>.badge').first().textContent(),'安装并加域完成');checks++;
     await page.locator('#close-modal').click();
     fixture.jobs[0].state='failed';
     fixture.jobs[0].domain_join.state='failed';
@@ -965,6 +965,59 @@ async function run() {
     assert.equal(await page.evaluate(()=>deviceLabel({model:'VENDOR-123'})),'VENDOR-123');checks++;
     assert.equal(await page.evaluate(()=>deviceLabel({model:'VENDOR-123',manufacturer:'Vendor',
       oem_model:'Vendor Product 15',product_version:'1.0'})),'Vendor Product 15');checks++;
+
+    // Only this task's authenticated, post-reboot verification earns green identity badges.
+    const verifiedIdentity={...fixture.jobs[0],id:'identity-verified',device_id:'same-hardware',state:'completed',review:null,
+      computer_name:'WFQ101755BB',updated:fixture.server_time+20,
+      domain_join:{state:'verified',computer_name:'WFQ101755BB',domain:'corp.test',updated:fixture.server_time+10},
+      device_info:{system_info:{source:'windows',computer_name:'WFQ101755BB',part_of_domain:true,domain:'corp.test'}}};
+    const failedIdentity={...verifiedIdentity,id:'identity-failed',state:'failed',computer_name:'WFQ101755AA',
+      domain_join:{state:'failed',computer_name:'WFQ101755AA',domain:'corp.test',updated:fixture.server_time+10},
+      device_info:{system_info:{source:'pe',computer_name:'MININT-PE'}}};
+    const manualIdentity={...failedIdentity,id:'identity-manual',
+      review:{outcome:'installed',operator:'test-admin',reviewed_at:fixture.server_time}};
+    fixture.jobs=[verifiedIdentity,failedIdentity,manualIdentity];
+    fixture.server_time+=30;
+    await page.locator('#refresh').click();
+    await page.waitForFunction(()=>document.querySelectorAll('.job-row').length===3);
+    const verifiedRow=page.locator('.job-row').nth(0),failedRow=page.locator('.job-row').nth(1),manualRow=page.locator('.job-row').nth(2);
+    assert.equal(await verifiedRow.locator('.job-identity .badge.good').count(),2);checks++;
+    assert.deepEqual(await verifiedRow.locator('.job-identity strong').allTextContents(),['WFQ101755BB','corp.test']);checks++;
+    assert.ok((await verifiedRow.locator('.job-identity').textContent()).includes('重启后名称、域身份及信任通过'));checks++;
+    assert.ok((await verifiedRow.locator('.job-identity small').textContent()).includes(await page.evaluate(t=>date(t),verifiedIdentity.domain_join.updated)));checks++;
+    assert.equal(await failedRow.locator('.job-identity .badge.good').count(),0);checks++;
+    assert.ok((await failedRow.locator('.job-identity').textContent()).includes('计划电脑名：WFQ101755AA'));checks++;
+    assert.ok(!(await failedRow.locator('.job-identity').textContent()).includes('MININT-PE'));checks++;
+    assert.equal(await manualRow.locator('.job-identity .badge.good').count(),0);checks++;
+    assert.equal(await manualRow.locator('.job-identity .badge.bad').textContent(),'加域未通过核验');checks++;
+    const identityHtml=await verifiedRow.locator('.job-identity').evaluate(e=>e.outerHTML);
+    await verifiedRow.locator('[data-action=job-logs]').click();
+    await page.locator('#job-log .job-identity.verified').waitFor();
+    assert.equal(await page.locator('#job-log .job-identity').evaluate(e=>e.outerHTML),identityHtml);checks++;
+    await page.locator('#close-modal').click();
+    await verifiedRow.locator('[data-action=job-device-detail]').click();
+    await page.locator('#modal-body .job-identity.verified').waitFor();
+    assert.equal(await page.locator('#modal-body .job-identity').evaluate(e=>e.outerHTML),identityHtml);checks++;
+    await page.locator('#close-modal').click();
+    const identityCases=await page.evaluate(()=>{
+      const inspect=job=>{const root=document.createElement('div');root.innerHTML=renderJobIdentity(job);return {text:root.textContent,green:root.querySelectorAll('.badge.good').length,images:root.querySelectorAll('img').length};};
+      return {
+        restarting:inspect({state:'awaiting_report',computer_name:'EMP-A',domain_join:{state:'restarting',domain:'corp.test',computer_name:'EMP-A'},
+          device_info:{system_info:{source:'windows',computer_name:'EMP-A',part_of_domain:true,domain:'corp.test'}}}),
+        plain:inspect({state:'completed',device_info:{system_info:{source:'windows',computer_name:'LOCAL-PC'}}}),
+        legacyVerified:inspect({domain_join:{state:'verified',computer_name:'EMP-B',domain:'corp.test'}}),
+        incomplete:inspect({domain_join:{state:'verified',computer_name:'EMP-B'}}),
+        unsafe:inspect({state:'completed',domain_join:{state:'verified',computer_name:'<img src=x>',domain:'<img src=y>'}})};
+    });
+    assert.equal(identityCases.restarting.green,0);checks++;
+    assert.ok(identityCases.restarting.text.includes('待重启核验')&&identityCases.restarting.text.includes('信任尚未核验'));checks++;
+    assert.ok(identityCases.plain.text.includes('实际电脑名LOCAL-PC')&&identityCases.plain.text.includes('未启用自动加域'));checks++;
+    assert.equal(identityCases.plain.green,0);checks++;
+    assert.equal(identityCases.legacyVerified.green,2);checks++;
+    assert.equal(identityCases.incomplete.green,0);checks++;
+    assert.equal(identityCases.unsafe.images,0);checks++;
+    assert.ok(identityCases.unsafe.text.includes('<img src=x>'));checks++;
+    assert.ok(await verifiedRow.locator('.job-identity strong').first().evaluate(e=>parseFloat(getComputedStyle(e).fontSize)<=14));checks++;
 
     assert.deepEqual(errors,[]);checks++;
     console.log(`${checks} nested menu, embedded page, HTTP form, role, message origin, lifecycle, mobile, WIM restore and per-task log UI checks passed. No live system contacted.`);
