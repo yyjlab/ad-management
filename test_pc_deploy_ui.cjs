@@ -472,7 +472,9 @@ async function run() {
     fixture.jobs[0].finished_at=1793346610;
     await page.locator('#refresh').click();
     await page.waitForFunction(()=>document.querySelector('.job-progress')?.textContent.includes('安装后系统已回报'));
-    assert.equal(await liveProgress.locator('progress').getAttribute('value'),'100');checks++;
+    assert.equal(await liveProgress.locator('progress').count(),0);checks++;
+    assert.equal(await liveProgress.locator('.job-progress-percent,.job-progress-unknown').count(),0);checks++;
+    assert.ok((await liveProgress.textContent()).includes('纯还原'));checks++;
     assert.equal(await page.locator('[data-job-timer]').textContent(),'安装耗时 10分10秒');checks++;
     await page.evaluate(()=>new Promise(resolve=>setTimeout(resolve,1100)));
     assert.equal(await page.locator('[data-job-timer]').textContent(),'安装耗时 10分10秒');checks++;
@@ -480,8 +482,15 @@ async function run() {
     fixture.jobs[0].progress={stage:'applying',percent:43,updated:1793347400};
     await page.locator('#refresh').click();
     await page.locator('.job-progress.stopped').waitFor();
-    assert.equal(await liveProgress.locator('progress').getAttribute('value'),'43');checks++;
-    assert.ok((await liveProgress.textContent()).includes('已停止'));checks++;
+    assert.equal(await liveProgress.locator('progress').count(),0);checks++;
+    assert.ok((await liveProgress.textContent()).includes('已停止 · 最后阶段：还原 WIM'));checks++;
+    fixture.jobs[0].progress.percent=null;
+    await page.locator('#refresh').click();
+    assert.equal(await liveProgress.locator('progress,.job-progress-unknown').count(),0);checks++;
+    fixture.jobs[0].state='cancelled';
+    await page.locator('#refresh').click();
+    await page.locator('.job-progress.cancelled').waitFor();
+    assert.equal(await liveProgress.locator('progress,.job-progress-percent,.job-progress-unknown').count(),0);checks++;
     fixture.jobs[0].progress=null;
     await page.locator('#refresh').click();
     await page.waitForFunction(()=>!document.querySelector('.job-progress'));
@@ -618,6 +627,7 @@ async function run() {
     await page.locator('[data-action=refresh-job-logs]').click();
     await page.getByText('installation acknowledged',{exact:true}).waitFor();
     assert.equal(await page.locator('.job-row').first().getAttribute('data-state'),'completed');checks++;
+    assert.equal(await page.locator('.job-row .job-progress progress,#job-log .job-progress progress').count(),0);checks++;
     assert.equal(await page.locator('.job-row [data-job-timer]').first().textContent(),await page.locator('#job-log [data-job-timer]').textContent());checks++;
     assert.ok((await page.locator('.job-row [data-job-timer]').first().textContent()).startsWith('安装耗时 '));checks++;
     releaseDashboard();

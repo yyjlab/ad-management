@@ -307,10 +307,12 @@ function renderJobProgress(job) {
   const known = Number.isInteger(progress.percent) && progress.percent >= 0 && progress.percent <= 100;
   const restored = progress.stage === 'boot_files' || (job.kind === 'wim' && progress.stage === 'awaiting_report');
   const percent = completed || restored ? 100 : known && ['caching','applying'].includes(progress.stage) ? progress.percent : null;
-  const label = completed ? '安装后系统已回报' : (stopped ? '已停止 · ' : '') + stages[progress.stage];
+  const terminal = completed || stopped;
+  const haltedStages = {caching:'缓存镜像',applying:'还原 WIM',boot_files:'配置 UEFI 引导',awaiting_report:'等待安装后回报'};
+  const label = completed ? '安装后系统已回报' : stopped ? '已停止 · 最后阶段：'+haltedStages[progress.stage] : stages[progress.stage];
   const tone = completed ? ' completed' : job.state === 'failed' ? ' stopped' : job.state === 'cancelled' ? ' cancelled' : progress.stage === 'awaiting_report' ? ' pending' : '';
-  return '<div class="job-progress'+tone+'"><div class="job-progress-head"><span class="job-progress-phase">'+h(label)+'</span>'+(percent === null ? '<span class="job-progress-unknown">等待真实进度</span>' : '<strong class="job-progress-percent">'+percent+'%</strong>')+'</div>' +
-    '<progress max="100" value="'+(percent ?? 0)+'" data-job-progress="'+h(job.id+(progress.stage==='caching'?'-caching':''))+'" aria-label="'+h(label)+'"></progress>'+
+  return '<div class="job-progress'+tone+'"><div class="job-progress-head"><span class="job-progress-phase">'+h(label)+'</span>'+(terminal ? '' : percent === null ? '<span class="job-progress-unknown">等待真实进度</span>' : '<strong class="job-progress-percent">'+percent+'%</strong>')+'</div>' +
+    (terminal ? '' : '<progress max="100" value="'+(percent ?? 0)+'" data-job-progress="'+h(job.id+(progress.stage==='caching'?'-caching':''))+'" aria-label="'+h(label)+'"></progress>')+
     renderWimPerformance(job)+(Number.isFinite(progress.updated) ? '<small>最后回报：'+h(date(progress.updated))+'</small>' : '')+'</div>';
 }
 function renderLogEvents(events) {
