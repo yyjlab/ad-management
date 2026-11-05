@@ -330,6 +330,25 @@ async function run() {
     await page.locator('#refresh').click();
     await page.waitForFunction(()=>document.querySelector('.job-progress')?.textContent.includes('等待新系统回报'));
     assert.ok((await liveProgress.textContent()).includes('最后回报'));checks++;
+    // Restoration time freezes at its own stage boundary, while Windows-report waiting has a separate clock.
+    fixture.jobs[0].image_applied_at=1793347000;
+    fixture.jobs[0].deployment_finished_at=1793347010;
+    await page.locator('#refresh').click();
+    await page.waitForFunction(()=>document.querySelector('[data-job-timer]')?.textContent==='镜像还原耗时 16分40秒');
+    assert.equal(await page.locator('[data-job-timer]').textContent(),'镜像还原耗时 16分40秒');checks++;
+    assert.ok((await page.locator('[data-followup-timer]').textContent()).startsWith('等待 Windows 回报 '));checks++;
+    assert.ok(!(await page.locator('.duration-warning').isVisible()));checks++;
+    const waitText=await page.locator('[data-followup-timer]').textContent();
+    await page.waitForFunction(text=>document.querySelector('[data-followup-timer]')?.textContent!==text,waitText);
+    assert.equal(await page.locator('[data-job-timer]').textContent(),'镜像还原耗时 16分40秒');checks++;
+    fixture.jobs[0].installed_at=1793347100;
+    await page.locator('#refresh').click();
+    await page.waitForFunction(()=>document.querySelector('[data-followup-timer]')?.textContent==='系统启动及回报耗时 1分30秒');
+    assert.equal(await page.locator('[data-followup-timer]').getAttribute('data-active'),'false');checks++;
+    assert.equal(await page.locator('.job-row').first().getAttribute('data-state'),'awaiting_report');checks++;
+    delete fixture.jobs[0].image_applied_at;
+    delete fixture.jobs[0].deployment_finished_at;
+    delete fixture.jobs[0].installed_at;
     fixture.jobs[0].state='completed';
     fixture.jobs[0].finished_at=1793346610;
     await page.locator('#refresh').click();

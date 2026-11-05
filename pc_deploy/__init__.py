@@ -279,6 +279,10 @@ def register_pc_deploy(host_app, current_user, touch_session):
         return {r['job_id']: dict(r) for r in c.execute(f"""
             SELECT job_id,
                    MIN(CASE WHEN kind='installing' THEN created END) AS started_at,
+                   MIN(CASE WHEN kind='installing' AND message='正在配置系统引导与安装后回报' THEN created END) AS image_applied_at,
+                   MIN(CASE WHEN kind='awaiting_report' THEN created END) AS deployment_finished_at,
+                   MIN(CASE WHEN kind IN ('domain_join','completed') OR
+                       (kind='failed' AND message LIKE 'Windows 已安装，自动加域失败%') THEN created END) AS windows_reported_at,
                    MIN(CASE WHEN kind IN ('completed','failed','cancelled') THEN created END) AS finished_at
             FROM events WHERE job_id IN ({placeholders}) GROUP BY job_id
         """, identities)}
@@ -320,7 +324,10 @@ def register_pc_deploy(host_app, current_user, touch_session):
                     updated=row['updated'], stale=row['state'] in ACTIVE and now-row['updated'] > 600,
                     progress=data.get('progress'), kind=data['source'].get('kind', 'setup'), review=data.get('review'),
                     domain_join=data.get('domain_join'), computer_name=data['target'].get('computer_name'),
-                    installed_at=data.get('installed_at'), expires_at=row['expires'], device_info=detail,
+                    installed_at=data.get('installed_at') or timing.get('windows_reported_at'),
+                    image_applied_at=timing.get('image_applied_at'),
+                    deployment_finished_at=timing.get('deployment_finished_at'),
+                    expires_at=row['expires'], device_info=detail,
                     **{k: display.get(k, '') for k in
                        ('manufacturer', 'system_family', 'product_name', 'product_version', 'oem_model')},
                     started_at=timing.get('started_at'),
@@ -1071,6 +1078,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
             detail = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', detail)
             changed = stage != current['state'] or detail != current.get('detail', '')
             completion_display(job, value)
+            job.setdefault('installed_at', time.time())
             current.update(state=stage, detail=detail, updated=time.time(), os_installed=True)
             state = 'failed' if stage == 'failed' else 'awaiting_report'
             if stage in ('restarting', 'verified', 'failed'):

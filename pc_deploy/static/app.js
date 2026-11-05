@@ -171,20 +171,35 @@ function renderJobTiming(job) {
   const started = Number.isFinite(job.started_at) && job.started_at > 0 ? job.started_at : null;
   const installedAt = Number.isFinite(job.installed_at) ? job.installed_at : null;
   const active = activeStates.includes(job.state) && installedAt === null;
-  const ended = installedAt ?? (active ? null : (job.finished_at ?? job.updated ?? job.created));
-  return '<div class="job-timing" data-state="'+h(job.state)+'"><strong data-job-timer data-start="'+h(started ?? job.created)+'" data-end="'+h(ended ?? '')+'" data-installed="'+(started !== null)+'" data-active="'+active+'"></strong><small>'+
+  const imageEnd = Number.isFinite(job.image_applied_at) ? job.image_applied_at : null;
+  const deployEnd = Number.isFinite(job.deployment_finished_at) ? job.deployment_finished_at : null;
+  const phaseEnd = job.kind==='wim' && started!==null ? (imageEnd ?? deployEnd) : null;
+  const timerActive = active && phaseEnd===null;
+  const ended = phaseEnd ?? installedAt ?? (active ? null : (job.finished_at ?? job.updated ?? job.created));
+  const phaseLabel = phaseEnd===null ? '' : (imageEnd===null ? '还原及引导耗时 ' : '镜像还原耗时 ');
+  let followup = '';
+  if (job.kind==='wim' && deployEnd!==null) {
+    const until = installedAt ?? (active ? null : (job.finished_at ?? job.updated));
+    const waiting = active && installedAt===null;
+    followup = '<small><span data-followup-timer data-start="'+h(deployEnd)+'" data-end="'+h(until ?? '')+'" data-active="'+waiting+'" data-label="'+(waiting?'等待 Windows 回报 ':'系统启动及回报耗时 ')+'"></span></small>';
+  }
+  return '<div class="job-timing" data-state="'+h(job.state)+'"><strong data-job-timer data-start="'+h(started ?? job.created)+'" data-end="'+h(ended ?? '')+'" data-installed="'+(started !== null)+'" data-active="'+timerActive+'" data-timer-label="'+h(phaseLabel)+'"></strong><small>'+
     (started === null ? '创建：'+h(date(job.created))+' · 尚未开始安装' : '开始：'+h(date(started)))+
-    '</small><small class="duration-warning" hidden>已超过 10 分钟，请查看当前阶段与日志</small></div>';
+    '</small>'+followup+'<small class="duration-warning" hidden>已超过 10 分钟，请查看当前阶段与日志</small></div>';
 }
 function updateJobTimers() {
   const now = serverNow();
   document.querySelectorAll('[data-job-timer]').forEach(el => {
     const active = el.dataset.active === 'true', installed = el.dataset.installed === 'true';
     const seconds = Math.max(0, (active ? now : Number(el.dataset.end))-Number(el.dataset.start));
-    el.textContent = !active && !installed ? '未开始安装' : (installed ? (active?'安装用时 ':'安装耗时 ') : '等待用时 ')+duration(seconds);
+    el.textContent = !active && !installed ? '未开始安装' : (el.dataset.timerLabel || (installed ? (active?'安装用时 ':'安装耗时 ') : '等待用时 '))+duration(seconds);
     const overdue = active && installed && seconds > 600;
     el.parentElement.classList.toggle('overdue', overdue);
     el.parentElement.querySelector('.duration-warning').hidden = !overdue;
+  });
+  document.querySelectorAll('[data-followup-timer]').forEach(el => {
+    const end=el.dataset.active==='true'?now:Number(el.dataset.end);
+    el.textContent=el.dataset.label+duration(end-Number(el.dataset.start));
   });
 }
 function captureJobProgress(root) {
@@ -210,7 +225,7 @@ function renderJobProgress(job) {
   }
   const progress = job.progress;
   if (!progress || (job.state === 'failed' && job.review)) return '';
-  const stages = {applying:'正在还原 WIM',boot_files:'WIM 还原已结束 · 正在配置 UEFI 引导',awaiting_report:'等待新系统回报'};
+  const stages = {applying:'正在还原 WIM',boot_files:'WIM 还原已结束 · 正在配置 UEFI 引导',awaiting_report:'镜像还原及引导已完成 · 等待新系统回报'};
   if (!Object.hasOwn(stages, progress.stage)) return '';
   const completed = job.state === 'completed', stopped = ['failed','cancelled'].includes(job.state);
   const known = Number.isInteger(progress.percent) && progress.percent >= 0 && progress.percent <= 100;

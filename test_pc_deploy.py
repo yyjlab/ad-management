@@ -1316,6 +1316,43 @@ function Start-ScheduledTask {}
         return inv, reg, result.json['ids'][0]
 
 
+    def test_wim_phase_timing_stops_restore_without_claiming_windows_ready(self):
+        inv, reg, job = self.wim_queued()
+        route = f'/pc-deploy/api/agent/jobs/{job}'
+        self.post('/pc-deploy/api/agent/poll', inv, reg['token'])
+        self.assertEqual(self.post(route+'/start', inv, reg['token']).status_code, 200)
+        self.assertEqual(self.post(route+'/event', dict(stage='applying', percent=100), reg['token']).status_code, 200)
+        progress = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
+        self.assertIsNone(progress['image_applied_at'])
+        self.assertIsNone(progress['installed_at'])
+        self.assertEqual(self.post(route+'/event', dict(stage='boot_files'), reg['token']).status_code, 200)
+        boot = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
+        self.assertGreaterEqual(boot['image_applied_at'], boot['started_at'])
+        self.assertIsNone(boot['deployment_finished_at'])
+        self.assertEqual(self.post(route+'/event', dict(stage='awaiting_report'), reg['token']).status_code, 200)
+        waiting = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
+        self.assertEqual(waiting['state'], 'awaiting_report')
+        self.assertGreaterEqual(waiting['deployment_finished_at'], boot['image_applied_at'])
+        self.assertEqual(waiting['image_applied_at'], boot['image_applied_at'])
+        self.assertIsNone(waiting['installed_at'])
+        history = self.client.get(f'/pc-deploy/api/jobs/{job}/events').json['job']
+        self.assertEqual(history['image_applied_at'], waiting['image_applied_at'])
+        self.assertEqual(history['deployment_finished_at'], waiting['deployment_finished_at'])
+
+    def test_automatic_join_reports_windows_ready_before_join_finishes(self):
+        inv, _, job, token, _ = self.join_fixtures(wim=True)
+        route = f'/pc-deploy/api/agent/jobs/{job}/domain-join/status'
+        bad = dict(hardware_uuid=str(uuid.uuid4()), stage='checking')
+        self.assertEqual(self.join_post(route, bad, token).status_code, 400)
+        self.assertIsNone(self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]['installed_at'])
+        self.assertEqual(self.join_post(route, dict(hardware_uuid=inv['hardware_uuid'], stage='checking'), token).status_code, 200)
+        first = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
+        self.assertIsInstance(first['installed_at'], (int, float))
+        self.assertEqual(first['state'], 'awaiting_report')
+        self.assertEqual(first['domain_join']['state'], 'checking')
+        self.assertEqual(self.join_post(route, dict(hardware_uuid=inv['hardware_uuid'], stage='joining'), token).status_code, 200)
+        self.assertEqual(self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]['installed_at'], first['installed_at'])
+
     def test_installation_timing_uses_first_start_and_freezes_at_failure(self):
         inv, reg, job = self.wim_queued('system_partition')
         route = f'/pc-deploy/api/agent/jobs/{job}'
