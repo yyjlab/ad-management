@@ -655,7 +655,7 @@ function Start-ScheduledTask {}
         command = authorization['finalizer_command']
         self.assertLess(len(command), 30000)
         bootstrap = decoded_bootstrap(command)
-        self.assertIn('DomainJoin.ps1', bootstrap)
+        self.assertIn('DomainJoin.ps1', bootstrap_files(bootstrap))
         self.assertIn('GZipStream', bootstrap)
         self.assertNotIn('Test-only-domain-password', bootstrap)
         payload = dict(hardware_uuid=inv['hardware_uuid'], computer_name='WFQ101755',

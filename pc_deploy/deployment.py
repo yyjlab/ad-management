@@ -369,25 +369,25 @@ def finalizer_command(config):
     files = {name: (Path(__file__).parent / 'agent' / name).read_text(encoding='utf-8-sig') for name in names}
     files['config.json'] = canonical(config)
     packed = base64.b64encode(gzip.compress(canonical(files).encode())).decode()
-    file_names = ','.join("'" + name + "'" for name in files)
     # Only constant file names and base64-encoded JSON enter PowerShell.
     bootstrap = f"""$ErrorActionPreference='Stop'
-$p=Join-Path $env:ProgramData 'PCDeploy\\{config['job_id']}'
-[IO.Directory]::CreateDirectory($p)|Out-Null
+$task='PCDeploy-{config['job_id']}'
+$p=Join-Path $env:ProgramData ('PCDeploy\\'+$task.Substring(9))
+$null=[IO.Directory]::CreateDirectory($p)
 & icacls.exe $p /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
 if($LASTEXITCODE -ne 0){{throw 'Cannot protect finalizer directory'}}
 $deploymentFiles='{packed}'
 $m=[IO.MemoryStream]::new([Convert]::FromBase64String($deploymentFiles))
 $z=[IO.Compression.GZipStream]::new($m,[IO.Compression.CompressionMode]::Decompress)
-$r=[IO.StreamReader]::new($z,[Text.Encoding]::UTF8)
-try{{$files=ConvertFrom-Json -InputObject $r.ReadToEnd()}}finally{{$r.Dispose()}}
-foreach($name in @({file_names})){{
-[IO.File]::WriteAllText((Join-Path $p $name),[string]$files.$name,[Text.UTF8Encoding]::new($false))
+$r=[IO.StreamReader]::new($z)
+try{{$files=$r.ReadToEnd()|ConvertFrom-Json}}finally{{$r.Dispose()}}
+foreach($file in $files.PSObject.Properties){{
+[IO.File]::WriteAllText((Join-Path $p $file.Name),[string]$file.Value,[Text.UTF8Encoding]::new($false))
 }}
 $a=New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -ExecutionPolicy Bypass -File "'+$p+'\\Finalize.ps1"')
 $t=New-ScheduledTaskTrigger -AtStartup
-Register-ScheduledTask -TaskName 'PCDeploy-{config['job_id']}' -Action $a -Trigger $t -User 'SYSTEM' -RunLevel Highest -Force | Out-Null
-Start-ScheduledTask -TaskName 'PCDeploy-{config['job_id']}'
+Register-ScheduledTask $task -Action $a -Trigger $t -User 'SYSTEM' -RunLevel Highest -Force | Out-Null
+Start-ScheduledTask $task
 """
     command = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + base64.b64encode(bootstrap.encode('utf-16le')).decode()
     if len(command) > 30000:

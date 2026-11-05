@@ -198,6 +198,55 @@ try {
     $verifyRecovered=Invoke-JoinFixture $verifyDirectory @{NewBoot=$true;Member=$true;ExpectedName=$true}
     Assert-Join ($verifyRecovered.result -eq 'ready' -and $verifyRecovered.native.Count -eq 0) 'Verification reconnect repeated the domain join'
 
+    $failedReportDirectory=New-JoinCase
+    $failedReport=Invoke-JoinFixture $failedReportDirectory @{NativeFailure=$true;FailStatus='failed'}
+    Assert-Join ($failedReport.result -eq 'wait' -and -not $failedReport.failure) 'Failure reporting outage escaped instead of waiting safely'
+    $firstFailure=[IO.File]::ReadAllText((Join-Path $failedReportDirectory 'domain-join-state.json'))
+    Assert-Join ($failedReport.journal.detail.Contains('Stage: native_domain_join')) 'Original native failure was not saved'
+    $repeatedReport=Invoke-JoinFixture $failedReportDirectory @{FailStatus='failed'}
+    Assert-Join ($repeatedReport.result -eq 'wait' -and -not $repeatedReport.failure) 'Repeated failure reporting outage escaped'
+    Assert-Join (([IO.File]::ReadAllText((Join-Path $failedReportDirectory 'domain-join-state.json'))) -ceq $firstFailure) 'Callback rejection overwrote the first domain failure'
+    Assert-Join ($repeatedReport.native.Count -eq 0 -and $repeatedReport.reboots.Count -eq 0) 'Reporting a failed task retried a join or reboot'
+    $failureDelivered=Invoke-JoinFixture $failedReportDirectory
+    Assert-Join ($failureDelivered.result -eq 'failed' -and $failureDelivered.calls[0].payload.detail -ceq $failedReport.journal.detail) 'Recovered callback lost the original diagnosis'
+    Assert-Join ($failureDelivered.native.Count -eq 0 -and $failureDelivered.reboots.Count -eq 0) 'Recovered failure callback changed machine state'
+
+    $timeoutDirectory=New-JoinCase
+    foreach($name in @('Finalize.ps1','DeviceInfo.ps1')){
+        [IO.File]::Copy((Join-Path $PSScriptRoot ('pc_deploy\agent\'+$name)),(Join-Path $timeoutDirectory $name))
+    }
+    [IO.File]::WriteAllText((Join-Path $timeoutDirectory 'domain-join-state.json'),$firstFailure)
+    $timeoutConfig=@{server_url='https://deploy.test/pc-deploy';job_id='fixture';hardware_uuid='fixture-hardware';
+        token='fixture-only-token';expires_at=0;domain_join=@{domain='corp.test';mode='manual'}}
+    [IO.File]::WriteAllText((Join-Path $timeoutDirectory 'config.json'),($timeoutConfig|ConvertTo-Json -Depth 4))
+    $timeoutRunner=@'
+function Invoke-RestMethod {
+    param($Method,$Uri,$Headers,$ContentType,$Body,$TimeoutSec,[switch]$UseBasicParsing)
+    [IO.File]::WriteAllBytes((Join-Path $PSScriptRoot 'sent.json'),$Body)
+}
+& (Join-Path $PSScriptRoot 'Finalize.ps1')
+exit $LASTEXITCODE
+'@
+    [IO.File]::WriteAllText((Join-Path $timeoutDirectory 'Timeout.ps1'),$timeoutRunner)
+    & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -File (Join-Path $timeoutDirectory 'Timeout.ps1')
+    Assert-Join ($LASTEXITCODE -eq 1) 'Timed-out finalizer did not exit as failed'
+    Assert-Join (([IO.File]::ReadAllText((Join-Path $timeoutDirectory 'domain-join-state.json'))) -ceq $firstFailure) 'Finalizer timeout replaced the original failure journal'
+    $timeoutSent=[IO.File]::ReadAllText((Join-Path $timeoutDirectory 'sent.json'))|ConvertFrom-Json
+    Assert-Join ($timeoutSent.detail -ceq $failedReport.journal.detail) 'Finalizer timeout reported a generic error instead of the first diagnosis'
+
+    function Test-JoinHttpDetail {
+        . $taskSource
+        $config=[pscustomobject]@{server_url='http://deploy.test/pc-deploy';token='fixture-only-completion-token';domain_join=@{domain='corp.test'}}
+        $record=[Management.Automation.ErrorRecord]::new([Exception]::new('HTTP 400 Bad Request'),'WebCmdletWebResponseException',[Management.Automation.ErrorCategory]::InvalidOperation,$null)
+        $record.ErrorDetails=[Management.Automation.ErrorDetails]::new('{"error":"Task credentials expired. fixture-only-completion-token Test-only-sensitive-value"}')
+        $detail=Get-JoinFailureDetail $record $config 'platform_config' 'Test-only-sensitive-value'
+        Assert-Join ($detail.Contains('Service response: ') -and $detail.Contains('Task credentials expired.')) 'HTTP response reason was discarded'
+        Assert-Join (-not $detail.Contains('fixture-only-completion-token') -and -not $detail.Contains('Test-only-sensitive-value')) 'HTTP response diagnostics leaked credentials'
+        $record.ErrorDetails=[Management.Automation.ErrorDetails]::new(('x'*5000)+'fixture-only-completion-token')
+        Assert-Join ((Get-JoinFailureDetail $record $config 'platform_config').Length -le 4000) 'HTTP response diagnosis exceeded the platform limit'
+    }
+    Test-JoinHttpDetail
+
     function Test-JoinWire {
         . $taskSource
         $capture=@{}

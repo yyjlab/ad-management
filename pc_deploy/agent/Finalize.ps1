@@ -69,8 +69,16 @@ while ([DateTime]::UtcNow -lt $deadline) {
 }
 if ($cfg.domain_join) {
     try {
-        Save-JoinJournal 'failed' '' 'Post-install domain DNS or trust verification timed out; no automatic reinstall or second domain join.'
-        Send-JoinState $cfg $cfg.hardware_uuid 'failed' 'Post-install domain DNS or trust verification timed out; no automatic reinstall or second domain join.'
+        $last = try {
+            [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'domain-join-state.json')) | ConvertFrom-Json
+        } catch { $null }
+        if ($last.phase -eq 'failed') {
+            $detail = [string]$last.detail
+        } else {
+            $detail = 'Post-install domain DNS or trust verification timed out; no automatic reinstall or second domain join.'
+            Save-JoinJournal 'failed' '' $detail
+        }
+        Send-JoinState $cfg $cfg.hardware_uuid 'failed' $detail
     } catch { }
 }
 exit 1

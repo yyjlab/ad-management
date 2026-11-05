@@ -24,6 +24,9 @@ function Get-JoinFailureDetail {
         ('Error: ' + $Failure.Exception.Message),
         ('Error ID: ' + $Failure.FullyQualifiedErrorId),
         ('Script line: ' + $Failure.InvocationInfo.ScriptLineNumber))
+    if ($Failure.ErrorDetails.Message) {
+        $lines += ('Service response: ' + $Failure.ErrorDetails.Message)
+    }
     $detail = $lines -join [Environment]::NewLine
     foreach ($secret in @($Password, $Config.token)) {
         if ($secret) { $detail = $detail.Replace([string]$secret, '[redacted]') }
@@ -92,7 +95,8 @@ function Invoke-DeploymentDomainJoin {
     $configuration = $null; $credential = $null; $controller = ''; $operation = 'initial_checks'
     try {
         if ($journal.phase -eq 'failed') {
-            Send-JoinState $Config $Hardware 'failed' $journal.detail
+            try { Send-JoinState $Config $Hardware 'failed' $journal.detail }
+            catch { return 'wait' }
             return 'failed'
         }
         if ($os.ProductType -ne 1) { throw 'Automatic domain join is restricted to newly installed workstations.' }
@@ -221,7 +225,8 @@ function Invoke-DeploymentDomainJoin {
     } catch {
         $detail = Get-JoinFailureDetail $_ $Config $operation $configuration.password $controller
         Save-JoinJournal 'failed' $boot $detail
-        Send-JoinState $Config $Hardware 'failed' $detail
+        try { Send-JoinState $Config $Hardware 'failed' $detail }
+        catch { return 'wait' }
         return 'failed'
     } finally {
         $credential=$null; $configuration=$null
