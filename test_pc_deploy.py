@@ -23,7 +23,20 @@ from pc_deploy.deployment import (Invalid, NAMESPACE, answer_file, canonical, di
                         public_url, source_record, target_check, unc_path)
 
 
+def decoded_bootstrap(command):
+    launcher = base64.b64decode(command.rsplit(' ', 1)[1]).decode('utf-16le')
+    packed = re.search(r"\$deploymentBootstrap='([^']+)'", launcher)
+    return gzip.decompress(base64.b64decode(packed.group(1))).decode() if packed else launcher
+
+
+def bootstrap_files(bootstrap):
+    packed = re.search(r"\$deploymentFiles='([^']+)'", bootstrap)
+    return json.loads(gzip.decompress(base64.b64decode(packed.group(1))))
+
+
 def bootstrap_config(bootstrap):
+    if '$deploymentFiles=' in bootstrap:
+        return json.loads(bootstrap_files(bootstrap)['config.json'])
     compressed = re.search(r"Write-DeploymentScript 'config.json' '([^']+)'", bootstrap)
     if compressed:
         return json.loads(gzip.decompress(base64.b64decode(compressed.group(1))))
@@ -252,7 +265,7 @@ class PlatformTests(unittest.TestCase):
     def test_manual_join_wim_http_gate_keeps_credentials_private_until_release(self):
         inv, _, job, token, authorization = self.join_fixtures(wim=True, allow_http=True, manual=True)
         route = f'/pc-deploy/api/agent/jobs/{job}/domain-join/config'
-        bootstrap = base64.b64decode(authorization['finalizer_command'].rsplit(' ', 1)[1]).decode('utf-16le')
+        bootstrap = decoded_bootstrap(authorization['finalizer_command'])
         self.assertNotIn('Test-only-domain-password', bootstrap)
         self.assertLess(len(authorization['finalizer_command']), 30000)
         config = bootstrap_config(bootstrap)
@@ -272,6 +285,57 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(self.post(route, ready, token).json['password'], 'Test-only-domain-password')
 
 
+    def test_device_details_are_optional_and_do_not_change_disk_authorization(self):
+        raw = machine()
+        raw['system_info'] = dict(computer_name='MININT-TEST', cpus=[dict(name='Original CPU', cores=8, threads=16)],
+                                  password='must-not-be-persisted')
+        inv, reg, _, profile = self.fixtures(raw)
+        preview = self.preview(inv, profile)
+        self.assertEqual(preview.status_code, 200, preview.json)
+        refreshed = copy.deepcopy(raw)
+        refreshed['system_info']['cpus'][0]['name'] = 'Commit CPU'
+        self.assertEqual(self.post('/pc-deploy/api/agent/poll', refreshed, reg['token']).status_code, 200)
+        self.enable()
+        commit = self.post('/pc-deploy/api/jobs/commit', dict(preview_id=preview.json['id'],
+                           confirmation='YES', physical_confirmed=True))
+        self.assertEqual(commit.status_code, 200, commit.json)
+        job = commit.json['ids'][0]
+        updated = copy.deepcopy(raw)
+        updated['system_info'] = dict(computer_name='MININT-TEST', cpus=[dict(name='Refreshed CPU')])
+        polled = self.post('/pc-deploy/api/agent/poll', updated, reg['token'])
+        self.assertEqual(polled.status_code, 200, polled.json)
+        dashboard = self.client.get('/pc-deploy/api/dashboard').json
+        self.assertEqual(dashboard['devices'][0]['system_info']['cpus'][0]['name'], 'Refreshed CPU')
+        snapshot = dashboard['jobs'][0]['device_info']
+        self.assertEqual(snapshot['system_info']['cpus'][0]['name'], 'Commit CPU')
+        self.assertEqual(snapshot['ram_bytes'], raw['ram_bytes'])
+        self.assertEqual(snapshot['hardware_uuid'], raw['hardware_uuid'])
+        self.assertNotIn('partitions', snapshot['disks'][0])
+        self.assertNotIn('must-not-be-persisted', json.dumps(dashboard))
+        self.assertEqual(self.post(f'/pc-deploy/api/agent/jobs/{job}/start', updated, reg['token']).status_code, 200)
+        with self.store.connect() as c:
+            row = c.execute('SELECT inventory_hash FROM devices WHERE id=?', (raw['hardware_uuid'],)).fetchone()
+            self.assertEqual(row['inventory_hash'], digest(inventory(raw)))
+
+    def test_device_report_rejects_unknown_fields_and_bounds_lists(self):
+        from pc_deploy.deployment import device_report
+        value = dict(computer_name='PC\x00name', ram_bytes=True, secret='hidden',
+                     cpus=[dict(name='CPU', cores=True, threads=-1)]*100,
+                     networks=[dict(name='NIC', addresses=['172.168.30.60','invalid',True],
+                                    token='secret', link_mbps=1000)],
+                     volumes='invalid')
+        report = device_report(value, 'windows')
+        self.assertEqual(report['computer_name'], 'PC name')
+        self.assertEqual(len(report['cpus']), 8)
+        self.assertNotIn('cores', report['cpus'][0])
+        self.assertNotIn('threads', report['cpus'][0])
+        self.assertNotIn('ram_bytes', report)
+        self.assertNotIn('secret', report)
+        self.assertEqual(report['networks'][0]['addresses'], ['172.168.30.60'])
+        self.assertNotIn('token', report['networks'][0])
+        self.assertNotIn('volumes', report)
+        self.assertEqual(device_report(None, 'pe'), {})
+
     def test_postinstall_display_metadata_is_separate_from_approved_inventory(self):
         inv, _, job, token, _ = self.join_fixtures()
         route = f'/pc-deploy/api/agent/jobs/{job}'
@@ -279,7 +343,8 @@ class PlatformTests(unittest.TestCase):
             original = json.loads(c.execute('SELECT data FROM jobs WHERE id=?', (job,)).fetchone()['data'])
         info = dict(model='HKD-WXX', manufacturer='HUAWEI', system_family='MateBook',
                     product_name='HKD-WXX', product_version='M1010', oem_model='HUAWEI MateBook 14s',
-                    ignored_secret='not-a-display-field')
+                    ignored_secret='not-a-display-field', system_info=dict(computer_name='ACTUAL-PC',
+                    os_name='Windows 11 Pro', os_build='26100', cpus=[dict(name='Test CPU', cores=8, threads=16)]))
         identity = dict(hardware_uuid=inv['hardware_uuid'], device_info=info)
         self.assertEqual(self.join_post(route+'/domain-join/config',
                                        dict(identity, hardware_uuid=str(uuid.uuid4())), token).status_code, 400)
@@ -292,6 +357,9 @@ class PlatformTests(unittest.TestCase):
         logs = self.client.get(route.replace('/api/agent/', '/api/')+'/events').json['job']
         self.assertEqual(dashboard['model'], 'HKD-WXX')
         self.assertEqual(dashboard['manufacturer'], 'HUAWEI')
+        self.assertEqual(dashboard['device_info']['system_info']['computer_name'], 'ACTUAL-PC')
+        self.assertEqual(dashboard['device_info']['system_info']['source'], 'windows')
+        self.assertGreater(dashboard['device_info']['system_info']['reported_at'], 0)
         self.assertEqual(logs['oem_model'], 'HUAWEI MateBook 14s')
         self.assertNotIn('not-a-display-field', json.dumps(dashboard))
         with self.store.connect() as c:
@@ -320,7 +388,7 @@ class PlatformTests(unittest.TestCase):
 
     def test_domain_join_http_opt_in_completes_with_scoped_credentials_and_unchanged_pe(self):
         inv, reg, job, token, authorization = self.join_fixtures(wim=True, allow_http=True)
-        bootstrap = base64.b64decode(authorization['finalizer_command'].rsplit(' ', 1)[1]).decode('utf-16le')
+        bootstrap = decoded_bootstrap(authorization['finalizer_command'])
         config = bootstrap_config(bootstrap)
         self.assertIs(config['allow_http'], True)
         self.assertIs(config['domain_join']['allow_http'], True)
@@ -551,14 +619,12 @@ class PlatformTests(unittest.TestCase):
                    domain_join=dict(domain='corp.example.test', computer_name='WFQ101755', employee_id='WFQ101755'))
         command = finalizer_command(cfg)
         self.assertLess(len(command), 30000)
-        bootstrap = base64.b64decode(command.rsplit(' ', 1)[1]).decode('utf-16le')
-        scripts = [(name, encoded) for name, encoded in
-                   re.findall(r"Write-DeploymentScript '([^']+)' '([^']+)'", bootstrap)
-                   if name.endswith('.ps1')]
-        self.assertEqual({name for name, _ in scripts}, {'Finalize.ps1', 'DomainJoin.ps1'})
-        for name, encoded in scripts:
+        bootstrap = decoded_bootstrap(command)
+        files = bootstrap_files(bootstrap)
+        scripts = {name: content for name, content in files.items() if name.endswith('.ps1')}
+        self.assertEqual(set(scripts), {'Finalize.ps1', 'DomainJoin.ps1', 'DeviceInfo.ps1'})
+        for name, actual in scripts.items():
             expected = (Path(__file__).parent/'pc_deploy'/'agent'/name).read_text(encoding='utf-8-sig')
-            actual = gzip.decompress(base64.b64decode(encoded)).decode('utf-8-sig')
             self.assertEqual(actual.replace('\r\n', '\n'), expected)
         self.assertEqual(bootstrap_config(bootstrap), cfg)
         if os.name == 'nt':
@@ -572,14 +638,15 @@ function Start-ScheduledTask {}
 """
             with tempfile.TemporaryDirectory(prefix='pcdeploy-bootstrap-test-') as directory:
                 environment = dict(os.environ, ProgramData=directory)
-                encoded = base64.b64encode((mock+bootstrap).encode('utf-16le')).decode()
+                launcher = base64.b64decode(command.rsplit(' ', 1)[1]).decode('utf-16le')
+                encoded = base64.b64encode((mock+launcher).encode('utf-16le')).decode()
                 powershell = Path(os.environ['SystemRoot'])/'System32'/'WindowsPowerShell'/'v1.0'/'powershell.exe'
                 result = subprocess.run([str(powershell), '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
                                         env=environment, capture_output=True, text=True, timeout=30)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 folder = Path(directory)/'PCDeploy'/cfg['job_id']
                 self.assertEqual(json.loads((folder/'config.json').read_text(encoding='utf-8')), cfg)
-                for name, _ in scripts:
+                for name in scripts:
                     expected = (Path(__file__).parent/'pc_deploy'/'agent'/name).read_text(encoding='utf-8-sig')
                     self.assertEqual((folder/name).read_text(encoding='utf-8-sig'), expected)
 
@@ -587,7 +654,7 @@ function Start-ScheduledTask {}
         inv, _, job, token, authorization = self.join_fixtures(wim=True)
         command = authorization['finalizer_command']
         self.assertLess(len(command), 30000)
-        bootstrap = base64.b64decode(command.rsplit(' ', 1)[1]).decode('utf-16le')
+        bootstrap = decoded_bootstrap(command)
         self.assertIn('DomainJoin.ps1', bootstrap)
         self.assertIn('GZipStream', bootstrap)
         self.assertNotIn('Test-only-domain-password', bootstrap)

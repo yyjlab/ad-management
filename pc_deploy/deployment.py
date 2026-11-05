@@ -7,6 +7,7 @@ import re
 import uuid
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from ipaddress import ip_address
 from urllib.parse import urlsplit
 
 NAMESPACE = 'urn:schemas-microsoft-com:unattend'
@@ -166,6 +167,67 @@ def profile_record(data, source):
                 username=username, computer_prefix=prefix, system_gib=size)
 
 
+def device_report(value, source):
+    """Optional display-only telemetry; never part of the destructive-target hash."""
+    if not isinstance(value, dict):
+        return {}
+    result = {}
+    strings = ('computer_name', 'os_name', 'os_version', 'os_build', 'os_architecture',
+               'domain', 'bios_manufacturer', 'bios_version', 'board_manufacturer',
+               'board_model', 'board_serial')
+    def clean_string(raw):
+        return re.sub(r'[\x00-\x1f\x7f]', ' ', raw).strip()[:160] if isinstance(raw, str) else None
+    for key in strings:
+        item = clean_string(value.get(key))
+        if item:
+            result[key] = item
+    if type(value.get('part_of_domain')) is bool:
+        result['part_of_domain'] = value['part_of_domain']
+    if type(value.get('ram_bytes')) is int and 0 < value['ram_bytes'] <= 2**53 - 1:
+        result['ram_bytes'] = value['ram_bytes']
+    groups = {
+        'cpus': (8, ('name',), {'cores': 4096, 'threads': 8192, 'max_mhz': 100000}),
+        'memory_modules': (32, ('slot', 'manufacturer', 'part_number'),
+                           {'capacity_bytes': 2**53 - 1, 'speed_mhz': 100000}),
+        'gpus': (8, ('name', 'driver_version'), {}),
+        'networks': (16, ('name', 'mac'), {'link_mbps': 10000000}),
+        'volumes': (32, ('letter', 'filesystem'), {'size_bytes': 2**53 - 1, 'free_bytes': 2**53 - 1}),
+    }
+    for group, (limit, fields, numbers) in groups.items():
+        items = value.get(group)
+        if not isinstance(items, list):
+            continue
+        rows = []
+        for item in items[:limit]:
+            if not isinstance(item, dict):
+                continue
+            row = {}
+            for key in fields:
+                text_value = clean_string(item.get(key))
+                if text_value:
+                    row[key] = text_value
+            for key, maximum in numbers.items():
+                number = item.get(key)
+                if type(number) is int and 0 <= number <= maximum:
+                    row[key] = number
+            if group == 'networks' and isinstance(item.get('addresses'), list):
+                row['addresses'] = []
+                for address in item['addresses'][:16]:
+                    if not isinstance(address, str):
+                        continue
+                    try:
+                        row['addresses'].append(str(ip_address(address)))
+                    except (ValueError, TypeError):
+                        continue
+            if row:
+                rows.append(row)
+        if rows:
+            result[group] = rows
+    if result:
+        result['source'] = source
+    return result
+
+
 def inventory(data):
     if not isinstance(data, dict):
         raise Invalid('设备清单格式错误')
@@ -300,34 +362,28 @@ def component(settings, name):
 
 
 def finalizer_command(config):
-    script = (Path(__file__).parent / 'agent' / 'Finalize.ps1').read_text(encoding='utf-8-sig')
-    script_b64 = base64.b64encode(script.encode()).decode()
-    config_b64 = base64.b64encode(canonical(config).encode()).decode()
-    config_write = f"[IO.File]::WriteAllBytes((Join-Path $p 'config.json'),[Convert]::FromBase64String('{config_b64}'))"
-    script_write = f"[IO.File]::WriteAllBytes((Join-Path $p 'Finalize.ps1'),[Convert]::FromBase64String('{script_b64}'))"
+    names = ['Finalize.ps1', 'DeviceInfo.ps1']
     if config.get('domain_join'):
-        helper = (Path(__file__).parent / 'agent' / 'DomainJoin.ps1').read_bytes()
-        helper_b64 = base64.b64encode(gzip.compress(helper)).decode()
-        finalizer_b64 = base64.b64encode(gzip.compress(script.encode())).decode()
-        # Compress scripts and configuration so HTTPS certificates fit the command limit.
-        compressed_config = base64.b64encode(gzip.compress(canonical(config).encode())).decode()
-        config_write = f"Write-DeploymentScript 'config.json' '{compressed_config}'"
-        script_write = f"""function Write-DeploymentScript($name,$encoded) {{
-$m=[IO.MemoryStream]::new([Convert]::FromBase64String($encoded))
-$z=[IO.Compression.GZipStream]::new($m,[IO.Compression.CompressionMode]::Decompress)
-$f=[IO.File]::Create((Join-Path $p $name))
-try{{$z.CopyTo($f)}}finally{{$f.Dispose();$z.Dispose();$m.Dispose()}}
-}}
-Write-DeploymentScript 'Finalize.ps1' '{finalizer_b64}'
-Write-DeploymentScript 'DomainJoin.ps1' '{helper_b64}'"""
-    # Only constant code and base64-encoded JSON enter the command, never user shell syntax.
+        names.append('DomainJoin.ps1')
+    # One compressed bundle shares repeated script text and avoids nested base64 expansion.
+    files = {name: (Path(__file__).parent / 'agent' / name).read_text(encoding='utf-8-sig') for name in names}
+    files['config.json'] = canonical(config)
+    packed = base64.b64encode(gzip.compress(canonical(files).encode())).decode()
+    file_names = ','.join("'" + name + "'" for name in files)
+    # Only constant file names and base64-encoded JSON enter PowerShell.
     bootstrap = f"""$ErrorActionPreference='Stop'
 $p=Join-Path $env:ProgramData 'PCDeploy\\{config['job_id']}'
-New-Item -ItemType Directory -Path $p -Force | Out-Null
+[IO.Directory]::CreateDirectory($p)|Out-Null
 & icacls.exe $p /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
 if($LASTEXITCODE -ne 0){{throw 'Cannot protect finalizer directory'}}
-{script_write}
-{config_write}
+$deploymentFiles='{packed}'
+$m=[IO.MemoryStream]::new([Convert]::FromBase64String($deploymentFiles))
+$z=[IO.Compression.GZipStream]::new($m,[IO.Compression.CompressionMode]::Decompress)
+$r=[IO.StreamReader]::new($z,[Text.Encoding]::UTF8)
+try{{$files=ConvertFrom-Json -InputObject $r.ReadToEnd()}}finally{{$r.Dispose()}}
+foreach($name in @({file_names})){{
+[IO.File]::WriteAllText((Join-Path $p $name),[string]$files.$name,[Text.UTF8Encoding]::new($false))
+}}
 $a=New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -ExecutionPolicy Bypass -File "'+$p+'\\Finalize.ps1"')
 $t=New-ScheduledTaskTrigger -AtStartup
 Register-ScheduledTask -TaskName 'PCDeploy-{config['job_id']}' -Action $a -Trigger $t -User 'SYSTEM' -RunLevel Highest -Force | Out-Null

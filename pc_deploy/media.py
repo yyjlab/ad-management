@@ -78,7 +78,7 @@ def register_media_routes(app, store, admin, body, tls_required, bearer, event, 
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
             z.writestr('config.json', canonical(config))
-            for name in ('Deploy-Agent.ps1', 'Start.ps1'):
+            for name in ('Deploy-Agent.ps1', 'Start.ps1', 'DeviceInfo.ps1'):
                 z.write(ROOT / 'agent' / name, name)
             for name in ('Build-OnThisPC.ps1', 'Build-LocalMedia.ps1'):
                 z.write(ROOT / 'scripts' / name, name)

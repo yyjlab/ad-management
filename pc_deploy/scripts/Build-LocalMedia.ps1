@@ -33,7 +33,7 @@ try {
     }
     $dest = Join-Path $mount 'PCDeploy'
     New-Item -ItemType Directory -Path $dest -Force | Out-Null
-    foreach ($name in @('config.json', 'Deploy-Agent.ps1', 'Start.ps1')) {
+    foreach ($name in @('config.json', 'Deploy-Agent.ps1', 'Start.ps1', 'DeviceInfo.ps1')) {
         Copy-Item -LiteralPath (Join-Path $job $name) -Destination (Join-Path $dest $name) -Force
     }
     $startup = "@echo off" + [Environment]::NewLine + "wpeinit" + [Environment]::NewLine +

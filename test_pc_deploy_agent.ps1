@@ -1,4 +1,4 @@
-﻿$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\pc_deploy\agent\Deploy-Agent.ps1" -LibraryOnly
 $disk = @{number=3; serial='TEST-SSD'; unique_id='TEST-ID'; size_bytes=512GB;
           bus='NVMe'; read_only=$false; offline=$false}
@@ -19,7 +19,7 @@ try { Select-VerifiedDisk @($disk,$disk) $expected | Out-Null } catch { $rejecte
 if (-not $rejected) { throw 'Ambiguous disk selection was not rejected.' }
 $count++
 $tokens=$null;$errors=$null
-foreach ($file in @('agent/Deploy-Agent.ps1','agent/Start.ps1','agent/Finalize.ps1',
+foreach ($file in @('agent/Deploy-Agent.ps1','agent/Start.ps1','agent/Finalize.ps1','agent/DeviceInfo.ps1',
                     'scripts/Build-WinPE.ps1','scripts/Inspect-InstallSource.ps1')) {
     [Management.Automation.Language.Parser]::ParseFile((Join-Path "$PSScriptRoot\pc_deploy" $file),[ref]$tokens,[ref]$errors) | Out-Null
     if ($errors.Count) { throw "PowerShell parsing failed: $file" }
@@ -643,6 +643,7 @@ foreach ($case in @(@{exit=0;offline=$false},@{exit=87;offline=$false},@{exit=0;
     try {
         $library=Join-Path $fixture 'Deploy-Agent.ps1'
         [IO.File]::Copy("$PSScriptRoot\pc_deploy\agent\Deploy-Agent.ps1",$library)
+        [IO.File]::Copy("$PSScriptRoot\pc_deploy\agent\DeviceInfo.ps1",(Join-Path $fixture 'DeviceInfo.ps1'))
         . $library -LibraryOnly
         $payloads=[Collections.Generic.List[object]]::new()
         function Invoke-Platform { param($Route,$Token,$Data,$TimeoutSec) $payloads.Add($Data) }
@@ -660,6 +661,38 @@ foreach ($case in @(@{exit=0;offline=$false},@{exit=87;offline=$false},@{exit=0;
     }
 }
 $count++
+
+# Shared hardware collection is read-only, optional, bounded, and cached in both OS phases.
+& {
+    . "$PSScriptRoot\pc_deploy\agent\DeviceInfo.ps1"
+    $script:DeploymentInfoCache=$null
+    $script:deviceQueries=0
+    function Get-CimInstance {
+        param($ClassName,$Property,$OperationTimeoutSec,$ErrorAction,$Filter)
+        $script:deviceQueries++
+        if($OperationTimeoutSec -ne 3){throw 'Inventory query must be bounded'}
+        switch($ClassName){
+            'Win32_ComputerSystem' { [pscustomobject]@{Domain='corp.test';PartOfDomain=$true;TotalPhysicalMemory=16GB} }
+            'Win32_Processor' { [pscustomobject]@{Name='Test CPU';NumberOfCores=8;NumberOfLogicalProcessors=16;MaxClockSpeed=4200} }
+            'Win32_PhysicalMemory' { [pscustomobject]@{DeviceLocator='DIMM0';Capacity=16GB;Speed=3200;Manufacturer='Fixture';PartNumber='TEST'} }
+            'Win32_OperatingSystem' { [pscustomobject]@{Caption='Windows 11 Pro';Version='10.0.26100';BuildNumber='26100';OSArchitecture='64-bit'} }
+            default { throw 'Optional class unavailable' }
+        }
+    }
+    $pe=Get-DeploymentDeviceInfo -Stage pe
+    if($pe.cpus[0].cores -ne 8 -or $pe.memory_modules[0].capacity_bytes -ne 16GB){throw 'Hardware collection failed'}
+    if($pe.ContainsKey('os_name')){throw 'PE must not claim the installed Windows version'}
+    $before=$script:deviceQueries
+    $again=Get-DeploymentDeviceInfo -Stage pe
+    if($script:deviceQueries -ne $before){throw 'Repeated PE polling must reuse the short-lived inventory cache'}
+    $windows=Get-DeploymentDeviceInfo -Stage windows
+    if($windows.os_name -ne 'Windows 11 Pro' -or $windows.os_build -ne '26100'){throw 'Installed-system details not reported'}
+    $script:DeploymentInfoCache=$null
+    function Get-CimInstance { throw 'All optional WMI classes unavailable' }
+    $minimal=Get-DeploymentDeviceInfo -Stage windows
+    if(-not $minimal.ContainsKey('computer_name') -or $minimal.cpus.Count -ne 0){throw 'Missing optional hardware must not stop the callback'}
+}
+$count+=5
 
 Write-Output "$count PowerShell protection and parser checks passed. No disk command was executed."
 

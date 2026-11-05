@@ -12,7 +12,7 @@ if (embedded) document.documentElement.classList.add('embedded');
 let csrf = '', data = null, view = Object.hasOwn(labels, embedParams.get('view')) ? embedParams.get('view') : 'devices', busy = false;
 let joinSelection = new Set();
 let chosen = new Set(), disks = new Map(), partitions = new Map(), employeeIds = new Map(), profileId = '', search = '', filter = 'all', previewId = null;
-let toastTimer, settingsDirty = false, jobLog = null, serverTime = 0, serverSample = 0;
+let toastTimer, settingsDirty = false, jobLog = null, deviceDialog = null, serverTime = 0, serverSample = 0;
 const jobSnapshots = new Map();
 function latestJob(job, sampledAt) {
   const previous = jobSnapshots.get(job.id);
@@ -60,6 +60,7 @@ async function refresh() {
       jobLog.result.job = latestJob(jobLog.result.job, jobLog.result.server_time);
       renderJobLogs();
     }
+    if (deviceDialog && $('#modal').open) renderJobDeviceDetail();
   } catch (e) { $('#connection-error').textContent = '数据读取失败：' + e.message; $('#connection-error').hidden = false; }
   finally { busy = false; }
 }
@@ -294,7 +295,7 @@ function renderJobs() {
   const ready=data.jobs.filter(canReleaseDomainJoin), readyIds=new Set(ready.map(job=>job.id));
   joinSelection=new Set([...joinSelection].filter(id=>readyIds.has(id)));
   const releaseToolbar=ready.length?'<div class="notice"><strong>有 '+ready.length+' 台 Windows 已安装，等待统一加域。</strong><p>完成现场设置后，勾选下方电脑，再统一执行。等待期间不会因加域额外重启；请在任务创建后 72 小时内执行。</p><button id="release-selected-joins" data-action="release-joins" class="primary" '+(joinSelection.size?'':'disabled')+'>统一加域并重启（'+joinSelection.size+' 台）</button></div>':'';
-  $('#page-content').innerHTML = releaseToolbar+`<div class="table-wrap">${data.jobs.length?`<table><thead><tr>${ready.length?'<th class="check-cell"><input id="select-all-joins" type="checkbox" aria-label="全选待统一加域电脑" '+(joinSelection.size===ready.length?'checked':'')+'></th>':''}<th>设备</th><th>方案 / 目标盘</th><th>任务状态</th><th>安装时间 / 用时</th><th>操作</th></tr></thead><tbody>${data.jobs.map(j=>`<tr class="job-row" data-state="${h(j.state)}">${ready.length?'<td class="check-cell">'+(canReleaseDomainJoin(j)?'<input type="checkbox" data-job-join="'+h(j.id)+'" aria-label="选择 '+h(j.serial)+' 统一加域" '+(joinSelection.has(j.id)?'checked':'')+'>':'')+'</td>':''}<td><span class="cell-title">${h(deviceLabel(j))}</span><span class="cell-sub mono">${h(j.serial)}</span>${j.computer_name?'<span class="cell-sub mono">工号电脑名：'+h(j.computer_name)+'</span>':''}${modelHint(j)}</td><td>${h(j.profile)}<span class="cell-sub">磁盘 ${j.disk.number} · ${h(size(j.disk.size_bytes))}</span></td><td>${jobBadge(j)}${renderJobProgress(j)}${j.stale?'<span class="cell-sub error">长时间未回报，需现场核对</span>':''}</td><td>${renderJobTiming(j)}</td><td>${canReleaseDomainJoin(j)?'<button class="small" data-action="release-joins" data-id="'+h(j.id)+'">执行加域</button> ':''}${['queued','preflight'].includes(j.state)?`<button class="small" data-action="cancel-job" data-id="${h(j.id)}">取消任务</button>`:j.state==='failed'?`<button class="small" data-action="review-job" data-id="${h(j.id)}">${j.review?'更新核对':'人工核对'}</button>`:activeStates.includes(j.state)&&j.stale?`<button class="small" data-action="reconcile-job" data-id="${h(j.id)}">结束异常记录</button>`:''} <button class="small job-log-button" data-action="job-logs" data-id="${h(j.id)}">查看日志</button></td></tr>`).join('')}</tbody></table>`:empty('暂无安装任务')}</div><div class="subheading"><h3>平台操作记录</h3><small>最近 100 条 · 任务日志请点击对应任务查看</small></div><div class="log-list">${renderLogEvents(data.events) || empty('暂无操作记录')}</div>`;
+  $('#page-content').innerHTML = releaseToolbar+`<div class="table-wrap">${data.jobs.length?`<table><thead><tr>${ready.length?'<th class="check-cell"><input id="select-all-joins" type="checkbox" aria-label="全选待统一加域电脑" '+(joinSelection.size===ready.length?'checked':'')+'></th>':''}<th>设备</th><th>方案 / 目标盘</th><th>任务状态</th><th>安装时间 / 用时</th><th>操作</th></tr></thead><tbody>${data.jobs.map(j=>`<tr class="job-row" data-state="${h(j.state)}">${ready.length?'<td class="check-cell">'+(canReleaseDomainJoin(j)?'<input type="checkbox" data-job-join="'+h(j.id)+'" aria-label="选择 '+h(j.serial)+' 统一加域" '+(joinSelection.has(j.id)?'checked':'')+'>':'')+'</td>':''}<td><button class="inline-link cell-title job-device-link" data-action="job-device-detail" data-id="${h(j.id)}" title="查看电脑详细信息">${h(deviceLabel(j))}</button><span class="cell-sub mono">${h(j.serial)}</span>${j.computer_name?'<span class="cell-sub mono">工号电脑名：'+h(j.computer_name)+'</span>':''}${modelHint(j)}</td><td>${h(j.profile)}<span class="cell-sub">磁盘 ${j.disk.number} · ${h(size(j.disk.size_bytes))}</span></td><td>${jobBadge(j)}${renderJobProgress(j)}${j.stale?'<span class="cell-sub error">长时间未回报，需现场核对</span>':''}</td><td>${renderJobTiming(j)}</td><td>${canReleaseDomainJoin(j)?'<button class="small" data-action="release-joins" data-id="'+h(j.id)+'">执行加域</button> ':''}${['queued','preflight'].includes(j.state)?`<button class="small" data-action="cancel-job" data-id="${h(j.id)}">取消任务</button>`:j.state==='failed'?`<button class="small" data-action="review-job" data-id="${h(j.id)}">${j.review?'更新核对':'人工核对'}</button>`:activeStates.includes(j.state)&&j.stale?`<button class="small" data-action="reconcile-job" data-id="${h(j.id)}">结束异常记录</button>`:''} <button class="small job-log-button" data-action="job-logs" data-id="${h(j.id)}">查看日志</button></td></tr>`).join('')}</tbody></table>`:empty('暂无安装任务')}</div><div class="subheading"><h3>平台操作记录</h3><small>最近 100 条 · 任务日志请点击对应任务查看</small></div><div class="log-list">${renderLogEvents(data.events) || empty('暂无操作记录')}</div>`;
   restoreJobProgress($('#page-content'), previous);
   updateJoinSelection();
   updateJobTimers();
@@ -326,7 +327,7 @@ function renderSettings() {
   const s = data.settings;
   $('#page-content').innerHTML = `<div class="settings-layout"><div><form id="settings-form"><section class="section"><h3>部署服务器</h3><div class="field"><label for="public-url">客户端访问地址</label><input id="public-url" name="public_url" value="${h(s.public_url)}" type="url" required><small>内网支持 HTTP，也支持 HTTPS。填写客户端能够访问的完整平台地址。</small></div><div class="field"><label for="ca-pem">HTTPS 内部根 CA 公共证书（可选，PEM）</label><textarea id="ca-pem" name="ca_pem" placeholder="-----BEGIN CERTIFICATE-----">${h(s.ca_pem)}</textarea><small>使用公开信任证书可留空。不要上传私钥、PFX 或域管理员凭据。</small></div><div class="field"><label for="concurrency">同时安装上限</label><input id="concurrency" name="concurrency" type="number" min="1" max="16" value="${s.concurrency}" required></div></section><section class="section"><h3>执行保护</h3><label class="check-label"><input type="checkbox" name="enabled" ${s.enabled?'checked':''}>启用真实任务下发</label><p class="modal-help">关闭后不再授权新安装；已经启动的 Windows Setup 不会被强行中断。</p><label class="check-label"><input name="isolated_network_confirmed" type="checkbox">已确认是隔离的装机网络，安装源账号仅有读取权限</label><div class="field"><label for="enable-confirm">开启时输入 ENABLE</label><input id="enable-confirm" name="confirmation" autocomplete="off" placeholder="ENABLE"></div></section><div class="error" id="settings-error" role="alert"></div><button type="submit" class="primary">保存设置</button></form><section class="section"><h3>准备客户端</h3><button data-action="bootstrap">下载 WinPE 登记与构建包 ↓</button><p class="modal-help">登记凭据有效期 ${h(validityLabel(s.enrollment_days))}；仅用于 PE 报到，不是装机倒计时。只构建 ISO，不格式化 U 盘；已有 Ventoy 可直接存放该 ISO。</p>${renderEnrollments()}</section>${renderMedia()}</div><aside><h3>引导环境</h3><ul class="requirements"><li><span>支持架构</span><span>UEFI x64</span></li><li><span>网络模式</span><span>现有 iPXE / 备用 Ventoy</span></li><li><span>DHCP</span><span>不托管、不修改</span></li><li><span>Windows 安装</span><span>原版 Setup / 封装 WIM 还原</span></li>${Object.entries(data.boot_files).map(([k,v])=>`<li><span class="mono">${h(k)}</span><span>${v?'已准备':'尚未准备'}</span></li>`).join('')}</ul><p class="modal-help">启动文件需由你授权的 ADK / iPXE 环境准备，平台不自动下载或运行未知二进制。</p><a href="/boot.ipxe" download="boot.ipxe">下载网络启动脚本 ↓</a></aside></div>`;
 }
-function modal(title, html) { jobLog = null; $('#modal-title').textContent = title; $('#modal-body').innerHTML = html; $('#modal').showModal(); }
+function modal(title, html) { deviceDialog = null; jobLog = null; $('#modal-title').textContent = title; $('#modal-body').innerHTML = html; $('#modal').showModal(); }
 function field(label, name, type='text', value='', extra='') { const id = `field-${name}`; return `<div class="field"><label for="${id}">${h(label)}</label><input id="${id}" name="${name}" type="${type}" value="${h(value)}" ${extra}></div>`; }
 function editSource(id) {
   const s = data.sources.find(x=>x.id===id);
@@ -437,9 +438,69 @@ async function preview() {
   const r = await api('/api/jobs/preview','POST',{profile_id:profileId,targets}); previewId = r.id;
   modal('确认批量安装', `<div class="notice danger">${h(r.warning)}<br>请先完成备份；启动安装后不能远程取消，也不会自动恢复原数据。</div><p>${h(r.profile)} · ${h(r.source)} · <strong>${r.targets.length} 台电脑</strong></p><p class="notice">${h(partitionPlan(selectedProfile()))}</p>${r.domain_join?'<p class="notice">按以下员工工号改名并加入域 '+h(r.domain_join.domain)+(r.domain_join.mode==='manual'?'。先完成 Windows 安装和现场设置，再由平台统一加域；确认执行后才会额外重启一次。':'。安装完成后自动加域，成功后额外重启一次。')+'同名时依次追加 A–Z，最终名称同步到任务与日志；不会覆盖已有电脑。'+(r.domain_join.allow_http?'<br><strong>本方案允许内网 HTTP 加域，密码将明文传输。</strong>':'')+'</p>':''}<div class="table-wrap"><table class="modal-table"><thead><tr><th>整机序列号</th><th>屏幕校验码</th>${r.domain_join?'<th>工号 / 预计电脑名</th>':''}<th>将处理的硬盘 / 分区</th></tr></thead><tbody>${r.targets.map(t=>`<tr><td class="mono">${h(t.serial)}</td><td class="mono">${h(t.boot_code)}</td>${r.domain_join?'<td class="mono">'+h(t.employee_id)+'<span class="cell-sub">预计 '+h(t.computer_name)+'</span></td>':''}<td>磁盘 ${t.disk.number} · ${h(t.disk.model)} · ${h(size(t.disk.size_bytes))}<span class="cell-sub mono">${h(t.disk.serial || t.disk.unique_id)}</span>${t.partitions?`<strong>只格式化分区 ${t.partitions.windows.number} · ${h(size(t.partitions.windows.size_bytes))}</strong><span class="cell-sub mono">${h(t.partitions.windows.guid)}</span>`:''}</td></tr>`).join('')}</tbody></table></div><form id="commit-form"><div class="section"><label class="check-label"><input name="physical_confirmed" type="checkbox" required>已现场核对整机序列号、屏幕校验码和硬盘，${preservesPartitions()?'确认所选 Windows 分区数据可删除，允许更新同盘 EFI 引导':'确认所选硬盘全部数据可删除'}</label></div>${field('输入 YES 确认本批安装','confirmation','text','','required autocomplete="off" pattern="YES"')}<div id="form-error" class="error" role="alert"></div>${!data.settings.enabled?'<p class="error">真实下发尚未开启。完成隔离验证后，在启动与设置中开启。</p>':''}<div class="form-actions"><button type="button" data-action="close">返回检查</button><button class="danger-button" type="submit" ${!data.settings.enabled?'disabled':''}>确认并执行安装</button></div></form>`);
 }
+function deviceInfoTable(headers, rows) {
+  if (!rows.length) return '<p class="modal-help">此项尚未上报。</p>';
+  return '<div class="table-wrap"><table class="modal-table inventory-table"><thead><tr>'+headers.map(x=>'<th>'+h(x)+'</th>').join('')+'</tr></thead><tbody>'+
+    rows.map(row=>'<tr>'+row.map(value=>'<td>'+h(value ?? '未上报')+'</td>').join('')+'</tr>').join('')+'</tbody></table></div>';
+}
+function renderDeviceInformation(d, job=null) {
+  const report=d.system_info || {}, windows=report.source==='windows';
+  const show=value=>firmwareText(value)||'未上报';
+  const capacity=value=>Number.isFinite(value)&&value>0?size(value):'未上报';
+  const modules=Array.isArray(report.memory_modules)?report.memory_modules:[];
+  const ram=modules.reduce((sum,m)=>sum+(Number(m.capacity_bytes)||0),0)||report.ram_bytes||d.ram_bytes;
+  const field=(label,value)=>'<div><dt>'+h(label)+'</dt><dd>'+h(value)+'</dd></div>';
+  const section=(label,body)=>'<section class="device-detail-section"><h3>'+h(label)+'</h3>'+body+'</section>';
+  const cpus=Array.isArray(report.cpus)?report.cpus:[];
+  const networks=Array.isArray(report.networks)?report.networks:[];
+  const disks=Array.isArray(d.disks)?d.disks:[];
+  let html='<div class="device-info-heading"><span class="badge '+(windows?'good':'blue')+'">'+(windows?'安装后系统回报':'PE 硬件快照')+'</span>'+
+    (report.reported_at?'<small>最后上报：'+h(date(report.reported_at))+'</small>':'<small>尚未收到详细配置回报，先展示已有硬件信息。</small>')+'</div>'+
+    '<dl class="detail-grid">'+field('电脑型号',deviceLabel(d))+field('整机序列号',show(d.serial))+
+    field(windows?'实际电脑名':'PE 临时电脑名',show(report.computer_name))+
+    (job?field('计划电脑名 / 员工工号',show(job.computer_name)):field('屏幕校验码',show(d.boot_code)))+
+    field('厂家 / 系列',[d.manufacturer,d.system_family].map(firmwareText).filter(Boolean).join(' / ')||'未上报')+
+    field('内存容量',capacity(ram))+field('硬件 UUID',show(d.hardware_uuid))+
+    field('启动方式 / 架构',[d.firmware,d.architecture].filter(Boolean).join(' / ')||'未上报')+
+    field('Secure Boot / TPM 2.0',(typeof d.secure_boot==='boolean'?(d.secure_boot?'已启用':'未启用'):'未上报')+' / '+(typeof d.tpm2==='boolean'?(d.tpm2?'支持':'未确认'):'未上报'))+
+    field('网卡 MAC',(d.macs||[]).join(' / ')||'未上报')+'</dl>';
+  if(!windows)html+='<p class="modal-help">PE 临时电脑名不代表安装后的名称；Windows 信息在安装后回报时补齐。</p>';
+  html+=section('Windows 与域信息','<dl class="detail-grid">'+
+    field('Windows 版本',windows?show(report.os_name):'等待安装后回报')+
+    field('版本号 / 内部版本',windows?[report.os_version,report.os_build].filter(Boolean).join(' / ')||'未上报':'等待安装后回报')+
+    field('系统架构',windows?show(report.os_architecture):'等待安装后回报')+
+    field('实际域状态',windows?(report.part_of_domain===true?'已加入 '+show(report.domain):report.part_of_domain===false?'未加入域 · '+show(report.domain):'未上报'):'等待安装后回报')+'</dl>');
+  html+=section('处理器',deviceInfoTable(['CPU 型号','核心 / 线程','最大频率（固件报告）'],cpus.map(c=>[show(c.name),(c.cores||'—')+' 核 / '+(c.threads||'—')+' 线程',c.max_mhz?c.max_mhz+' MHz':'未上报'])));
+  html+=section('内存条',deviceInfoTable(['插槽','容量','速率（固件报告）','厂家 / 型号'],modules.map(m=>[show(m.slot),capacity(m.capacity_bytes),m.speed_mhz?m.speed_mhz+' MHz':'未上报',[m.manufacturer,m.part_number].filter(Boolean).join(' / ')||'未上报'])));
+  html+=section('装机前物理硬盘',deviceInfoTable(['编号 / 型号','序列号 / 标识','容量','总线','分区数'],disks.map(k=>[k.number+' / '+show(k.model),k.serial||k.unique_id||'未上报',capacity(k.size_bytes),show(k.bus),k.partition_count??(Array.isArray(k.partitions)?k.partitions.length:'未上报')])));
+  if(windows)html+=section('安装后本地分区',deviceInfoTable(['盘符','文件系统','总容量','剩余容量'],(report.volumes||[]).map(v=>[show(v.letter),show(v.filesystem),capacity(v.size_bytes),Number.isFinite(v.free_bytes)?size(v.free_bytes):'未上报'])));
+  html+=section('网卡与网络',deviceInfoTable(['网卡','MAC','IP 地址','驱动报告链路速率'],networks.map(n=>[show(n.name),show(n.mac),(n.addresses||[]).join(' / ')||'未分配',n.link_mbps>0?n.link_mbps+' Mbps':'未上报'])));
+  html+=section('显卡',deviceInfoTable(['显卡名称','驱动版本'],(report.gpus||[]).map(g=>[show(g.name),show(g.driver_version)])));
+  html+=section('主板与 BIOS','<dl class="detail-grid">'+field('主板厂家 / 型号',[report.board_manufacturer,report.board_model].filter(Boolean).join(' / ')||'未上报')+
+    field('主板序列号',show(report.board_serial))+field('BIOS 厂家 / 版本',[report.bios_manufacturer,report.bios_version].filter(Boolean).join(' / ')||'未上报')+
+    field('固件原始型号 / 产品版本',[d.model,d.product_version].filter(Boolean).join(' / ')||'未上报')+'</dl>');
+  return html;
+}
+function renderJobDeviceDetail() {
+  const job=data.jobs.find(j=>j.id===deviceDialog?.id);
+  if(!job)return;
+  const d={...(job.device_info||{}),model:job.model,serial:job.serial};
+  for(const key of ['manufacturer','system_family','product_name','product_version','oem_model'])d[key]=job[key];
+  if(!d.disks)d.disks=job.disk?[job.disk]:[];
+  const scroll=$('#modal').scrollTop;
+  $('#modal-body').innerHTML=renderDeviceInformation(d,job);
+  $('#modal').scrollTop=scroll;
+}
+function jobDeviceDetail(id) {
+  if(!data.jobs.some(j=>j.id===id))return;
+  modal('电脑详细信息','');
+  deviceDialog={id};
+  renderJobDeviceDetail();
+}
+
 function deviceDetail(id) {
   const d = data.devices.find(x=>x.id===id); if(!d)return;
-  modal('设备与物理硬盘', `<dl class="detail-grid"><div><dt>机型</dt><dd>${h(deviceLabel(d))}</dd></div><div><dt>厂家 / 系列</dt><dd>${h(firmwareText(d.manufacturer)||'未上报')} / ${h(firmwareText(d.system_family)||'未上报')}</dd></div><div><dt>BIOS 型号 / 产品版本</dt><dd>${h(d.model)} / ${h(firmwareText(d.product_version)||'未上报')}</dd></div><div><dt>整机序列号</dt><dd class="mono">${h(d.serial)}</dd></div><div><dt>硬件 UUID</dt><dd class="mono">${h(d.hardware_uuid)}</dd></div><div><dt>屏幕校验码</dt><dd class="mono">${h(d.boot_code)}</dd></div><div><dt>内存</dt><dd>${h(size(d.ram_bytes))}</dd></div><div><dt>网卡 MAC</dt><dd class="mono">${h(d.macs.join(' / '))}</dd></div></dl><div class="table-wrap"><table class="modal-table"><thead><tr><th>编号 / 型号</th><th>硬盘序列号</th><th>容量 / 总线</th><th>保护状态</th></tr></thead><tbody>${d.disks.map(k=>`<tr><td>${k.number} / ${h(k.model)}</td><td class="mono">${h(k.serial||k.unique_id||'身份未知')}</td><td>${h(size(k.size_bytes))} / ${h(k.bus)}</td><td>${k.eligible?'允许手动选择':'禁止选择'}</td></tr>`).join('')}</tbody></table></div>`);
+  modal('电脑详细信息', renderDeviceInformation(d));
   if (d.consumed && !currentJob(d)) {
     const actions = document.createElement('div'); actions.className = 'form-actions';
     const button = document.createElement('button'); button.textContent = '允许重新登记';
@@ -461,6 +522,7 @@ document.addEventListener('click', async e=>{
     else if(a==='new-source'||a==='edit-source')editSource(id);
     else if(a==='new-profile'||a==='edit-profile')editProfile(id);
     else if(a==='device-detail')deviceDetail(id);
+    else if(a==='job-device-detail')jobDeviceDetail(id);
     else if(a==='review-job')reviewJob(id);
     else if(a==='job-logs')await openJobLogs(id);
     else if(a==='refresh-job-logs')await loadJobLogs();
@@ -546,6 +608,7 @@ $('#close-modal').addEventListener('click',()=>$('#modal').close());
 $('#refresh').addEventListener('click',refresh);
 $('#modal').addEventListener('close',()=>{
   if (!$('#modal').open) {
+    deviceDialog = null;
     const wasJobLog = jobLog !== null;
     jobLog = null;
     if (wasJobLog) refresh();
@@ -554,7 +617,7 @@ $('#modal').addEventListener('close',()=>{
 setInterval(()=>{if(!document.hidden)updateJobTimers();},1000);
 setInterval(()=>{
   if (document.hidden) return;
-  if (!$('#modal').open) refresh();
+  if (!$('#modal').open || deviceDialog) refresh();
   else if (jobLog?.before === null && activeStates.includes(jobLog.result?.job.state)) loadJobLogs(null, true);
 },8000);
 window.addEventListener('message', event => {

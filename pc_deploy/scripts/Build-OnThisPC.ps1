@@ -97,7 +97,7 @@ if (-not $administrator) {
 }
 $exitCode=0
 try {
-    foreach ($name in @('config.json','Deploy-Agent.ps1','Start.ps1','Build-LocalMedia.ps1')) {
+    foreach ($name in @('config.json','Deploy-Agent.ps1','Start.ps1','DeviceInfo.ps1','Build-LocalMedia.ps1')) {
         if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot $name) -PathType Leaf)) { throw "Extract the complete downloaded ZIP first. Missing: $name" }
     }
     $config=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'config.json') -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -138,7 +138,7 @@ try {
     $settings.include_drivers=[bool]$config.include_drivers
     $job=Join-Path $workRoot ((Get-Date -Format 'yyyyMMdd_HHmmss')+'_'+[Guid]::NewGuid().ToString('N').Substring(0,8))
     New-Item -ItemType Directory -Path $job | Out-Null
-    foreach ($name in @('config.json','Deploy-Agent.ps1','Start.ps1')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $job $name) }
+    foreach ($name in @('config.json','Deploy-Agent.ps1','Start.ps1','DeviceInfo.ps1')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $job $name) }
     [IO.File]::WriteAllText((Join-Path $job 'local-build.json'),($settings | ConvertTo-Json),[Text.Encoding]::UTF8)
     $log=Join-Path $job 'build.log'
     Write-Host 'Building on this computer. No registration, background service or USB write is required.'

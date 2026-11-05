@@ -18,6 +18,7 @@ if ($cfg.domain_join) {
     . "$PSScriptRoot\DomainJoin.ps1"
     Assert-JoinTransport $cfg
 }
+. "$PSScriptRoot\DeviceInfo.ps1"
 $deadline = [DateTime]::UtcNow.AddHours(2)
 if ($cfg.domain_join.mode -eq 'manual') {
     $deadline = ([DateTime]'1970-01-01T00:00:00Z').ToUniversalTime().AddSeconds([double]$cfg.expires_at)
@@ -40,6 +41,7 @@ while ([DateTime]::UtcNow -lt $deadline) {
                 $oem = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\OEMInformation' -ErrorAction SilentlyContinue
                 if ($oem.Model) { $display.oem_model=[string]$oem.Model }
             } catch { }
+            try { $display.system_info = Get-DeploymentDeviceInfo -Stage windows } catch { }
             $cfg | Add-Member -NotePropertyName device_info -NotePropertyValue $display -Force
             $body = @{hardware_uuid=$hardware; computer_name=$env:COMPUTERNAME; os_build=$build;
                 image_state=$state; oobe_done=$true; device_info=$display}

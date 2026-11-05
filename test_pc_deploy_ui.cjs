@@ -377,6 +377,40 @@ async function run() {
     assert.ok(!(await page.locator('#page-content').textContent()).includes('Access denied'));checks++;
     const rowColors=await page.locator('.job-row>td:nth-child(3)>.badge').evaluateAll(els=>els.map(el=>getComputedStyle(el).color));
     assert.notEqual(rowColors[0],rowColors[1]);checks++;
+
+    // Device details use this attempt's snapshot, never another attempt on the same PC.
+    fixture.jobs[0].device_info={hardware_uuid:'laptop-1',ram_bytes:16*1024**3,firmware:'UEFI',
+      architecture:'amd64',secure_boot:true,tpm2:true,macs:['02:00:00:00:00:01'],disks:[disk],
+      system_info:{source:'pe',reported_at:1793347200,computer_name:'MININT-PE',
+        cpus:[{name:'Fixture CPU <img src=x onerror="window.deviceInjected=true">',cores:8,threads:16}],
+        memory_modules:[{slot:'DIMM0',capacity_bytes:16*1024**3,speed_mhz:3200}],
+        networks:[{name:'Fixture Gigabit NIC',mac:'02:00:00:00:00:01',addresses:['172.168.30.60'],link_mbps:1000}]}};
+    fixture.jobs[1].device_info={hardware_uuid:'laptop-1',ram_bytes:8*1024**3,disks:[disk],
+      system_info:{source:'windows',computer_name:'PREVIOUS-PC',os_name:'Windows 10 Pro',os_build:'19045',part_of_domain:false,domain:'WORKGROUP'}};
+    await page.locator('#refresh').click();
+    await page.locator('[data-action=job-device-detail][data-id=progress-job]').click();
+    await page.getByRole('heading',{name:'电脑详细信息',exact:true}).waitFor();
+    assert.ok((await page.locator('#modal-body').textContent()).includes('Fixture CPU <img'));checks++;
+    assert.ok((await page.locator('#modal-body').textContent()).includes('8 核 / 16 线程'));checks++;
+    assert.ok((await page.locator('#modal-body').textContent()).includes('1000 Mbps'));checks++;
+    assert.ok((await page.locator('#modal-body').textContent()).includes('PE 临时电脑名'));checks++;
+    assert.equal(await page.locator('#modal-body img').count(),0);checks++;
+    assert.ok(!(await page.locator('#modal-body').textContent()).includes('NaN'));checks++;
+    Object.assign(fixture.jobs[0].device_info.system_info,{source:'windows',computer_name:'CURRENT-PC',os_name:'Windows 11 Pro',os_build:'26100',part_of_domain:true,domain:'corp.test'});
+    fixture.jobs[0].updated=1793347401;fixture.server_time++;
+    await page.waitForFunction(()=>document.querySelector('#modal-body')?.textContent.includes('CURRENT-PC'),{},{timeout:12000});
+    assert.ok((await page.locator('#modal-body').textContent()).includes('Windows 11 Pro'));checks++;
+    assert.ok((await page.locator('#modal-body').textContent()).includes('已加入 corp.test'));checks++;
+    await page.setViewportSize({width:390,height:844});
+    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));checks++;
+    await page.locator('#close-modal').click();
+    await page.setViewportSize({width:1440,height:1000});
+    await page.locator('[data-action=job-device-detail][data-id=older-job]').click();
+    assert.ok((await page.locator('#modal-body').textContent()).includes('PREVIOUS-PC'));checks++;
+    assert.ok(!(await page.locator('#modal-body').textContent()).includes('CURRENT-PC'));checks++;
+    assert.ok((await page.locator('#modal-body').textContent()).includes('Windows 10 Pro'));checks++;
+    await page.locator('#close-modal').click();
+
     await page.locator('[data-action=job-logs][data-id=progress-job]').click();
     await page.locator('#job-log .log').first().waitFor();
     assert.ok((await page.locator('#job-log').textContent()).includes('TEST-LAPTOP'));checks++;

@@ -1,5 +1,6 @@
 ﻿param([string]$ConfigPath = "$PSScriptRoot\config.json", [switch]$LibraryOnly, [switch]$RegistrationOnly)
 $ErrorActionPreference = 'Stop'
+if (Test-Path -LiteralPath "$PSScriptRoot\DeviceInfo.ps1") { . "$PSScriptRoot\DeviceInfo.ps1" }
 
 function Assert-WinPE {
     if (-not (Test-Path 'HKLM:\SYSTEM\CurrentControlSet\Control\MiniNT')) {
@@ -226,6 +227,8 @@ function Get-Inventory {
         Where-Object MACAddress | ForEach-Object { [string]$_.MACAddress })
     $serial = ([string]$bios.SerialNumber).Trim()
     if (-not $serial) { $serial = 'Unknown' }
+    $details = @{}
+    try { if (Get-Command Get-DeploymentDeviceInfo -ErrorAction SilentlyContinue) { $details = Get-DeploymentDeviceInfo -Stage pe } } catch { }
     @{
         hardware_uuid = ([guid]$product.UUID).ToString().ToLowerInvariant(); boot_id = $BootId
         model = [string]$computer.Model; serial = $serial; architecture = 'amd64'
@@ -234,6 +237,7 @@ function Get-Inventory {
         firmware = $(if ($firmwareValue -eq 2) { 'UEFI' } else { 'BIOS' })
         secure_boot = $secureBoot; tpm2 = $tpm2
         ram_bytes = [long]$computer.TotalPhysicalMemory; macs = $macs; disks = $disks; wim_apply_v1 = $true
+        system_info = $details
     }
 }
 

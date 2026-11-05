@@ -24,7 +24,7 @@ from werkzeug.local import LocalProxy
 from werkzeug.exceptions import RequestEntityTooLarge
 
 from .deployment import (ACTIVE, ERRORS, STATES, Invalid, answer_file, canonical, digest,
-                        integer, inventory, profile_record, public_url, source_record,
+                        integer, inventory, device_report, profile_record, public_url, source_record,
                         target_check, text, partition_target, finalizer_command)
 from .storage import Store
 from .domain_join import available_name, computer_name, employee_id, join_record
@@ -191,6 +191,9 @@ def register_pc_deploy(host_app, current_user, touch_session):
                 names.add(other['target']['computer_name'])
         return names
 
+    def target_without_telemetry(target):
+        return dict(target, inventory={k: v for k, v in target['inventory'].items() if k != 'system_info'})
+
     def snapshot_target(c, target, profile, source, reserved_names=None):
         if not isinstance(target.get('device_id'), str):
             raise Invalid('设备 ID 无效')
@@ -292,21 +295,32 @@ def register_pc_deploy(host_app, current_user, touch_session):
                 item = re.sub(r'[\x00-\x1f\x7f]', ' ', raw).strip()[:160]
                 if item:
                     clean[key] = item
-        before = dict(job.get('display_info', {}))
+        before = canonical([job.get('display_info', {}), job.get('system_info', {})])
         job.setdefault('display_info', {}).update(clean)
-        return before != job['display_info']
+        report = device_report(incoming.get('system_info'), 'windows')
+        if report:
+            report['reported_at'] = time.time()
+            job['system_info'] = report
+        return before != canonical([job['display_info'], job.get('system_info', {})])
 
     def public_job(row, now, timing):
         data = json.loads(row['data'])
         timing = timing or {}
         display = dict(data['target']['inventory'], **data.get('display_info', {}))
+        detail = {key: display[key] for key in ('hardware_uuid', 'ram_bytes', 'firmware', 'architecture',
+                  'secure_boot', 'tpm2', 'macs') if key in display}
+        detail['disks'] = [dict({key: disk[key] for key in ('number', 'model', 'serial', 'unique_id',
+                          'bus', 'size_bytes') if key in disk},
+                          partition_count=len(disk['partitions']) if 'partitions' in disk else None)
+                          for disk in display.get('disks', [])]
+        detail['system_info'] = data.get('system_info') or display.get('system_info', {})
         return dict(id=row['id'], device_id=row['device_id'], serial=data['target']['serial'],
                     model=display.get('model') or data['target']['model'], disk=data['target']['disk'], profile=data['profile']['name'],
                     state=row['state'], state_name=STATES[row['state']], created=row['created'],
                     updated=row['updated'], stale=row['state'] in ACTIVE and now-row['updated'] > 600,
                     progress=data.get('progress'), kind=data['source'].get('kind', 'setup'), review=data.get('review'),
                     domain_join=data.get('domain_join'), computer_name=data['target'].get('computer_name'),
-                    installed_at=data.get('installed_at'), expires_at=row['expires'],
+                    installed_at=data.get('installed_at'), expires_at=row['expires'], device_info=detail,
                     **{k: display.get(k, '') for k in
                        ('manufacturer', 'system_family', 'product_name', 'product_version', 'oem_model')},
                     started_at=timing.get('started_at'),
@@ -537,7 +551,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
             reserved_names = set()
             for before in pv['targets']:
                 current = snapshot_target(c, before, profile, source, reserved_names)
-                if current != before:
+                if target_without_telemetry(current) != target_without_telemetry(before):
                     raise Invalid('硬件或启动会话已变化，请重新预览')
                 targets.append(current)
             ids = []
@@ -650,7 +664,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
             z.writestr('config.json', json.dumps(cfg, indent=2))
-            for name in ('Deploy-Agent.ps1', 'Start.ps1'):
+            for name in ('Deploy-Agent.ps1', 'Start.ps1', 'DeviceInfo.ps1'):
                 z.write(ROOT / 'agent' / name, name)
             z.write(ROOT / 'scripts' / 'Build-WinPE.ps1', 'Build-WinPE.ps1')
         buf.seek(0)
@@ -745,7 +759,12 @@ def register_pc_deploy(host_app, current_user, touch_session):
         tls_required()
         if limited('enroll:' + (request.remote_addr or ''), 30):
             return jsonify(error='登记过于频繁'), 429
-        inv = inventory(body())
+        payload = body()
+        inv = inventory(payload)
+        record = dict(inv)
+        report = device_report(payload.get('system_info'), 'pe')
+        if report:
+            record['system_info'] = dict(report, reported_at=time.time())
         with store.connect(write=True) as c:
             join = c.execute('SELECT * FROM enrollments WHERE token_hash=?', (token_hash(bearer()),)).fetchone()
             if not join or (join['expires'] != -1 and join['expires'] < time.time()) or join['uses'] >= 500:
@@ -764,7 +783,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
                       'boot_id=excluded.boot_id,data=excluded.data,inventory_hash=excluded.inventory_hash,'
                       'token_hash=excluded.token_hash,token_secret=excluded.token_secret,boot_code=excluded.boot_code,'
                       'last_seen=excluded.last_seen,consumed=0',
-                      (inv['hardware_uuid'], inv['boot_id'], canonical(inv), digest(inv), token_hash(token),
+                      (inv['hardware_uuid'], inv['boot_id'], canonical(record), digest(inv), token_hash(token),
                        store.encrypt(token), code, time.time()))
             c.execute('UPDATE enrollments SET uses=uses+1 WHERE token_hash=?', (join['token_hash'],))
             event(c, 'device', '设备已登记，等待人工选盘：' + inv['serial'])
@@ -778,8 +797,12 @@ def register_pc_deploy(host_app, current_user, touch_session):
             dev = agent(c)
             if inv['hardware_uuid'] != dev['id'] or inv['boot_id'] != dev['boot_id']:
                 raise Invalid('设备身份不匹配')
+            record = dict(inv)
+            report = device_report(payload.get('system_info'), 'pe')
+            if report:
+                record['system_info'] = dict(report, reported_at=time.time())
             c.execute('UPDATE devices SET data=?,inventory_hash=?,last_seen=? WHERE id=?',
-                      (canonical(inv), digest(inv), time.time(), dev['id']))
+                      (canonical(record), digest(inv), time.time(), dev['id']))
             if payload.get('registration_only') is True:
                 return jsonify(job=None, registration_only=True)
             row = c.execute('SELECT * FROM jobs WHERE device_id=? AND state IN (?,?,?,?)', (dev['id'], *ACTIVE)).fetchone()
