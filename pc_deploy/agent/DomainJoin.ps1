@@ -212,11 +212,16 @@ function Invoke-DeploymentDomainJoin {
             Save-JoinJournal 'waiting_network' $boot (Get-JoinFailureDetail $_ $Config 'platform_status_joining' $configuration.password $controller)
             return 'wait'
         }
-        # Persist before the native join: a crash must never cause a blind second join.
+        # Never repeat a native rename/join after a crash.
         Save-JoinJournal 'attempted' $boot
         $parameters = @{DomainName=$domain; Credential=$credential; Server=$controller;
             Force=$true; PassThru=$true; ErrorAction='Stop'}
-        if ([string]$system.Name -ine $name) { $parameters.NewName=$name; $parameters.Options='AccountCreate,JoinWithNewName' }
+        if ([string]$system.Name -ine $name) {
+            $operation = 'native_computer_rename'
+            $renamed = Rename-Computer -NewName $name -Force -PassThru -ErrorAction Stop
+            if (-not $renamed.HasSucceeded) { throw 'Local computer rename failed.' }
+            $parameters.Options='AccountCreate,JoinWithNewName'
+        }
         if ($configuration.ou_path) { $parameters.OUPath=[string]$configuration.ou_path }
         $operation = 'native_domain_join'
         $joined = Add-Computer @parameters
@@ -231,7 +236,7 @@ function Invoke-DeploymentDomainJoin {
     } finally {
         $credential=$null; $configuration=$null
     }
-    # If the network drops after Add-Computer, the journal resumes here without another join.
+    # Resume reporting without another join.
     Send-JoinState $Config $Hardware 'restarting'
     Save-JoinJournal 'restart_requested' $boot
     Restart-Computer -Force -ErrorAction Stop

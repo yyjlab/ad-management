@@ -15,6 +15,8 @@ function Invoke-JoinFixture {
     param([string]$Directory,[hashtable]$Scenario=@{})
     $calls=[Collections.Generic.List[object]]::new()
     $native=[Collections.Generic.List[object]]::new()
+    $renames=[Collections.Generic.List[object]]::new()
+    $pendingName=$null
     $reboots=[Collections.Generic.List[object]]::new()
     . (Join-Path $Directory 'DomainJoin.ps1')
     function Get-CimInstance {
@@ -61,9 +63,17 @@ function Invoke-JoinFixture {
         if($Scenario.FailStatus -and $Payload.stage -eq $Scenario.FailStatus){throw 'fixture post timeout'}
         return @{ok=$true}
     }
+    function Rename-Computer {
+        param($NewName,[switch]$Force,[switch]$PassThru,$ErrorAction)
+        $renames.Add($NewName)
+        if($Scenario.RenameFailure){throw 'fixture local rename denied'}
+        Set-Variable -Name pendingName -Value $NewName -Scope 1
+        [pscustomobject]@{HasSucceeded=(-not $Scenario.RenameUnsuccessful)}
+    }
     function Add-Computer {
         param($DomainName,$Credential,$Server,[switch]$Force,[switch]$PassThru,$ErrorAction,$NewName,$Options,$OUPath)
-        $native.Add(@{domain=$DomainName;name=$NewName;options=$Options;ou=$OUPath})
+        if($NewName){throw 'Add-Computer must not rename after domain join'}
+        $native.Add(@{domain=$DomainName;name=$pendingName;options=$Options;ou=$OUPath})
         if($Scenario.NativeFailure){throw 'fixture denied Test-only-sensitive-value'}
         [pscustomobject]@{HasSucceeded=$true}
     }
@@ -84,7 +94,7 @@ function Invoke-JoinFixture {
     try{$result=Invoke-DeploymentDomainJoin $cfg 'fixture-hardware'}catch{$failure=$_.Exception.Message}
     $journalPath=Join-Path $Directory 'domain-join-state.json'
     $journal=if(Test-Path -LiteralPath $journalPath){[IO.File]::ReadAllText($journalPath)|ConvertFrom-Json}else{$null}
-    [pscustomobject]@{result=$result;failure=$failure;native=$native;reboots=$reboots;calls=$calls;journal=$journal}
+    [pscustomobject]@{result=$result;failure=$failure;native=$native;renames=$renames;reboots=$reboots;calls=$calls;journal=$journal}
 }
 try {
     $tokens=$null;$errors=$null
@@ -96,6 +106,17 @@ try {
     Assert-Join ($first.native.Count -eq 1 -and $first.reboots.Count -eq 1) 'Expected one join and one reboot'
     Assert-Join ($first.native[0].name -eq 'WFQ101755' -and $first.native[0].ou -like 'OU=Workstations,*') 'Employee name or OU was not passed'
     Assert-Join ($first.native[0].options -match 'AccountCreate' -and $first.native[0].options -match 'JoinWithNewName') 'Rename join omitted account creation'
+    Assert-Join ($first.renames.Count -eq 1 -and $first.renames[0] -eq 'WFQ101755') 'Local rename must precede the domain join'
+    $sameName=Invoke-JoinFixture (New-JoinCase) @{ExpectedName=$true}
+    Assert-Join ($sameName.native.Count -eq 1 -and $sameName.renames.Count -eq 0 -and $sameName.reboots.Count -eq 1) 'Matching local name was renamed unnecessarily'
+    foreach($scenario in @(@{RenameFailure=$true},@{RenameUnsuccessful=$true})){
+        $renameDirectory=New-JoinCase
+        $renameFailed=Invoke-JoinFixture $renameDirectory $scenario
+        Assert-Join ($renameFailed.result -eq 'failed' -and $renameFailed.native.Count -eq 0 -and $renameFailed.reboots.Count -eq 0) 'Failed local rename proceeded to domain join or reboot'
+        Assert-Join ($renameFailed.journal.detail.Contains('Stage: native_computer_rename')) 'Local rename failure lost its stage'
+        $renameAgain=Invoke-JoinFixture $renameDirectory
+        Assert-Join ($renameAgain.renames.Count -eq 0 -and $renameAgain.native.Count -eq 0) 'Failed local rename was retried automatically'
+    }
     Assert-Join ($first.journal.phase -eq 'restart_requested') 'Reboot journal missing'
     Assert-Join (-not ([IO.File]::ReadAllText((Join-Path $directory 'domain-join-state.json')).Contains('Test-only-sensitive-value'))) 'Password persisted in journal'
     $same=Invoke-JoinFixture $directory
