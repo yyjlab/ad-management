@@ -1,4 +1,4 @@
-﻿param([string]$ConfigPath = "$PSScriptRoot\config.json", [switch]$LibraryOnly, [switch]$RegistrationOnly)
+param([string]$ConfigPath = "$PSScriptRoot\config.json", [switch]$LibraryOnly, [switch]$RegistrationOnly)
 $ErrorActionPreference = 'Stop'
 if (Test-Path -LiteralPath "$PSScriptRoot\DeviceInfo.ps1") { . "$PSScriptRoot\DeviceInfo.ps1" }
 
@@ -27,10 +27,11 @@ function Invoke-Platform {
 }
 
 function Send-DeploymentProgress {
-    param($Job, [string]$Token, [string]$Stage, [Nullable[int]]$Percent)
+    param($Job, [string]$Token, [string]$Stage, [Nullable[int]]$Percent, [hashtable]$Metrics)
     # After one-time authorization, reporting must not interrupt local recovery of the target disk.
     $payload=@{stage=$Stage}
     if ($null -ne $Percent) { $payload.percent=[int]$Percent }
+    if ($Metrics) { $payload.metrics=$Metrics }
     try {
         Invoke-Platform "/api/agent/jobs/$($Job.id)/event" $Token $payload -TimeoutSec 3 | Out-Null
     } catch {
@@ -340,9 +341,129 @@ function Write-DeploymentProgress {
     Write-Host ([string][char]13 + $line.PadRight(72)) -NoNewline
 }
 
+function Copy-DeploymentImage {
+    param([string]$SourcePath, [string]$DestinationPath, [long]$ExpectedBytes,
+          [string]$ExpectedHash, $Job, [string]$Token)
+    if ($ExpectedBytes -le 0 -or ($ExpectedHash -and $ExpectedHash -notmatch '^[a-fA-F0-9]{64}$')) {
+        throw 'Invalid image cache metadata.'
+    }
+    # A separate runspace keeps network reporting off the actual file-copy path.
+    $state=[hashtable]::Synchronized(@{copied=0L})
+    $worker=[PowerShell]::Create()
+    $null=$worker.AddScript({
+        param($source,$destination,[long]$expected,$expectedHash,$state)
+        $ErrorActionPreference='Stop'
+        $inputFile=$null; $outputFile=$null; $hash=$null
+        try {
+            $inputFile=[IO.FileStream]::new($source,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read,1MB,[IO.FileOptions]::SequentialScan)
+            if ($inputFile.Length -ne $expected) { throw 'Source image size changed.' }
+            $outputFile=[IO.FileStream]::new($destination,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read,1MB,[IO.FileOptions]::SequentialScan)
+            if ($expectedHash) { $hash=[Security.Cryptography.SHA256]::Create() }
+            $buffer=New-Object byte[] (4MB)
+            $copied=0L
+            while (($count=$inputFile.Read($buffer,0,$buffer.Length)) -gt 0) {
+                if ($copied+$count -gt $expected) { throw 'Source image grew during transfer.' }
+                if ($hash) { $null=$hash.TransformBlock($buffer,0,$count,$buffer,0) }
+                $outputFile.Write($buffer,0,$count)
+                $copied+=$count; $state.copied=$copied
+            }
+            $outputFile.Flush($true)
+            if ($copied -ne $expected) { throw 'Incomplete image transfer.' }
+            if ($hash) {
+                $null=$hash.TransformFinalBlock((New-Object byte[] 0),0,0)
+                if ([BitConverter]::ToString($hash.Hash).Replace('-','') -ine $expectedHash) {
+                    throw 'Cached image SHA-256 does not match the approved source.'
+                }
+            }
+        } finally {
+            if ($hash) { $hash.Dispose() }
+            if ($outputFile) { $outputFile.Dispose() }
+            if ($inputFile) { $inputFile.Dispose() }
+        }
+    }.ToString()).AddArgument($SourcePath).AddArgument($DestinationPath).AddArgument($ExpectedBytes).AddArgument($ExpectedHash).AddArgument($state)
+    $clock=[Diagnostics.Stopwatch]::StartNew()
+    $report=[Diagnostics.Stopwatch]::StartNew()
+    $sampleBytes=0L; $sampleSeconds=0.0
+    $copy=$null
+    try {
+        $copy=$worker.BeginInvoke()
+        Send-DeploymentProgress $Job $Token 'caching' -Percent 0 -Metrics @{
+            elapsed_seconds=0;bytes_copied=0L;total_bytes=$ExpectedBytes;bytes_per_second=0L}
+        while (-not $copy.IsCompleted) {
+            Start-Sleep -Milliseconds 500
+            if ($report.ElapsedMilliseconds -lt 5000) { continue }
+            $copied=[long]$state.copied
+            $seconds=$clock.Elapsed.TotalSeconds
+            $rate=[long][Math]::Max(0, ($copied-$sampleBytes)/[Math]::Max(0.001, $seconds-$sampleSeconds))
+            $percent=[int][Math]::Min(99, [Math]::Floor(100.0*$copied/$ExpectedBytes))
+            Write-Host (([string][char]13)+'Image cache [{0}{1}] {2}%  {3:N1} MB/s' -f
+                ('#'*[int]($percent*30/100)), ('-'*(30-[int]($percent*30/100))), $percent, ($rate/1000000)) -NoNewline
+            Send-DeploymentProgress $Job $Token 'caching' -Percent $percent -Metrics @{
+                elapsed_seconds=[int][Math]::Floor($seconds);bytes_copied=$copied;total_bytes=$ExpectedBytes;bytes_per_second=$rate}
+            $sampleBytes=$copied; $sampleSeconds=$seconds; $report.Restart()
+        }
+        $null=$worker.EndInvoke($copy)
+        if ($worker.HadErrors) { throw $worker.Streams.Error[0] }
+        Send-DeploymentProgress $Job $Token 'caching' -Percent 100 -Metrics @{
+            elapsed_seconds=[int][Math]::Ceiling($clock.Elapsed.TotalSeconds);bytes_copied=$ExpectedBytes;total_bytes=$ExpectedBytes;
+            bytes_per_second=[long]($ExpectedBytes/[Math]::Max(0.001,$clock.Elapsed.TotalSeconds))}
+        Write-Host ''
+    } finally {
+        if ($copy -and -not $copy.IsCompleted) { $worker.Stop() }
+        $worker.Dispose()
+    }
+}
+function Invoke-WimImageApply {
+    param($Job, [string]$Token, [string]$ImagePath, [string]$Root,
+          [int]$DiskNumber, $Partition, [long]$ImageBytes, [long]$ExpandedBytes)
+    Assert-PartitionBinding $Root.Substring(0,1) $DiskNumber $Partition
+    $volume=Get-Volume -DriveLetter $Root.Substring(0,1)
+    $useCache=$ImageBytes -gt 0 -and $ExpandedBytes -gt 0 -and
+        [long]$volume.SizeRemaining -ge ($ImageBytes+$ExpandedBytes+10GB)
+    $work=Join-Path $Root ('PCDeployCache-' + [guid]::NewGuid().ToString('N'))
+    $localImage=Join-Path $work 'image.wim'
+    $scratch=Join-Path $work 'Scratch'
+    $lock=$null; $created=$false
+    try {
+        New-Item -ItemType Directory -Path $work -ErrorAction Stop | Out-Null
+        $created=$true
+        New-Item -ItemType Directory -Path $scratch -ErrorAction Stop | Out-Null
+        $mode='network_direct'
+        if ($useCache) {
+            $script:FailureCode='SOURCE'
+            Copy-DeploymentImage $ImagePath $localImage $ImageBytes ([string]$Job.source.image_sha256) $Job $Token
+            $lock=[IO.File]::Open($localImage,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+            $ImagePath=$localImage; $mode='local_cache'
+        } else {
+            Write-Host 'Insufficient spare space for a full image cache. Using the network image without touching data partitions.' -ForegroundColor Yellow
+        }
+        Assert-PartitionBinding $Root.Substring(0,1) $DiskNumber $Partition
+        $script:FailureCode='WIM'
+        Send-DeploymentProgress $Job $Token 'applying' -Metrics @{mode=$mode}
+        Invoke-DeploymentNative dism.exe @('/Apply-Image', ('/ImageFile:"' + $ImagePath + '"'),
+            ('/Index:' + [int]$Job.profile.image_index), ('/ApplyDir:' + $Root),
+            ('/ScratchDir:"' + $scratch + '"'), '/CheckIntegrity', '/Verify') 'applying' $Job $Token
+    } finally {
+        if ($lock) { $lock.Dispose() }
+        # Only our fresh work directory is eligible. Never recurse into image-created content.
+        if ($created) {
+            try {
+                Assert-PartitionBinding $Root.Substring(0,1) $DiskNumber $Partition
+                $item=Get-Item -LiteralPath $work -Force
+                if (-not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                    if ([IO.File]::Exists($localImage)) { [IO.File]::Delete($localImage) }
+                    [IO.Directory]::Delete($scratch, $false)
+                    [IO.Directory]::Delete($work, $false)
+                }
+            } catch { Write-Host 'Image cache cleanup deferred; installation result is unchanged.' -ForegroundColor Yellow }
+        }
+    }
+}
+
 function Invoke-DeploymentNative {
     param([string]$File, [string[]]$Arguments, [string]$Stage, $Job, [string]$Token)
     $log = Join-Path $PSScriptRoot ($Job.id + '-' + $Stage + '-' + [guid]::NewGuid().ToString('N'))
+    $operationClock=[Diagnostics.Stopwatch]::StartNew()
     $process = Start-Process -FilePath $File -ArgumentList $Arguments -PassThru -NoNewWindow `
         -RedirectStandardOutput ($log + '.log') -RedirectStandardError ($log + '.err')
     # Cache before exit: PowerShell 5.1 otherwise returns a null ExitCode for redirected processes.
@@ -362,16 +483,18 @@ function Invoke-DeploymentNative {
         # Heartbeats remain useful when DISM pauses; only stage changes become operation logs.
         if ($reportClock.ElapsedMilliseconds -ge 10000 -or
             ($percent -ne $lastReported -and $reportClock.ElapsedMilliseconds -ge 5000)) {
-            Send-DeploymentProgress $Job $Token $Stage -Percent $percent
+            Send-DeploymentProgress $Job $Token $Stage -Percent $percent -Metrics @{elapsed_seconds=[int][Math]::Floor($operationClock.Elapsed.TotalSeconds)}
             $lastReported=$percent
             $reportClock.Restart()
         }
     }
     $process.WaitForExit()
+    $operationSeconds=$operationClock.Elapsed.TotalSeconds
+    try { $operationSeconds=($process.ExitTime-$process.StartTime).TotalSeconds } catch { }
     if ($Stage -eq 'applying') {
         if ($process.ExitCode -eq 0) {
             Write-DeploymentProgress 100
-            Send-DeploymentProgress $Job $Token $Stage -Percent 100
+            Send-DeploymentProgress $Job $Token $Stage -Percent 100 -Metrics @{elapsed_seconds=[int][Math]::Ceiling($operationSeconds)}
         }
         Write-Host ''
     }
@@ -481,7 +604,8 @@ function Get-InstallationMarker {
 }
 
 function Invoke-WimDeployment {
-    param($Job, $Authorization, [string]$Token, [string]$BootId, [string]$ImagePath)
+    param($Job, $Authorization, [string]$Token, [string]$BootId, [string]$ImagePath,
+          [long]$ImageBytes, [long]$ExpandedBytes)
     if ($RegistrationOnly) { throw 'Installation is blocked in registration-only mode.' }
     Assert-WinPE
     if ($Authorization.kind -cne 'wim' -or $Job.source.kind -cne 'wim' -or
@@ -551,9 +675,7 @@ function Invoke-WimDeployment {
     Assert-PartitionBinding $letters[1] $number $efi
     $root = $letters[0] + ':\'
     $script:FailureCode = 'WIM'
-    Send-DeploymentProgress $Job $Token 'applying'
-    Invoke-DeploymentNative dism.exe @('/Apply-Image', ('/ImageFile:"' + $ImagePath + '"'),
-        ('/Index:' + [int]$Job.profile.image_index), ('/ApplyDir:' + $root), '/CheckIntegrity', '/Verify') 'applying' $Job $Token
+    Invoke-WimImageApply $Job $Token $ImagePath $root $number $windows $ImageBytes $ExpandedBytes
     if (-not (Test-Path -LiteralPath (Join-Path $root 'Windows\System32\config\SYSTEM'))) {
         throw 'Applied image does not contain a Windows system.'
     }
@@ -638,7 +760,7 @@ function Invoke-Deployment {
         if ($authorization.kind -cne 'wim' -or -not $authorization.finalizer_command) { throw 'WIM authorization is missing.' }
         Select-VerifiedDisk (Get-Inventory $BootId).disks $Job.target.disk | Out-Null
         [IO.File]::WriteAllText($marker, $Job.id)
-        Invoke-WimDeployment $Job $authorization $Token $BootId $imagePath
+        Invoke-WimDeployment $Job $authorization $Token $BootId $imagePath -ImageBytes $sourceLock.Length -ExpandedBytes ([long]$image.ImageSize)
         return
     }
     $answer = Join-Path $PSScriptRoot 'approved-answer.xml'

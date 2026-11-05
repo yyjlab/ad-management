@@ -332,7 +332,8 @@ def register_pc_deploy(host_app, current_user, touch_session):
                     model=display.get('model') or data['target']['model'], disk=data['target']['disk'], profile=data['profile']['name'],
                     state=row['state'], state_name=STATES[row['state']], created=row['created'],
                     updated=row['updated'], stale=row['state'] in ACTIVE and now-row['updated'] > 600,
-                    progress=data.get('progress'), kind=data['source'].get('kind', 'setup'), review=data.get('review'),
+                    progress=data.get('progress'), performance=data.get('performance'),
+                    kind=data['source'].get('kind', 'setup'), review=data.get('review'),
                     domain_join=data.get('domain_join'), computer_name=data['target'].get('computer_name'),
                     installed_at=ready, timings=phases,
                     image_applied_at=timing.get('image_applied_at'),
@@ -913,11 +914,12 @@ def register_pc_deploy(host_app, current_user, touch_session):
             elif value.get('stage') == 'verifying' and row['state'] == 'preflight':
                 state, message = 'preflight', '正在核对安装源 SHA-256，尚未启动安装'
                 emit_event = False
-            elif (value.get('stage') in ('applying', 'boot_files') and row['state'] == 'installing'
+            elif (value.get('stage') in ('caching', 'applying', 'boot_files') and row['state'] == 'installing'
                   and job_data['source'].get('kind') == 'wim'):
                 state = 'installing'
                 track_progress = True
-                message = '正在还原封装 WIM' if value['stage'] == 'applying' else '正在配置系统引导与安装后回报'
+                message = {'caching': '正在缓存镜像到所选 Windows 分区', 'applying': '正在还原封装 WIM',
+                           'boot_files': '正在配置系统引导与安装后回报'}[value['stage']]
             elif value.get('stage') == 'awaiting_report' and row['state'] in ('installing', 'awaiting_report'):
                 track_progress = True
                 state, message = 'awaiting_report', (
@@ -929,15 +931,44 @@ def register_pc_deploy(host_app, current_user, touch_session):
             if track_progress:
                 stage = value['stage']
                 previous = job_data.get('progress') or {}
-                order = {'applying': 0, 'boot_files': 1, 'awaiting_report': 2}
+                order = {'caching': 0, 'applying': 1, 'boot_files': 2, 'awaiting_report': 3}
                 if order.get(previous.get('stage'), -1) > order[stage]:
                     raise Invalid('任务阶段不能倒退')
                 percent = value.get('percent')
-                if percent is not None and (stage != 'applying' or type(percent) is not int or not 0 <= percent <= 100):
-                    raise Invalid('WIM 还原进度必须是 0 到 100 的整数')
+                if percent is not None and (stage not in ('caching', 'applying') or type(percent) is not int or not 0 <= percent <= 100):
+                    raise Invalid('镜像缓存或还原进度必须是 0 到 100 的整数')
                 old_percent = previous.get('percent') if previous.get('stage') == stage else None
                 if old_percent is not None:
                     percent = old_percent if percent is None else max(old_percent, percent)
+                metrics = value.get('metrics')
+                if metrics is not None:
+                    if not isinstance(metrics, dict) or set(metrics) - {
+                            'elapsed_seconds', 'bytes_copied', 'total_bytes', 'bytes_per_second', 'mode'}:
+                        raise Invalid('无效的装机性能回报')
+                    measured = {}
+                    if 'elapsed_seconds' in metrics:
+                        measured['elapsed_seconds'] = integer(metrics['elapsed_seconds'], '阶段耗时', 0, 7*86400)
+                    if stage == 'caching':
+                        for key in ('bytes_copied', 'total_bytes', 'bytes_per_second'):
+                            measured[key] = integer(metrics.get(key), key, 1 if key == 'total_bytes' else 0, 10**13)
+                        if measured['bytes_copied'] > measured['total_bytes']:
+                            raise Invalid('缓存字节数超过镜像大小')
+                    elif any(key in metrics for key in ('bytes_copied', 'total_bytes', 'bytes_per_second')):
+                        raise Invalid('只有缓存阶段允许回报传输速度')
+                    if 'mode' in metrics:
+                        if stage != 'applying' or metrics['mode'] not in ('local_cache', 'network_direct'):
+                            raise Invalid('无效的镜像还原方式')
+                        measured['mode'] = metrics['mode']
+                    performance = job_data.setdefault('performance', {})
+                    old = performance.get(stage, {})
+                    if old.get('total_bytes') and measured.get('total_bytes') != old['total_bytes']:
+                        raise Invalid('镜像缓存大小不能改变')
+                    for key in ('elapsed_seconds', 'bytes_copied'):
+                        if key in measured:
+                            measured[key] = max(old.get(key, 0), measured[key])
+                    if stage == 'caching':
+                        measured['finished'] = old.get('finished', False) or (percent == 100 and measured['bytes_copied'] == measured['total_bytes'])
+                    performance[stage] = dict(old, **measured)
                 emit_event = previous.get('stage') != stage or row['state'] != state
                 job_data['progress'] = dict(stage=stage, percent=percent, updated=now)
             c.execute('UPDATE jobs SET state=?,data=?,updated=? WHERE id=?', (state, canonical(job_data), now, identity))

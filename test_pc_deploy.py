@@ -1457,6 +1457,44 @@ function Start-ScheduledTask {}
         self.assertIsNone(result['started_at'])
         self.assertIsNotNone(result['finished_at'])
 
+    def test_wim_cache_metrics_are_retained_and_do_not_flood_logs(self):
+        inv, reg, job = self.wim_queued()
+        self.post('/pc-deploy/api/agent/poll', inv, reg['token'])
+        self.post(f'/pc-deploy/api/agent/jobs/{job}/start', inv, reg['token'])
+        route = f'/pc-deploy/api/agent/jobs/{job}/event'
+        for copied in (0, 50_000_000, 100_000_000):
+            response = self.post(route, dict(stage='caching', percent=copied//1_000_000,
+                metrics=dict(bytes_copied=copied, total_bytes=100_000_000, bytes_per_second=25_000_000,
+                             elapsed_seconds=copied//25_000_000)), reg['token'])
+            self.assertEqual(response.status_code, 200, response.json)
+        for metrics in (dict(mode='local_cache'), dict(elapsed_seconds=120)):
+            self.assertEqual(self.post(route, dict(stage='applying', percent=0, metrics=metrics), reg['token']).status_code, 200)
+        self.assertEqual(self.post(route, dict(stage='boot_files'), reg['token']).status_code, 200)
+        current = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
+        self.assertEqual(current['performance']['caching']['bytes_copied'], 100_000_000)
+        self.assertTrue(current['performance']['caching']['finished'])
+        self.assertEqual(current['performance']['applying'], dict(mode='local_cache', elapsed_seconds=120))
+        self.assertEqual(self.post(route, dict(stage='caching', percent=0), reg['token']).status_code, 400)
+        with self.store.connect() as c:
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM events WHERE job_id=? AND message=?",
+                (job, '正在缓存镜像到所选 Windows 分区')).fetchone()[0], 1)
+        log = self.client.get(f'/pc-deploy/api/jobs/{job}/events').json
+        self.assertEqual(log['job']['performance'], current['performance'])
+
+    def test_wim_cache_metrics_validate_before_mutation(self):
+        inv, reg, job = self.wim_queued()
+        self.post('/pc-deploy/api/agent/poll', inv, reg['token'])
+        self.post(f'/pc-deploy/api/agent/jobs/{job}/start', inv, reg['token'])
+        route = f'/pc-deploy/api/agent/jobs/{job}/event'
+        for metrics in ([], 'bad', dict(elapsed_seconds=True), dict(elapsed_seconds=-1),
+                        dict(mode='unknown'), dict(total_bytes=1, bytes_copied=2, bytes_per_second=1),
+                        dict(total_bytes=1, bytes_copied=True, bytes_per_second=1), dict(unknown=1)):
+            self.assertEqual(self.post(route, dict(stage='caching', percent=50, metrics=metrics), reg['token']).status_code, 400)
+        current = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
+        self.assertIsNone(current['progress'])
+        self.assertIsNone(current['performance'])
+        self.assertEqual(self.post(route, dict(stage='applying', metrics=dict(bytes_per_second=10)), reg['token']).status_code, 400)
+
     def test_wim_progress_heartbeats_update_status_without_flooding_events(self):
         inv, reg, job = self.wim_queued('system_partition')
         self.post('/pc-deploy/api/agent/poll', inv, reg['token'])

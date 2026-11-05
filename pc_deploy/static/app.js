@@ -241,26 +241,43 @@ function restoreJobProgress(root, previous) {
     old.setAttribute('value',value);
   });
 }
+function renderWimPerformance(job) {
+  const perf=job.performance;
+  if(!perf)return '';
+  const cache=perf.caching, apply=perf.applying;
+  let html='';
+  if(cache && Number.isFinite(cache.bytes_copied) && cache.total_bytes>0){
+    const live=job.state==='installing'&&job.progress?.stage==='caching';
+    html+='<small class="job-transfer">'+(live?'已缓存 ':'镜像缓存 ')+h(size(cache.bytes_copied))+' / '+h(size(cache.total_bytes))+
+      (Number.isFinite(cache.bytes_per_second)?' · '+(cache.finished?'平均 ':'最近回报 ')+(cache.bytes_per_second/1000000).toFixed(1)+' MB/s':'')+
+      (Number.isFinite(cache.elapsed_seconds)?' · '+duration(cache.elapsed_seconds):'')+'</small>';
+  }
+  if(apply){
+    html+='<small class="job-apply-time">'+(apply.mode==='local_cache'?'本机 SSD 还原':apply.mode==='network_direct'?'网络直接还原（缓存空间不足）':'WIM 还原')+
+      (Number.isFinite(apply.elapsed_seconds)?' · 纯还原 '+duration(apply.elapsed_seconds):'')+'</small>';
+  }
+  return html;
+}
 function renderJobProgress(job) {
   const join=job.domain_join;
   if(join && join.state!=='pending'){
     const stages={waiting_release:join.released_at?'管理员已授权，等待客户端领取':(job.expires_at && job.expires_at<serverNow()?'等待加域已超时，请查看日志':'可先完成现场设置，再在平台统一加域'),checking:'检查域 DNS 与电脑名',joining:'正在加入 AD 域',restarting:'等待重启后验证域信任',verified:'域信任验证已通过',failed:'加域失败，不会重新装机'};
     const tone = join.state==='verified' ? ' completed' : join.state==='failed' ? ' stopped' : (join.state==='restarting'||join.state==='waiting_release'&&!join.released_at) ? ' pending' : '';
-    return '<div class="job-progress'+tone+'"><span class="job-progress-phase">Windows 已安装 · '+h(stages[join.state]||join.state)+'</span><small>工号电脑名：'+h(join.computer_name)+' · 域：'+h(join.domain)+'</small>'+(join.updated?'<small>最后回报：'+h(date(join.updated))+'</small>':'')+'</div>';
+    return '<div class="job-progress'+tone+'"><span class="job-progress-phase">Windows 已安装 · '+h(stages[join.state]||join.state)+'</span><small>工号电脑名：'+h(join.computer_name)+' · 域：'+h(join.domain)+'</small>'+renderWimPerformance(job)+(join.updated?'<small>最后回报：'+h(date(join.updated))+'</small>':'')+'</div>';
   }
   const progress = job.progress;
   if (!progress || (job.state === 'failed' && job.review)) return '';
-  const stages = {applying:'正在还原 WIM',boot_files:'WIM 还原已结束 · 正在配置 UEFI 引导',awaiting_report:'镜像还原及引导已完成 · 等待新系统回报'};
+  const stages = {caching:'正在缓存镜像到本机 SSD',applying:'正在还原 WIM',boot_files:'WIM 还原已结束 · 正在配置 UEFI 引导',awaiting_report:'镜像还原及引导已完成 · 等待新系统回报'};
   if (!Object.hasOwn(stages, progress.stage)) return '';
   const completed = job.state === 'completed', stopped = ['failed','cancelled'].includes(job.state);
   const known = Number.isInteger(progress.percent) && progress.percent >= 0 && progress.percent <= 100;
   const restored = progress.stage === 'boot_files' || (job.kind === 'wim' && progress.stage === 'awaiting_report');
-  const percent = completed || restored ? 100 : known && progress.stage === 'applying' ? progress.percent : null;
+  const percent = completed || restored ? 100 : known && ['caching','applying'].includes(progress.stage) ? progress.percent : null;
   const label = completed ? '安装后系统已回报' : (stopped ? '已停止 · ' : '') + stages[progress.stage];
   const tone = completed ? ' completed' : job.state === 'failed' ? ' stopped' : job.state === 'cancelled' ? ' cancelled' : progress.stage === 'awaiting_report' ? ' pending' : '';
   return '<div class="job-progress'+tone+'"><div class="job-progress-head"><span class="job-progress-phase">'+h(label)+'</span>'+(percent === null ? '<span class="job-progress-unknown">等待真实进度</span>' : '<strong class="job-progress-percent">'+percent+'%</strong>')+'</div>' +
-    '<progress max="100" value="'+(percent ?? 0)+'" data-job-progress="'+h(job.id)+'" aria-label="'+h(label)+'"></progress>'+
-    (Number.isFinite(progress.updated) ? '<small>最后回报：'+h(date(progress.updated))+'</small>' : '')+'</div>';
+    '<progress max="100" value="'+(percent ?? 0)+'" data-job-progress="'+h(job.id+(progress.stage==='caching'?'-caching':''))+'" aria-label="'+h(label)+'"></progress>'+
+    renderWimPerformance(job)+(Number.isFinite(progress.updated) ? '<small>最后回报：'+h(date(progress.updated))+'</small>' : '')+'</div>';
 }
 function renderLogEvents(events) {
   const kinds = {queued:['任务确认','muted'],preflight:['安装前检查','blue'],installing:['安装过程','blue'],

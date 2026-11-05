@@ -222,6 +222,12 @@ foreach ($case in @(
                 throw [Net.WebException]::new('Simulated progress outage.',[Net.WebExceptionStatus]::ConnectFailure)
             }
         }
+        function Invoke-WimImageApply {
+            param($Job,$Token,$ImagePath,$Root,$DiskNumber,$Partition,$ImageBytes,$ExpandedBytes)
+            Assert-PartitionBinding $Root.Substring(0,1) $DiskNumber $Partition
+            Send-DeploymentProgress $Job $Token 'applying'
+            Invoke-DeploymentNative dism.exe @('/Index:1',('/ApplyDir:'+$Root)) 'applying' $Job $Token
+        }
         function Invoke-DeploymentNative {
             param($File,$Arguments,$Stage,$Job,$Token)
             $calls.Add("native:$Stage")
@@ -693,6 +699,71 @@ $count++
     if(-not $minimal.ContainsKey('computer_name') -or $minimal.cpus.Count -ne 0){throw 'Missing optional hardware must not stop the callback'}
 }
 $count+=5
+
+
+# Real background copy and measured metrics, using only generated local fixture files.
+& {
+    $fixture=Join-Path ([IO.Path]::GetTempPath()) ('pcdeploy-cache-test-'+[guid]::NewGuid().ToString('N'))
+    [IO.Directory]::CreateDirectory($fixture)|Out-Null
+    try {
+        $source=Join-Path $fixture 'source.wim'
+        $buffer=New-Object byte[] (8MB)
+        (New-Object Random 91).NextBytes($buffer)
+        [IO.File]::WriteAllBytes($source,$buffer)
+        $expected=(Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+        $reports=[Collections.Generic.List[object]]::new()
+        function Invoke-Platform {param($Route,$Token,$Data,$TimeoutSec) $reports.Add($Data); if($script:copyReportOutage){throw 'fixture offline'} }
+        $job=@{id='copy-fixture';source=@{image_sha256=$expected};profile=@{image_index=1}}
+        $destination=Join-Path $fixture 'copied.wim'
+        $script:copyReportOutage=$true
+        Copy-DeploymentImage $source $destination $buffer.Length $expected $job 'fixture-token'
+        $script:copyReportOutage=$false
+        if((Get-FileHash -LiteralPath $destination).Hash -cne $expected){throw 'Background cache corrupted fixture'}
+        $final=$reports[$reports.Count-1]
+        if($final.percent -ne 100 -or $final.metrics.bytes_copied -ne $buffer.Length -or $final.metrics.bytes_per_second -le 0){throw 'Measured transfer metrics missing'}
+        foreach($scenario in @('size','hash','exists')){
+            $path=Join-Path $fixture ($scenario+'.wim')
+            $length=$buffer.Length;$hash=$expected
+            if($scenario -eq 'size'){$length++}
+            if($scenario -eq 'hash'){$hash='0'*64}
+            if($scenario -eq 'exists'){[IO.File]::WriteAllText($path,'keep')}
+            $reports.Clear();$failed=$false
+            try{Copy-DeploymentImage $source $path $length $hash $job 'fixture-token'}catch{$failed=$true}
+            if(-not $failed -or @($reports|Where-Object {$_.percent -eq 100}).Count){throw 'Unsafe copy was marked complete'}
+            if($scenario -eq 'exists' -and [IO.File]::ReadAllText($path) -cne 'keep'){throw 'Copy overwrote existing file'}
+        }
+        $native=[Collections.Generic.List[object]]::new()
+        $script:cacheSpace=100GB;$script:copyReportOutage=$false;$script:applyShouldFail=$false
+        function Assert-PartitionBinding {}
+        function Get-Volume {param($DriveLetter) @{SizeRemaining=$script:cacheSpace}}
+        function Invoke-DeploymentNative {
+            param($File,$Arguments,$Stage,$Job,$Token)
+            $native.Add($Arguments)
+            $image=($Arguments|Where-Object {$_ -like '/ImageFile:*'}).Substring(11).Trim('"')
+            if($script:cacheSpace -gt 1GB){
+                if($image -eq $source -or -not [IO.File]::Exists($image)){throw 'Apply did not use completed local cache'}
+                if((Get-FileHash -LiteralPath $image).Hash -cne $expected){throw 'Wrong cached bytes applied'}
+            }elseif($image -ne $source){throw 'Low space did not keep the network source'}
+            if(-not @($Arguments|Where-Object {$_ -like '/ScratchDir:*'}).Count -or
+               $Arguments -notcontains '/CheckIntegrity' -or $Arguments -notcontains '/Verify'){throw 'Scratch directory or integrity checks missing'}
+            if($script:applyShouldFail){throw 'fixture apply failed'}
+        }
+        Invoke-WimImageApply $job 'fixture-token' $source ($fixture+'\') 7 @{} $buffer.Length 1GB
+        if($native.Count -ne 1 -or @(Get-ChildItem -LiteralPath $fixture -Directory -Filter 'PCDeployCache-*').Count){throw 'Cache was repeated or not removed'}
+        $script:cacheSpace=1GB
+        Invoke-WimImageApply $job 'fixture-token' $source ($fixture+'\') 7 @{} $buffer.Length 1GB
+        if($native.Count -ne 2 -or $reports[$reports.Count-1].metrics.mode -ne 'network_direct'){throw 'Low-space fallback failed'}
+        $script:cacheSpace=100GB;$script:applyShouldFail=$true;$failed=$false
+        try{Invoke-WimImageApply $job 'fixture-token' $source ($fixture+'\') 7 @{} $buffer.Length 1GB}catch{$failed=$true}
+        if(-not $failed -or $native.Count -ne 3 -or @(Get-ChildItem -LiteralPath $fixture -Directory -Filter 'PCDeployCache-*').Count){throw 'Failed application retried or retained cache'}
+        Write-Host 'Background copy, byte/hash validation, report outage, low-space fallback and cache cleanup checks passed.'
+    } finally {
+        # Every path below is a generated fixture under our verified private test directory.
+        if([IO.Path]::GetFullPath($fixture).StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()),[StringComparison]::OrdinalIgnoreCase)){
+            Remove-Item -LiteralPath $fixture -Recurse -Force
+        }
+    }
+}
 
 Write-Output "$count PowerShell protection and parser checks passed. No disk command was executed."
 
