@@ -243,6 +243,45 @@ async function run() {
     await page.reload();
     await page.locator('#workspace:not([hidden])').waitFor();
     await page.locator('[data-view=profiles]').click();
+    // Every saved profile is readable without opening its editor; credentials stay redacted.
+    fixture.profiles[0].has_password=true;fixture.profiles[0].has_product_key=true;
+    fixture.profiles[0].password='Fixture-private-local-password';
+    fixture.profiles[0].product_key='Fixture-private-product-key';
+    fixture.profiles.push(
+      {...fixture.profiles[1],id:'summary-auto',name:'自动加域卡片',has_domain_join_password:true,
+        domain_join:{domain:'corp.test',ou_path:'OU=<img src=x onerror="window.profileInjected=true">,DC=corp,DC=test',username:'join-service@corp.test',mode:'automatic',allow_http:false},
+        domain_join_password:'Fixture-private-domain-password'},
+      {...fixture.profiles[1],id:'summary-manual',name:'统一加域卡片',system_gib:320,disk_mode:'wipe_disk',has_domain_join_password:false,
+        domain_join:{domain:'corp.test',ou_path:'',username:'join-service@corp.test',mode:'manual',allow_http:true}}
+    );
+    await page.locator('#refresh').click();
+    await page.locator('[data-profile-card=summary-auto]').waitFor();
+    const autoCard=page.locator('[data-profile-card=summary-auto]'),manualCard=page.locator('[data-profile-card=summary-manual]');
+    assert.ok((await autoCard.textContent()).includes(sourceBase.path+'\\win11.wim'));checks++;
+    assert.ok((await autoCard.textContent()).includes(sourceBase.images[0].name));checks++;
+    assert.ok((await autoCard.textContent()).includes('内部版本 '+sourceBase.images[0].build));checks++;
+    assert.ok((await autoCard.textContent()).includes('保留 D 盘及其他分区，不调整 C 盘容量'));checks++;
+    assert.ok((await autoCard.textContent()).includes('join-service@corp.test'));checks++;
+    assert.ok((await autoCard.textContent()).includes('OU=<img src=x onerror="window.profileInjected=true">'));checks++;
+    assert.ok((await autoCard.textContent()).includes('加域成功后额外重启一次并验证域信任'));checks++;
+    assert.ok((await autoCard.textContent()).includes('已保存，无需重复填写'));checks++;
+    assert.ok((await manualCard.textContent()).includes('C 盘 320 GiB'));checks++;
+    assert.ok((await manualCard.textContent()).includes('剩余空间创建 D 盘'));checks++;
+    assert.ok((await manualCard.textContent()).includes('先完成现场设置，再由平台统一加域'));checks++;
+    assert.ok((await manualCard.textContent()).includes('域默认的电脑位置'));checks++;
+    assert.ok((await manualCard.textContent()).includes('未保存'));checks++;
+    assert.ok((await manualCard.textContent()).includes('HTTP，密码明文传输'));checks++;
+    assert.ok((await page.locator('[data-profile-card=setup-profile]').textContent()).includes('已保存安装密钥，不显示明文'));checks++;
+    assert.ok(!(await page.locator('.profile-grid').textContent()).includes('Fixture-private-'));checks++;
+    assert.equal(await page.locator('.profile-grid img').count(),0);checks++;
+    assert.equal(await page.evaluate(()=>window.profileInjected),undefined);checks++;
+    assert.equal(await page.locator('#modal[open]').count(),0);checks++;
+    await page.setViewportSize({width:390,height:844});
+    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));checks++;
+    assert.ok(await autoCard.getByRole('heading',{name:'系统与安装源'}).isVisible());checks++;
+    await page.setViewportSize({width:1440,height:1000});
+    fixture.profiles.splice(2);
+    await page.locator('#refresh').click();
     await page.locator('[data-action=new-profile]').click();
     assert.ok(await page.locator('#profile-form [name=username]').isVisible());checks++;
     assert.ok(await page.locator('#profile-form [name=password]').evaluate(e=>e.required));checks++;

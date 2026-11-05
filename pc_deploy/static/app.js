@@ -155,8 +155,42 @@ function updateSelection() { const b = $('#preview-button'); if(b){ b.disabled =
 function renderSources() {
   $('#page-content').innerHTML = data.sources.length ? `<div class="record-grid">${data.sources.map(s=>`<article class="record"><div class="record-top"><h3>${h(s.name)}</h3><span class="badge blue">${s.family==='windows11'?'Windows 11':'Windows 10'}</span></div><p class="mono">${h(s.path)}${s.kind==='wim'?' / '+h(s.image_file):''}</p><span class="badge muted">${s.kind==='wim'?'封装 WIM 直接还原':'原版 Setup 安装'}</span><span class="badge muted">待装机客户端复核</span><dl><dt>镜像索引</dt><dd>${s.images.length} 个 x64 版本</dd><dt>读取账号</dt><dd>${h(s.smb_user)}</dd><dt>检测方式</dt><dd>快速检测 · 版本与索引</dd></dl><div class="form-actions"><button class="small" data-action="edit-source" data-id="${h(s.id)}">编辑安装源</button></div></article>`).join('')}</div>` : empty('尚未添加安装源','原版 ISO 解压目录和单个封装 WIM 均支持；运行检测脚本后导入清单。');
 }
+function renderProfileCard(p) {
+  const source=data.sources.find(s=>s.id===p.source_id);
+  const image=source?.images.find(i=>i.index===p.image_index);
+  const wim=source?.kind==='wim'||p.preserve_image_settings===true, join=p.domain_join;
+  const row=(label,value)=>'<dt>'+h(label)+'</dt><dd>'+h(value)+'</dd>';
+  const section=(title,rows)=>'<section class="profile-section"><h4>'+h(title)+'</h4><dl>'+rows+'</dl></section>';
+  const saved=value=>value===true?'已保存，无需重复填写':value===false?'未保存':'保存状态未上报';
+  const imagePath=source?[source.path?.replace(/[\\/]$/,''),source.image_file].filter(Boolean).join('\\'):'安装源不存在';
+  const version=image?[image.name,'索引 '+image.index,'内部版本 '+image.build].join(' · '):'未找到匹配的镜像索引 '+p.image_index;
+  const language=image?.language==='zh-CN'?'简体中文':image?.language==='en-US'?'英语':image?.language||'未提供语言';
+  const partition=p.disk_mode==='system_partition'?'仅重装所选 Windows 分区；保留 D 盘及其他分区，不调整 C 盘容量':
+    p.system_gib?'C 盘 '+p.system_gib+' GiB；扣除引导及恢复分区后，剩余空间创建 D 盘':'单 C 盘；扣除引导及恢复分区后，使用其余可用空间';
+  const diskEffect=p.disk_mode==='system_partition'?'仅格式化所选 Windows 分区，更新同盘 EFI；其他数据分区不处理':'重建所选整块物理硬盘，旧 C/D 数据全部清空；其他物理硬盘不处理';
+  let details=section('系统与安装源',
+    row('Windows 版本',version)+row('架构 / 语言',(image?.architecture==='amd64'?'x64':image?.architecture||'未提供架构')+' · '+language)+
+    row('安装源',source?.name||'安装源不存在')+row('镜像路径',imagePath)+row('启动方式','UEFI / GPT'));
+  details+=section('分盘与账号',
+    row('分区方案',partition)+row('数据影响',diskEffect)+
+    row('本地管理员',wim?'沿用镜像内账号':p.username||'未提供账号')+
+    row('本地密码',wim?'沿用镜像内密码设置':saved(p.has_password))+
+    row('安装密钥',wim?'沿用镜像内授权配置':p.has_product_key?'已保存安装密钥，不显示明文':'未设置安装密钥，使用已有 OEM / 企业许可配置'));
+  details+=section('加域与重启',
+    row('计算机名',join?'使用每台填写的员工工号；重名追加 A–Z，纯数字从 A 开始':wim?'沿用镜像内名称':(p.computer_prefix||'PC')+'-设备标识')+
+    row('加域方式',join?(join.mode==='manual'?'先完成现场设置，再由平台统一加域':'Windows 安装完成后自动加域'):'未启用加域')+
+    (join?row('AD 域名',join.domain)+row('目标 OU',join.ou_path||'域默认的电脑位置')+
+      row('加域账号',join.username||'未提供账号')+row('加域密码',saved(p.has_domain_join_password))+
+      row('连接要求',join.allow_http?'允许隔离内网 HTTP，密码明文传输':'要求 HTTPS')+
+      row('重启行为',join.mode==='manual'?'等待平台确认统一加域；成功后额外重启一次并验证域信任':'加域成功后额外重启一次并验证域信任'):''));
+  return '<article class="record profile-card" data-profile-card="'+h(p.id)+'"><div class="record-top"><h3>'+h(p.name)+'</h3><span class="badge '+(wim?'blue':'muted')+'">'+(wim?'封装 WIM':'原版 Setup')+'</span></div>'+
+    '<div class="profile-tags">'+(source?'<span class="badge blue">'+(source.family==='windows11'?'Windows 11':'Windows 10')+'</span>':'')+
+    '<span class="badge '+(p.disk_mode==='system_partition'?'good':'warn')+'">'+(p.disk_mode==='system_partition'?'保留 D 盘':'整盘重建')+'</span>'+
+    '<span class="badge '+(join?(join.mode==='manual'?'warn':'blue'):'muted')+'">'+(join?(join.mode==='manual'?'平台统一加域':'安装后自动加域'):'不加域')+'</span></div>'+
+    details+'<div class="form-actions"><button class="small" data-action="edit-profile" data-id="'+h(p.id)+'">编辑方案</button></div></article>';
+}
 function renderProfiles() {
-  $('#page-content').innerHTML = data.profiles.length ? `<div class="record-grid">${data.profiles.map(p=>`<article class="record"><div class="record-top"><h3>${h(p.name)}</h3><span class="badge good">UEFI / GPT</span></div><dl><dt>安装源</dt><dd>${h(data.sources.find(s=>s.id===p.source_id)?.name || '安装源不存在')}</dd><dt>镜像索引</dt><dd>${p.image_index}</dd><dt>分区方案</dt><dd>${p.disk_mode==='system_partition'?'保留分区布局，仅还原所选 Windows 分区':(p.system_gib?`C 盘 ${p.system_gib} GiB + D 盘剩余空间`:'单 C 盘，使用可用空间')}<br><small>${p.disk_mode==='system_partition'?'更新同盘 EFI 引导':'重建 EFI / MSR / 恢复分区'}</small></dd><dt>本地账号</dt><dd>${p.preserve_image_settings?'沿用镜像内账号':h(p.username)+' · 密码已保护'}</dd><dt>计算机名</dt><dd>${p.domain_join?'按每台填写的员工工号 · '+(p.domain_join.mode==='manual'?'平台统一加域':'安装后自动加域'):p.preserve_image_settings?'沿用镜像内名称':h(p.computer_prefix)+'-设备标识'}</dd></dl><div class="form-actions"><button class="small" data-action="edit-profile" data-id="${h(p.id)}">编辑方案</button></div></article>`).join('')}</div>` : empty('尚未配置装机方案','先添加安装源，再配置系统版本、分区和临时本地账号。');
+  $('#page-content').innerHTML = data.profiles.length ? '<div class="record-grid profile-grid">'+data.profiles.map(renderProfileCard).join('')+'</div>' : empty('尚未配置装机方案','先添加安装源，再配置系统版本、分区和临时本地账号。');
 }
 function syncServerClock(seconds) {
   if (Number.isFinite(seconds) && seconds >= serverTime) { serverTime = seconds; serverSample = performance.now(); }
