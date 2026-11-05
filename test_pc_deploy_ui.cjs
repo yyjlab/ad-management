@@ -259,7 +259,13 @@ async function run() {
     assert.equal(profilePayload.system_gib,0);checks++;
     assert.ok(!('password' in profilePayload)&&!('username' in profilePayload)&&!('product_key' in profilePayload));checks++;
     await page.locator('[data-view=devices]').click();
+    assert.equal(await page.locator('#filter').inputValue(),'online');checks++;
+    assert.ok(await page.locator('[data-employee=laptop-1]').isVisible());checks++;
+    await page.locator('[data-employee=laptop-1]').fill('WFQ101755');
     await page.locator('#profile-choice').selectOption('wim-profile');
+    assert.equal(await page.locator('[data-employee=laptop-1]').inputValue(),'WFQ101755');checks++;
+    await page.locator('#refresh').click();
+    assert.equal(await page.locator('[data-employee=laptop-1]').inputValue(),'WFQ101755');checks++;
     await page.locator('[data-disk=laptop-1]').selectOption('disk-7');
     await page.locator('[data-partition=laptop-1]').selectOption('partition-3');
     await page.locator('[data-device=laptop-1]').check();
@@ -270,6 +276,12 @@ async function run() {
     assert.ok((await page.locator('#modal-body').textContent()).includes('只格式化分区 3'));checks++;
     assert.ok((await page.locator('#modal-body').textContent()).includes('所选 Windows 分区数据可删除'));checks++;
     assert.ok(await page.locator('#commit-form [type=submit]').isDisabled());checks++;
+    const commitsBeforeFill=requests.filter(p=>p==='/pc-deploy/api/jobs/commit').length;
+    await page.locator('[data-action=fill-install-confirmation]').click();
+    assert.equal(await page.locator('#commit-form [name=confirmation]').inputValue(),'YES');checks++;
+    assert.equal(await page.locator('#commit-form [name=physical_confirmed]').isChecked(),false);checks++;
+    assert.ok(await page.locator('#commit-form [type=submit]').isDisabled());checks++;
+    assert.equal(requests.filter(p=>p==='/pc-deploy/api/jobs/commit').length,commitsBeforeFill);checks++;
     await page.locator('#commit-form [data-action=close]').click();
     await page.locator('#profile-choice').selectOption('setup-profile');
     assert.equal(await page.locator('[data-partition]').count(),0);checks++;
