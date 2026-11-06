@@ -135,6 +135,22 @@ def source_record(data):
                 image_sha256='', setup_sha256='', smb_user=user)
 
 
+def profile_name(profile, source):
+    """A short label derived from the configuration frozen into each new task."""
+    image = next((i for i in source.get('images', []) if i['index'] == profile['image_index']), {})
+    version = re.sub(r'Windows\s*(10|11)(?!\d)', r'Win\1', image.get('name', ''), flags=re.I)
+    version = re.sub(r'\s+', ' ', version.replace('®', '').replace('™', '')).strip()
+    family = {'windows10': 'Win10', 'windows11': 'Win11'}.get(source.get('family'), 'Windows')
+    if not re.match(r'Win(?:10|11)(?!\d)', version, re.I):
+        version = family + (' ' + version if version else '')
+    disk = ('保留D重装C' if profile.get('disk_mode') == 'system_partition' else
+            '清盘C' + str(profile['system_gib']) + 'G+D' if profile.get('system_gib') else '清盘单C盘')
+    joining = profile.get('domain_join')
+    join = ('等待统一加域' if joining.get('mode') == 'manual' else '自动加域') if joining else '不加域'
+    method = ('网络直读' if profile.get('wim_cache_mode') == 'network_direct' else '本机缓存') if source.get('kind') == 'wim' else '原版安装'
+    return ' · '.join((version[:32], disk, join, method))
+
+
 def profile_record(data, source):
     index = integer(data.get('image_index'), '镜像索引', 1, 100)
     if index not in {v['index'] for v in source['images']}:
@@ -151,7 +167,7 @@ def profile_record(data, source):
             raise Invalid('独立 C 盘至少 80 GiB')
         if mode == 'system_partition' and size:
             raise Invalid('保留分区时不能调整 C 盘容量')
-        return dict(name=text(data.get('name'), '方案名称'), source_id=source['id'],
+        return dict(name='自动命名', source_id=source['id'],
                     image_index=index, username='', computer_prefix='', system_gib=size,
                     disk_mode=mode, preserve_image_settings=True, wim_cache_mode=cache_mode)
     if data.get('disk_mode', 'wipe_disk') != 'wipe_disk':
@@ -166,7 +182,7 @@ def profile_record(data, source):
     size = integer(data.get('system_gib', 0), '系统盘容量', 0, 4096)
     if size and size < 80:
         raise Invalid('独立 C 盘至少 80 GiB；0 表示不创建数据分区')
-    return dict(name=text(data.get('name'), '方案名称'), source_id=source['id'], image_index=index,
+    return dict(name='自动命名', source_id=source['id'], image_index=index,
                 username=username, computer_prefix=prefix, system_gib=size)
 
 

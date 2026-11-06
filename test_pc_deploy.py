@@ -20,7 +20,7 @@ from flask import Flask, session
 from pc_deploy import register_pc_deploy, token_hash
 from pc_deploy.deployment import finalizer_command
 from pc_deploy.deployment import (Invalid, NAMESPACE, answer_file, canonical, digest, inventory,
-                        public_url, source_record, target_check, unc_path)
+                        profile_name, public_url, source_record, target_check, unc_path)
 
 
 def decoded_bootstrap(command):
@@ -1690,6 +1690,49 @@ function Start-ScheduledTask {}
         self.assertTrue(p['preserve_image_settings'])
         self.assertEqual(p['username'], '')
         self.assertFalse(d['settings']['enabled'])
+
+    def test_automatic_profile_name_saves_without_input_and_freezes_new_tasks(self):
+        inv, reg, source, profile = self.wim_fixtures()
+        value = dict(source_id=source, image_index=6, system_gib=200, wim_cache_mode='local_cache')
+        self.assertEqual(self.post('/pc-deploy/api/profiles/'+profile, value, method='PUT').status_code, 200)
+        expected = 'Win11 Pro · 清盘C200G+D · 不加域 · 本机缓存'
+        saved = self.client.get('/pc-deploy/api/dashboard').json['profiles'][0]
+        self.assertEqual(saved['name'], expected)
+        # An existing handwritten label must not determine what a new task says it will do.
+        with self.store.connect(write=True) as c:
+            saved['name'] = '只清除C盘'
+            c.execute('UPDATE profiles SET data=? WHERE id=?', (canonical(saved), profile))
+        pv = self.wim_preview(inv, profile)
+        self.assertEqual(pv.status_code, 200, pv.json)
+        self.assertEqual(pv.json['profile'], expected)
+        self.enable()
+        result = self.post('/pc-deploy/api/jobs/commit', dict(preview_id=pv.json['id'],
+            confirmation='YES', physical_confirmed=True))
+        self.assertEqual(result.status_code, 200, result.json)
+        job = self.post('/pc-deploy/api/agent/poll', inv, reg['token']).json['job']
+        self.assertEqual(job['profile']['name'], expected)
+        value.update(system_gib=240, name='Anything the client sends')
+        self.assertEqual(self.post('/pc-deploy/api/profiles/'+profile, value, method='PUT').status_code, 200)
+        dashboard = self.client.get('/pc-deploy/api/dashboard').json
+        self.assertEqual(dashboard['profiles'][0]['name'], 'Win11 Pro · 清盘C240G+D · 不加域 · 本机缓存')
+        self.assertEqual(dashboard['jobs'][0]['profile'], expected)
+        with self.store.connect(write=True) as c:
+            row = c.execute('SELECT data FROM jobs WHERE id=?', (result.json['ids'][0],)).fetchone()
+            history = json.loads(row['data'])
+            history['profile']['name'] = '历史任务原名称'
+            c.execute('UPDATE jobs SET data=? WHERE id=?', (canonical(history), result.json['ids'][0]))
+        self.assertEqual(self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]['profile'], '历史任务原名称')
+
+    def test_automatic_profile_name_distinguishes_install_choices(self):
+        source = dict(kind='wim', family='windows10', images=[dict(index=1, name='Windows10专业版')])
+        profile = dict(image_index=1, system_gib=0, disk_mode='system_partition')
+        self.assertEqual(profile_name(profile, source), 'Win10专业版 · 保留D重装C · 不加域 · 本机缓存')
+        profile.update(disk_mode='wipe_disk', system_gib=200, wim_cache_mode='network_direct',
+                       domain_join=dict(mode='manual'))
+        self.assertEqual(profile_name(profile, source), 'Win10专业版 · 清盘C200G+D · 等待统一加域 · 网络直读')
+        profile.update(system_gib=0, domain_join=dict(mode='automatic'))
+        source['kind'] = 'setup'
+        self.assertEqual(profile_name(profile, source), 'Win10专业版 · 清盘单C盘 · 自动加域 · 原版安装')
 
     def test_wim_cache_mode_defaults_and_rejects_invalid_values(self):
         _, _, source, profile = self.wim_fixtures()

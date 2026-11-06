@@ -24,7 +24,7 @@ from werkzeug.local import LocalProxy
 from werkzeug.exceptions import RequestEntityTooLarge
 
 from .deployment import (ACTIVE, ERRORS, STATES, Invalid, answer_file, canonical, digest,
-                        integer, inventory, device_report, profile_record, public_url, source_record,
+                        integer, inventory, device_report, profile_name, profile_record, public_url, source_record,
                         target_check, text, partition_target, finalizer_command)
 from .storage import Store
 from .domain_join import available_name, computer_name, employee_id, join_record
@@ -447,6 +447,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
             if joining:
                 domain_transport_required(c, joining)
                 value['domain_join'] = joining
+            value['name'] = profile_name(value, source)
             old = load(c, 'profiles', identity)[0] if identity else None
             old_secret = store.decrypt(old['secret']) if old else {}
             if isinstance(old_secret, str):
@@ -536,6 +537,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
         with store.connect(write=True) as c:
             _, profile = load(c, 'profiles', data.get('profile_id'))
             _, source = load(c, 'sources', profile['source_id'])
+            profile['name'] = profile_name(profile, source)
             reserved_names = set()
             chosen = [snapshot_target(c, t, profile, source, reserved_names) for t in targets]
             value = dict(profile_id=profile['id'], profile_revision=profile['revision'],
@@ -566,6 +568,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
             pv = json.loads(row['data'])
             pr, profile = load(c, 'profiles', pv['profile_id'])
             sr, source = load(c, 'sources', profile['source_id'])
+            profile['name'] = profile_name(profile, source)
             if profile['revision'] != pv['profile_revision'] or source['revision'] != pv['source_revision']:
                 raise Invalid('方案或安装源已变化，请重新预览')
             targets = []

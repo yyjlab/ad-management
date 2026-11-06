@@ -297,11 +297,13 @@ async function run() {
     assert.ok(await page.locator('#wim-profile-help').isVisible());checks++;
     await page.locator('#disk-mode').selectOption('system_partition');
     assert.ok(await page.locator('#profile-form [name=system_gib]').isDisabled());checks++;
-    await page.locator('#profile-form [name=name]').fill('Custom restore');
+    assert.ok(await page.locator('#profile-form [name=name]').evaluate(el=>el.readOnly));checks++;
+    assert.ok((await page.locator('#profile-form [name=name]').inputValue()).includes('保留D重装C · 不加域 · 网络直读'));checks++;
     await page.locator('#profile-form [type=submit]').click();
     await page.locator('#modal').waitFor({state:'hidden'});
     assert.equal(profilePayload.disk_mode,'system_partition');checks++;
     assert.equal(profilePayload.wim_cache_mode,'network_direct');checks++;
+    assert.ok(profilePayload.name.includes('保留D重装C · 不加域 · 网络直读'));checks++;
     assert.equal(profilePayload.system_gib,0);checks++;
     assert.ok(!('password' in profilePayload)&&!('username' in profilePayload)&&!('product_key' in profilePayload));checks++;
     await page.locator('[data-view=devices]').click();
@@ -1036,6 +1038,44 @@ async function run() {
     assert.ok(identityCases.unsafe.text.includes('<img src=x>'));checks++;
     assert.ok(await verifiedRow.locator('.job-identity strong').first().evaluate(e=>parseFloat(getComputedStyle(e).fontSize)<=14));checks++;
 
+    // Labels describe the configuration, including legacy handwritten profiles, without changing IDs.
+    const namingSource={...sourceBase,id:'naming-source',kind:'wim',family:'windows10',name:'办公镜像',
+      images:[{index:1,name:'Windows10专业版',build:19045,architecture:'amd64',language:'zh-CN'}]};
+    const namingProfile={id:'naming-1',name:'随便写的旧名称',source_id:namingSource.id,image_index:1,
+      disk_mode:'wipe_disk',system_gib:200,wim_cache_mode:'network_direct',preserve_image_settings:true,
+      domain_join:{domain:'corp.test',username:'join-service@corp.test',mode:'manual',allow_http:true}};
+    fixture.sources=[namingSource,{...namingSource,id:'naming-win11',family:'windows11',
+      images:[{...namingSource.images[0],name:'Windows 11专业版',build:26100}]}];
+    fixture.profiles=[namingProfile,
+      {...namingProfile,id:'naming-2',disk_mode:'system_partition',system_gib:0,domain_join:null,wim_cache_mode:'local_cache'},
+      {...namingProfile,id:'naming-3',disk_mode:'system_partition',system_gib:0,domain_join:null,wim_cache_mode:'local_cache'}];
+    await page.locator('#refresh').click();
+    await page.locator('[data-view=profiles]').click();
+    const namingTitle='Win10专业版 · 清盘C200G+D · 等待统一加域 · 网络直读';
+    const namingTitles=await page.locator('.profile-card h3').allTextContents();
+    assert.equal(namingTitles[0],namingTitle);checks++;
+    assert.ok(namingTitles[1].includes('保留D重装C · 不加域 · 本机缓存 · 办公镜像 · 方案1'));checks++;
+    assert.ok(namingTitles[2].endsWith('办公镜像 · 方案2'));checks++;
+    assert.ok(!(await page.locator('.profile-grid').textContent()).includes('随便写的旧名称'));checks++;
+    await page.locator('[data-view=devices]').click();
+    assert.deepEqual((await page.locator('#profile-choice option').allTextContents()).slice(1),namingTitles);checks++;
+    await page.locator('#profile-choice').selectOption('naming-1');
+    await page.locator('#refresh').click();
+    assert.equal(await page.locator('#profile-choice').inputValue(),'naming-1');checks++;
+    await page.locator('[data-view=profiles]').click();
+    await page.locator('[data-action=edit-profile][data-id=naming-1]').click();
+    assert.equal(await page.locator('#profile-form [name=name]').inputValue(),namingTitle);checks++;
+    await page.locator('#domain-join-mode').selectOption('automatic');
+    assert.ok((await page.locator('#profile-form [name=name]').inputValue()).includes('自动加域'));checks++;
+    await page.locator('#wim-cache-mode').selectOption('local_cache');
+    assert.ok((await page.locator('#profile-form [name=name]').inputValue()).endsWith('本机缓存'));checks++;
+    await page.locator('#profile-form [name=system_gib]').fill('240');
+    assert.ok((await page.locator('#profile-form [name=name]').inputValue()).includes('清盘C240G+D'));checks++;
+    await page.locator('#disk-mode').selectOption('system_partition');
+    assert.ok((await page.locator('#profile-form [name=name]').inputValue()).includes('保留D重装C'));checks++;
+    await page.locator('#source-choice').selectOption('naming-win11');
+    assert.ok((await page.locator('#profile-form [name=name]').inputValue()).startsWith('Win11专业版'));checks++;
+    await page.locator('#profile-form [data-action=close]').click();
     assert.deepEqual(errors,[]);checks++;
     console.log(`${checks} nested menu, embedded page, HTTP form, role, message origin, lifecycle, mobile, WIM restore and per-task log UI checks passed. No live system contacted.`);
   }finally{await browser.close();}
