@@ -237,7 +237,7 @@ async function run() {
       profiles:[{id:'setup-profile',name:'Original Setup profile',source_id:'setup-source',image_index:1,
         system_gib:128,username:'ITSetup',computer_prefix:'PC'},
         {id:'wim-profile',name:'WIM preserve',source_id:'wim-source',image_index:1,system_gib:0,
-          disk_mode:'system_partition',preserve_image_settings:true,username:'',computer_prefix:''}],
+          disk_mode:'system_partition',preserve_image_settings:true,wim_cache_mode:'network_direct',username:'',computer_prefix:''}],
       jobs:[],events:[],settings,boot_files:{},server_time:1793347200};
     await page.setViewportSize({width:1440,height:1000});
     await page.reload();
@@ -258,6 +258,7 @@ async function run() {
     await page.locator('[data-profile-card=summary-auto]').waitFor();
     const autoCard=page.locator('[data-profile-card=summary-auto]'),manualCard=page.locator('[data-profile-card=summary-manual]');
     assert.ok((await autoCard.textContent()).includes(sourceBase.path+'\\win11.wim'));checks++;
+    assert.ok((await autoCard.textContent()).includes('网络直接还原（不缓存镜像）'));checks++;
     assert.ok((await autoCard.textContent()).includes(sourceBase.images[0].name));checks++;
     assert.ok((await autoCard.textContent()).includes('内部版本 '+sourceBase.images[0].build));checks++;
     assert.ok((await autoCard.textContent()).includes('保留 D 盘及其他分区，不调整 C 盘容量'));checks++;
@@ -285,7 +286,12 @@ async function run() {
     await page.locator('[data-action=new-profile]').click();
     assert.ok(await page.locator('#profile-form [name=username]').isVisible());checks++;
     assert.ok(await page.locator('#profile-form [name=password]').evaluate(e=>e.required));checks++;
+    assert.ok(await page.locator('#wim-cache-field').isHidden());checks++;
+    assert.ok(await page.locator('#wim-cache-mode').isDisabled());checks++;
     await page.locator('#source-choice').selectOption('wim-source');
+    assert.ok(await page.locator('#wim-cache-field').isVisible());checks++;
+    assert.equal(await page.locator('#wim-cache-mode').inputValue(),'local_cache');checks++;
+    await page.locator('#wim-cache-mode').selectOption('network_direct');
     assert.ok(await page.locator('#profile-form [name=username]').isDisabled());checks++;
     assert.ok(await page.locator('#profile-form [name=password]').isHidden());checks++;
     assert.ok(await page.locator('#wim-profile-help').isVisible());checks++;
@@ -295,6 +301,7 @@ async function run() {
     await page.locator('#profile-form [type=submit]').click();
     await page.locator('#modal').waitFor({state:'hidden'});
     assert.equal(profilePayload.disk_mode,'system_partition');checks++;
+    assert.equal(profilePayload.wim_cache_mode,'network_direct');checks++;
     assert.equal(profilePayload.system_gib,0);checks++;
     assert.ok(!('password' in profilePayload)&&!('username' in profilePayload)&&!('product_key' in profilePayload));checks++;
     await page.locator('[data-view=devices]').click();
@@ -313,6 +320,7 @@ async function run() {
     assert.equal(previewPayload.targets[0].partition_key,'partition-3');checks++;
     assert.equal(previewPayload.targets[0].disk_key,'disk-7');checks++;
     assert.ok((await page.locator('#modal-body').textContent()).includes('只格式化分区 3'));checks++;
+    assert.ok((await page.locator('#modal-body').textContent()).includes('网络直接还原（不缓存镜像）'));checks++;
     assert.ok((await page.locator('#modal-body').textContent()).includes('所选 Windows 分区数据可删除'));checks++;
     assert.ok(await page.locator('#commit-form [type=submit]').isDisabled());checks++;
     const commitsBeforeFill=requests.filter(p=>p==='/pc-deploy/api/jobs/commit').length;
@@ -325,6 +333,9 @@ async function run() {
     await page.locator('#profile-choice').selectOption('setup-profile');
     assert.equal(await page.locator('[data-partition]').count(),0);checks++;
     await page.locator('[data-view=profiles]').click();
+    await page.locator('[data-action=edit-profile][data-id=wim-profile]').click();
+    assert.equal(await page.locator('#wim-cache-mode').inputValue(),'network_direct');checks++;
+    await page.locator('#profile-form [data-action=close]').click();
     await page.locator('[data-action=edit-profile][data-id=setup-profile]').click();
     assert.ok(await page.locator('#profile-form [name=username]').isEnabled());checks++;
     assert.ok(await page.locator('#disk-mode').isHidden());checks++;
@@ -365,6 +376,12 @@ async function run() {
     assert.equal(await liveProgress.locator('progress').getAttribute('value'),'37');checks++;
     assert.equal(await cachingBar.evaluate(el=>el.isConnected),false);checks++;
     assert.ok((await page.locator('.job-apply-time').textContent()).includes('纯还原 2分00秒'));checks++;
+    fixture.jobs[0].performance.applying.mode='network_direct';
+    await page.locator('#refresh').click();
+    await page.waitForFunction(()=>document.querySelector('.job-apply-time')?.textContent.includes('网络直接还原'));
+    assert.ok(!(await page.locator('.job-apply-time').textContent()).includes('空间不足'));checks++;
+    fixture.jobs[0].performance.applying.mode='local_cache';
+    await page.locator('#refresh').click();
     assert.ok((await liveProgress.textContent()).includes('37%'));checks++;
     assert.equal(await page.locator('[data-action=reconcile-job]').count(),0);checks++;
     fixture.jobs[0].stale=true;

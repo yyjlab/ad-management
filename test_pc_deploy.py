@@ -1691,6 +1691,51 @@ function Start-ScheduledTask {}
         self.assertEqual(p['username'], '')
         self.assertFalse(d['settings']['enabled'])
 
+    def test_wim_cache_mode_defaults_and_rejects_invalid_values(self):
+        _, _, source, profile = self.wim_fixtures()
+        self.assertEqual(self.client.get('/pc-deploy/api/dashboard').json['profiles'][0]['wim_cache_mode'], 'local_cache')
+        value = dict(name='Cache mode', source_id=source, image_index=6)
+        for invalid in ('auto', '', None, [], True):
+            with self.subTest(mode=invalid):
+                self.assertEqual(self.post('/pc-deploy/api/profiles/'+profile,
+                    dict(value, wim_cache_mode=invalid), method='PUT').status_code, 400)
+
+    def test_network_direct_requires_new_pe_and_freezes_task_mode(self):
+        inv, reg, source, profile = self.wim_fixtures()
+        value = dict(name='Direct', source_id=source, image_index=6, wim_cache_mode='network_direct')
+        self.assertEqual(self.post('/pc-deploy/api/profiles/'+profile, value, method='PUT').status_code, 200)
+        blocked = self.wim_preview(inv, profile)
+        self.assertEqual(blocked.status_code, 400)
+        self.assertIn('ISO', blocked.json['error'])
+        self.assertEqual(self.client.get('/pc-deploy/api/dashboard').json['jobs'], [])
+        inv['wim_cache_mode_v1'] = True
+        self.assertEqual(self.post('/pc-deploy/api/agent/poll', inv, reg['token']).status_code, 200)
+        pv = self.wim_preview(inv, profile)
+        self.assertEqual(pv.status_code, 200, pv.json)
+        self.enable()
+        result = self.post('/pc-deploy/api/jobs/commit', dict(preview_id=pv.json['id'],
+            confirmation='YES', physical_confirmed=True))
+        self.assertEqual(result.status_code, 200, result.json)
+        job = result.json['ids'][0]
+        value['wim_cache_mode'] = 'local_cache'
+        self.assertEqual(self.post('/pc-deploy/api/profiles/'+profile, value, method='PUT').status_code, 200)
+        polled = self.post('/pc-deploy/api/agent/poll', inv, reg['token']).json['job']
+        self.assertEqual(polled['profile']['wim_cache_mode'], 'network_direct')
+        self.assertEqual(self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]['wim_cache_mode'], 'network_direct')
+        downgraded = dict(inv, wim_cache_mode_v1=False)
+        self.assertEqual(self.post(f'/pc-deploy/api/agent/jobs/{job}/start', downgraded, reg['token']).status_code, 400)
+        self.assertEqual(self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]['state'], 'preflight')
+        self.assertEqual(self.post(f'/pc-deploy/api/agent/jobs/{job}/start', inv, reg['token']).status_code, 200)
+
+    def test_cache_capability_requires_boolean_true(self):
+        raw = machine()
+        before = inventory(raw)
+        for invalid in (False, None, 1, 'true'):
+            raw['wim_cache_mode_v1'] = invalid
+            self.assertEqual(inventory(raw), before)
+        raw['wim_cache_mode_v1'] = True
+        self.assertIs(inventory(raw)['wim_cache_mode_v1'], True)
+
     def test_wim_blocks_legacy_pe_before_task_creation(self):
         inv, _, _, profile = self.wim_fixtures(capable=False)
         result = self.wim_preview(inv, profile)

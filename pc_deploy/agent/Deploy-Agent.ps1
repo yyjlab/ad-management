@@ -238,7 +238,7 @@ function Get-Inventory {
         firmware = $(if ($firmwareValue -eq 2) { 'UEFI' } else { 'BIOS' })
         secure_boot = $secureBoot; tpm2 = $tpm2
         ram_bytes = [long]$computer.TotalPhysicalMemory; macs = $macs; disks = $disks; wim_apply_v1 = $true
-        system_info = $details
+        system_info = $details; wim_cache_mode_v1 = $true
     }
 }
 
@@ -413,12 +413,20 @@ function Copy-DeploymentImage {
         $worker.Dispose()
     }
 }
+function Get-WimCacheMode {
+    param($Profile)
+    $mode=[string]$Profile.wim_cache_mode
+    if (-not $mode) { return 'local_cache' }
+    if ($mode -cnotin @('local_cache','network_direct')) { throw 'Unknown WIM cache mode.' }
+    return $mode
+}
 function Invoke-WimImageApply {
     param($Job, [string]$Token, [string]$ImagePath, [string]$Root,
           [int]$DiskNumber, $Partition, [long]$ImageBytes, [long]$ExpandedBytes)
     Assert-PartitionBinding $Root.Substring(0,1) $DiskNumber $Partition
     $volume=Get-Volume -DriveLetter $Root.Substring(0,1)
-    $useCache=$ImageBytes -gt 0 -and $ExpandedBytes -gt 0 -and
+    $cacheMode=Get-WimCacheMode $Job.profile
+    $useCache=$cacheMode -eq 'local_cache' -and $ImageBytes -gt 0 -and $ExpandedBytes -gt 0 -and
         [long]$volume.SizeRemaining -ge ($ImageBytes+$ExpandedBytes+10GB)
     $work=Join-Path $Root ('PCDeployCache-' + [guid]::NewGuid().ToString('N'))
     $localImage=Join-Path $work 'image.wim'
@@ -435,7 +443,11 @@ function Invoke-WimImageApply {
             $lock=[IO.File]::Open($localImage,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
             $ImagePath=$localImage; $mode='local_cache'
         } else {
-            Write-Host 'Insufficient spare space for a full image cache. Using the network image without touching data partitions.' -ForegroundColor Yellow
+            if ($cacheMode -eq 'network_direct') {
+                Write-Host 'Approved network-direct mode. Applying the WIM from the server without caching the image.' -ForegroundColor Cyan
+            } else {
+                Write-Host 'Insufficient spare space for a full image cache. Using the network image without touching data partitions.' -ForegroundColor Yellow
+            }
         }
         Assert-PartitionBinding $Root.Substring(0,1) $DiskNumber $Partition
         $script:FailureCode='WIM'
@@ -726,10 +738,16 @@ function Invoke-Deployment {
     $sourceLock = $null
     try {
     if ($isWim) {
+        $cacheMode=Get-WimCacheMode $Job.profile
         foreach ($tool in @('Get-Partition','Get-Volume','Format-Volume','Clear-Disk','Initialize-Disk','New-Partition','Add-PartitionAccessPath','dism.exe','reg.exe','icacls.exe','wpeutil.exe')) {
             if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) { throw "Required WinPE tool missing: $tool" }
         }
         $sourceLock = [IO.File]::Open($imagePath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        if ($cacheMode -eq 'network_direct' -and $Job.source.image_sha256) {
+            if ((Get-FileHash -LiteralPath $imagePath -Algorithm SHA256).Hash -ine $Job.source.image_sha256) {
+                throw 'Network WIM SHA-256 does not match the approved source.'
+            }
+        }
     }
     # Read selected image metadata directly without scanning the entire source file.
     $image = Get-WindowsImage -ImagePath $imagePath -Index $Job.profile.image_index

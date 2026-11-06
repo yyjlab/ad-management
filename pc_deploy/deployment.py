@@ -140,6 +140,9 @@ def profile_record(data, source):
     if index not in {v['index'] for v in source['images']}:
         raise Invalid('所选镜像索引不在安装源中')
     if source.get('kind') == 'wim':
+        cache_mode = data.get('wim_cache_mode', 'local_cache')
+        if cache_mode not in ('local_cache', 'network_direct'):
+            raise Invalid('请选择本机缓存或网络直接还原')
         mode = data.get('disk_mode', 'wipe_disk')
         if mode not in ('wipe_disk', 'system_partition'):
             raise Invalid('请选择重建整盘或仅还原指定系统分区')
@@ -150,7 +153,7 @@ def profile_record(data, source):
             raise Invalid('保留分区时不能调整 C 盘容量')
         return dict(name=text(data.get('name'), '方案名称'), source_id=source['id'],
                     image_index=index, username='', computer_prefix='', system_gib=size,
-                    disk_mode=mode, preserve_image_settings=True)
+                    disk_mode=mode, preserve_image_settings=True, wim_cache_mode=cache_mode)
     if data.get('disk_mode', 'wipe_disk') != 'wipe_disk':
         raise Invalid('原版 Setup 方式保持原有整盘安装流程')
     username = text(data.get('username'), '本地管理员名称', maximum=20)
@@ -312,6 +315,8 @@ def inventory(data):
                 disks=sorted(clean, key=lambda d: d['number']))
     if data.get('wim_apply_v1') is True:
         result['wim_apply_v1'] = True
+    if data.get('wim_cache_mode_v1') is True:
+        result['wim_cache_mode_v1'] = True
     # Optional display metadata: old PE payloads keep exactly the same normalized inventory/hash.
     for field in ('manufacturer', 'system_family', 'product_name', 'product_version'):
         if data.get(field) not in (None, ''):

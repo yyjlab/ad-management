@@ -740,7 +740,7 @@ $count+=5
             param($File,$Arguments,$Stage,$Job,$Token)
             $native.Add($Arguments)
             $image=($Arguments|Where-Object {$_ -like '/ImageFile:*'}).Substring(11).Trim('"')
-            if($script:cacheSpace -gt 1GB){
+            if($script:cacheSpace -gt 1GB -and $Job.profile.wim_cache_mode -ne 'network_direct'){
                 if($image -eq $source -or -not [IO.File]::Exists($image)){throw 'Apply did not use completed local cache'}
                 if((Get-FileHash -LiteralPath $image).Hash -cne $expected){throw 'Wrong cached bytes applied'}
             }elseif($image -ne $source){throw 'Low space did not keep the network source'}
@@ -756,7 +756,46 @@ $count+=5
         $script:cacheSpace=100GB;$script:applyShouldFail=$true;$failed=$false
         try{Invoke-WimImageApply $job 'fixture-token' $source ($fixture+'\') 7 @{} $buffer.Length 1GB}catch{$failed=$true}
         if(-not $failed -or $native.Count -ne 3 -or @(Get-ChildItem -LiteralPath $fixture -Directory -Filter 'PCDeployCache-*').Count){throw 'Failed application retried or retained cache'}
-        Write-Host 'Background copy, byte/hash validation, report outage, low-space fallback and cache cleanup checks passed.'
+        $job.profile.wim_cache_mode='network_direct';$script:applyShouldFail=$false;$reports.Clear()
+        Invoke-WimImageApply $job 'fixture-token' $source ($fixture+'\') 7 @{} $buffer.Length 1GB
+        if($native.Count -ne 4 -or @($reports|Where-Object {$_.stage -eq 'caching'}).Count -or
+           $reports[$reports.Count-1].metrics.mode -ne 'network_direct' -or
+           @(Get-ChildItem -LiteralPath $fixture -Directory -Filter 'PCDeployCache-*').Count){throw 'Explicit direct mode cached or retained a working directory'}
+        $script:applyShouldFail=$true;$failed=$false
+        try{Invoke-WimImageApply $job 'fixture-token' $source ($fixture+'\') 7 @{} $buffer.Length 1GB}catch{$failed=$true}
+        if(-not $failed -or $native.Count -ne 5){throw 'Direct failure retried or fell back to cache'}
+        $job.profile.wim_cache_mode='unsupported';$failed=$false
+        try{Invoke-WimImageApply $job 'fixture-token' $source ($fixture+'\') 7 @{} $buffer.Length 1GB}catch{$failed=$true}
+        if(-not $failed -or $native.Count -ne 5){throw 'Unknown cache mode reached image application'}
+        # Direct mode validates an explicitly configured hash before metadata, authorization or disk writes.
+        $RegistrationOnly=$false
+        function Assert-WinPE {}
+        function Get-Inventory {param($BootId) @{firmware='UEFI';disks=@()}}
+        function Select-VerifiedDisk {}
+        function New-PSDrive {}
+        function Remove-PSDrive {}
+        function Get-Command {param($Name,$ErrorAction) $true}
+        function Get-WindowsImage {throw 'fixture metadata reached'}
+        function Invoke-Platform {throw 'Preflight reached authorization unexpectedly'}
+        $hashReads=0
+        function Get-FileHash {param($LiteralPath,$Algorithm) $script:hashReads++;@{Hash=$expected}}
+        $preflight=@{id='preflight';source_password='fixture-only';target=@{disk=@{}};
+            source=@{kind='wim';family='windows10';path=$fixture;image_file='source.wim';smb_user='FIXTURE\read';image_sha256=$expected};
+            profile=@{image_index=1;wim_cache_mode='network_direct'}}
+        $script:hashReads=0
+        foreach($scenario in @('mismatch','match','absent','cached')){
+            $preflight.profile.wim_cache_mode='network_direct';$preflight.source.image_sha256=$expected
+            if($scenario -eq 'mismatch'){$preflight.source.image_sha256='0'*64}
+            if($scenario -eq 'absent'){$preflight.source.image_sha256=''}
+            if($scenario -eq 'cached'){$preflight.profile.wim_cache_mode='local_cache'}
+            $detail=''
+            try{Invoke-Deployment $preflight 'fixture-token' 'fixture-boot'}catch{$detail=$_.Exception.Message}
+            if($scenario -eq 'mismatch'){
+                if($detail -ne 'Network WIM SHA-256 does not match the approved source.'){throw 'Direct mode ignored a mismatched source hash'}
+            }elseif($detail -ne 'fixture metadata reached'){throw "Unexpected preflight result: $scenario / $detail"}
+        }
+        if($script:hashReads -ne 2){throw 'Hash scans must be restricted to explicit direct mode with a configured checksum'}
+        Write-Host 'Background copy, byte/hash validation, report outage, low-space fallback, explicit direct mode, preflight hash gating and cleanup checks passed.'
     } finally {
         # Every path below is a generated fixture under our verified private test directory.
         if([IO.Path]::GetFullPath($fixture).StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()),[StringComparison]::OrdinalIgnoreCase)){
@@ -785,5 +824,5 @@ Write-Output "$count PowerShell protection and parser checks passed. No disk com
 }
 $agentAst=[Management.Automation.Language.Parser]::ParseFile("$PSScriptRoot\pc_deploy\agent\Deploy-Agent.ps1",[ref]$tokens,[ref]$errors)
 $hashCalls=$agentAst.FindAll({param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -in @('Get-VerifiedHash','Get-FileHash')},$true)
-if ($hashCalls.Count) { throw 'The deployment agent still scans installation source hashes.' }
-Write-Host 'Quick-source inspection and no-full-file-scan checks passed. No real image or disk was accessed.'
+if ($hashCalls.Count -ne 1) { throw 'Unexpected source hash scan outside the optional direct-mode preflight.' }
+Write-Host 'Quick-source inspection and optional direct-mode hash checks passed. No real image or disk was accessed.'

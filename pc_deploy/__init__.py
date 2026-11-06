@@ -214,6 +214,8 @@ def register_pc_deploy(host_app, current_user, touch_session):
         if source.get('kind') == 'wim':
             if inv.get('wim_apply_v1') is not True:
                 raise Invalid('该 PE 版本只支持登记或原版安装，请用更新后的装机 ISO 启动')
+            if profile.get('wim_cache_mode') == 'network_direct' and inv.get('wim_cache_mode_v1') is not True:
+                raise Invalid('该 PE 不支持切换 WIM 缓存方式，请使用新版 ISO 重新启动后再选择网络直读')
             if profile.get('disk_mode') == 'system_partition':
                 result['partition_key'] = target.get('partition_key')
                 result['partitions'] = partition_target(disk, result['partition_key'])
@@ -334,6 +336,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
                     updated=row['updated'], stale=row['state'] in ACTIVE and now-row['updated'] > 600,
                     progress=data.get('progress'), performance=data.get('performance'),
                     kind=data['source'].get('kind', 'setup'), review=data.get('review'),
+                    wim_cache_mode=data['profile'].get('wim_cache_mode'),
                     domain_join=data.get('domain_join'), computer_name=data['target'].get('computer_name'),
                     installed_at=ready, timings=phases,
                     image_applied_at=timing.get('image_applied_at'),
@@ -873,6 +876,8 @@ def register_pc_deploy(host_app, current_user, touch_session):
             if data['source'].get('kind') == 'wim':
                 if inv.get('wim_apply_v1') is not True:
                     raise Invalid('客户端不支持封装 WIM 还原')
+                if data['profile'].get('wim_cache_mode') == 'network_direct' and inv.get('wim_cache_mode_v1') is not True:
+                    raise Invalid('客户端不支持网络直读选项，请更新 PE ISO')
                 target_check(inv, data['target']['disk_key'], data['profile'])
                 if data['profile'].get('disk_mode') == 'system_partition':
                     current_parts = partition_target(data['target']['disk'], data['target']['partition_key'])

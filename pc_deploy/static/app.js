@@ -171,6 +171,9 @@ function updateSelection() { const b = $('#preview-button'); if(b){ b.disabled =
 function renderSources() {
   $('#page-content').innerHTML = data.sources.length ? `<div class="record-grid">${data.sources.map(s=>`<article class="record"><div class="record-top"><h3>${h(s.name)}</h3><span class="badge blue">${s.family==='windows11'?'Windows 11':'Windows 10'}</span></div><p class="mono">${h(s.path)}${s.kind==='wim'?' / '+h(s.image_file):''}</p><span class="badge muted">${s.kind==='wim'?'封装 WIM 直接还原':'原版 Setup 安装'}</span><span class="badge muted">待装机客户端复核</span><dl><dt>镜像索引</dt><dd>${s.images.length} 个 x64 版本</dd><dt>读取账号</dt><dd>${h(s.smb_user)}</dd><dt>检测方式</dt><dd>快速检测 · 版本与索引</dd></dl><div class="form-actions"><button class="small" data-action="edit-source" data-id="${h(s.id)}">编辑安装源</button></div></article>`).join('')}</div>` : empty('尚未添加安装源','原版 ISO 解压目录和单个封装 WIM 均支持；运行检测脚本后导入清单。');
 }
+function wimCacheLabel(profile) {
+  return profile?.wim_cache_mode==='network_direct'?'网络直接还原（不缓存镜像）':'先缓存到本机 SSD（空间不足时直读）';
+}
 function renderProfileCard(p) {
   const source=data.sources.find(s=>s.id===p.source_id);
   const image=source?.images.find(i=>i.index===p.image_index);
@@ -186,7 +189,7 @@ function renderProfileCard(p) {
   const diskEffect=p.disk_mode==='system_partition'?'仅格式化所选 Windows 分区，更新同盘 EFI；其他数据分区不处理':'重建所选整块物理硬盘，旧 C/D 数据全部清空；其他物理硬盘不处理';
   let details=section('系统与安装源',
     row('Windows 版本',version)+row('架构 / 语言',(image?.architecture==='amd64'?'x64':image?.architecture||'未提供架构')+' · '+language)+
-    row('安装源',source?.name||'安装源不存在')+row('镜像路径',imagePath)+row('启动方式','UEFI / GPT'));
+    row('安装源',source?.name||'安装源不存在')+row('镜像路径',imagePath)+(wim?row('WIM 读取方式',wimCacheLabel(p)):'')+row('启动方式','UEFI / GPT'));
   details+=section('分盘与账号',
     row('分区方案',partition)+row('数据影响',diskEffect)+
     row('本地管理员',wim?'沿用镜像内账号':p.username||'未提供账号')+
@@ -303,7 +306,7 @@ function renderWimPerformance(job) {
       (Number.isFinite(cache.elapsed_seconds)?' · '+duration(cache.elapsed_seconds):'')+'</small>';
   }
   if(apply){
-    html+='<small class="job-apply-time">'+(apply.mode==='local_cache'?'本机 SSD 还原':apply.mode==='network_direct'?'网络直接还原（缓存空间不足）':'WIM 还原')+
+    html+='<small class="job-apply-time">'+(apply.mode==='local_cache'?'本机 SSD 还原':apply.mode==='network_direct'?'网络直接还原':'WIM 还原')+
       (Number.isFinite(apply.elapsed_seconds)?' · 纯还原 '+duration(apply.elapsed_seconds):'')+'</small>';
   }
   return html;
@@ -453,6 +456,8 @@ function editProfile(id) {
   if (p) $('#source-choice').value = p.source_id;
   $('.form-grid', $('#profile-form')).insertAdjacentHTML('afterbegin', '<div class="field"><label for="disk-mode">封装 WIM 分区方式</label><select id="disk-mode" name="disk_mode"><option value="wipe_disk">重建所选整盘（清空全部分区）</option><option value="system_partition">仅还原指定 Windows 分区（保留其他分区）</option></select></div><p id="wim-profile-help" class="modal-help full" hidden>沿用镜像内的软件、账号与授权配置。默认保留计算机名；启用自动加域后改为每台填写的员工工号。系统分区数据仍会清空；未做 OOBE 封装的镜像需首次管理员登录后启动安装后步骤。</p>');
   if(p?.disk_mode) $('#disk-mode').value=p.disk_mode;
+  $('#disk-mode').closest('.field').insertAdjacentHTML('afterend','<div class="field full" id="wim-cache-field"><label for="wim-cache-mode">WIM 读取方式</label><select id="wim-cache-mode" name="wim_cache_mode"><option value="local_cache">先缓存到本机 SSD（空间不足时直读）</option><option value="network_direct">网络直接还原（不缓存镜像）</option></select><small>仅影响以后新建的任务。网络直读需新版 PE，整个还原过程依赖网络；本机临时工作目录仍保留。如安装源填写了 SHA-256，直读前仍需读取校验镜像。</small></div>');
+  $('#wim-cache-mode').value=p?.wim_cache_mode||'local_cache';
   $('#disk-mode').closest('.field').insertAdjacentHTML('afterend','<div id="partition-layout-field" class="field"><label for="partition-layout">自动分盘方案</label><select id="partition-layout" name="partition_layout"><option value="single">单 C 盘：使用所选硬盘的可用空间</option><option value="split">C + D 盘：指定 C 盘容量，剩余空间创建 D 盘</option></select></div><p id="partition-plan-help" class="modal-help full"></p>');
   $('#partition-layout').value=p?.system_gib?'split':'single';
   $('#profile-form').dataset.splitGib=String(p?.system_gib||256);
@@ -509,6 +514,8 @@ function updateProfileMode() {
   const form=$('#profile-form'); if(!form)return;
   const wim=data.sources.find(s=>s.id===$('#source-choice').value)?.kind==='wim';
   $('#disk-mode').disabled=!wim;
+  $('#wim-cache-mode').disabled=!wim;
+  $('#wim-cache-field').hidden=!wim;
   $('#disk-mode').closest('.field').hidden=!wim;
   $('#wim-profile-help').hidden=!wim;
   $('#setup-profile-help').hidden=wim;
@@ -545,7 +552,7 @@ async function preview() {
   if(targets.some(t=>!t.disk_key)) { toast('请为每台选中的电脑明确选择目标硬盘'); return; }
   if(preservesPartitions()&&targets.some(t=>!t.partition_key)){toast('请明确选择每台电脑要格式化的 Windows 分区');return;}
   const r = await api('/api/jobs/preview','POST',{profile_id:profileId,targets}); previewId = r.id;
-  modal('确认批量安装', `<div class="notice danger">${h(r.warning)}<br>请先完成备份；启动安装后不能远程取消，也不会自动恢复原数据。</div><p>${h(r.profile)} · ${h(r.source)} · <strong>${r.targets.length} 台电脑</strong></p><p class="notice">${h(partitionPlan(selectedProfile()))}</p>${r.domain_join?'<p class="notice">按以下员工工号改名并加入域 '+h(r.domain_join.domain)+(r.domain_join.mode==='manual'?'。先完成 Windows 安装和现场设置，再由平台统一加域；确认执行后才会额外重启一次。':'。安装完成后自动加域，成功后额外重启一次。')+'同名时依次追加 A–Z，最终名称同步到任务与日志；不会覆盖已有电脑。'+(r.domain_join.allow_http?'<br><strong>本方案允许内网 HTTP 加域，密码将明文传输。</strong>':'')+'</p>':''}<div class="table-wrap"><table class="modal-table"><thead><tr><th>整机序列号</th><th>屏幕校验码</th>${r.domain_join?'<th>工号 / 预计电脑名</th>':''}<th>将处理的硬盘 / 分区</th></tr></thead><tbody>${r.targets.map(t=>`<tr><td class="mono">${h(t.serial)}</td><td class="mono">${h(t.boot_code)}</td>${r.domain_join?'<td class="mono">'+h(t.employee_id)+'<span class="cell-sub">预计 '+h(t.computer_name)+'</span></td>':''}<td>磁盘 ${t.disk.number} · ${h(t.disk.model)} · ${h(size(t.disk.size_bytes))}<span class="cell-sub mono">${h(t.disk.serial || t.disk.unique_id)}</span>${t.partitions?`<strong>只格式化分区 ${t.partitions.windows.number} · ${h(size(t.partitions.windows.size_bytes))}</strong><span class="cell-sub mono">${h(t.partitions.windows.guid)}</span>`:''}</td></tr>`).join('')}</tbody></table></div><form id="commit-form"><div class="section"><label class="check-label"><input name="physical_confirmed" type="checkbox" required>已现场核对整机序列号、屏幕校验码和硬盘，${preservesPartitions()?'确认所选 Windows 分区数据可删除，允许更新同盘 EFI 引导':'确认所选硬盘全部数据可删除'}</label></div><div class="field"><label for="field-confirmation">输入 YES 确认本批安装</label><div class="toolbar-left"><input id="field-confirmation" name="confirmation" required autocomplete="off" pattern="YES"><button class="small" type="button" data-action="fill-install-confirmation">一键填入 YES</button></div></div><div id="form-error" class="error" role="alert"></div>${!data.settings.enabled?'<p class="error">真实下发尚未开启。完成隔离验证后，在启动与设置中开启。</p>':''}<div class="form-actions"><button type="button" data-action="close">返回检查</button><button class="danger-button" type="submit" ${!data.settings.enabled?'disabled':''}>确认并执行安装</button></div></form>`);
+  modal('确认批量安装', `<div class="notice danger">${h(r.warning)}<br>请先完成备份；启动安装后不能远程取消，也不会自动恢复原数据。</div><p>${h(r.profile)} · ${h(r.source)} · <strong>${r.targets.length} 台电脑</strong></p><p class="notice">${h(partitionPlan(selectedProfile()))}${selectedProfile()?.preserve_image_settings?'<br>WIM 读取方式：'+h(wimCacheLabel(selectedProfile())):''}</p>${r.domain_join?'<p class="notice">按以下员工工号改名并加入域 '+h(r.domain_join.domain)+(r.domain_join.mode==='manual'?'。先完成 Windows 安装和现场设置，再由平台统一加域；确认执行后才会额外重启一次。':'。安装完成后自动加域，成功后额外重启一次。')+'同名时依次追加 A–Z，最终名称同步到任务与日志；不会覆盖已有电脑。'+(r.domain_join.allow_http?'<br><strong>本方案允许内网 HTTP 加域，密码将明文传输。</strong>':'')+'</p>':''}<div class="table-wrap"><table class="modal-table"><thead><tr><th>整机序列号</th><th>屏幕校验码</th>${r.domain_join?'<th>工号 / 预计电脑名</th>':''}<th>将处理的硬盘 / 分区</th></tr></thead><tbody>${r.targets.map(t=>`<tr><td class="mono">${h(t.serial)}</td><td class="mono">${h(t.boot_code)}</td>${r.domain_join?'<td class="mono">'+h(t.employee_id)+'<span class="cell-sub">预计 '+h(t.computer_name)+'</span></td>':''}<td>磁盘 ${t.disk.number} · ${h(t.disk.model)} · ${h(size(t.disk.size_bytes))}<span class="cell-sub mono">${h(t.disk.serial || t.disk.unique_id)}</span>${t.partitions?`<strong>只格式化分区 ${t.partitions.windows.number} · ${h(size(t.partitions.windows.size_bytes))}</strong><span class="cell-sub mono">${h(t.partitions.windows.guid)}</span>`:''}</td></tr>`).join('')}</tbody></table></div><form id="commit-form"><div class="section"><label class="check-label"><input name="physical_confirmed" type="checkbox" required>已现场核对整机序列号、屏幕校验码和硬盘，${preservesPartitions()?'确认所选 Windows 分区数据可删除，允许更新同盘 EFI 引导':'确认所选硬盘全部数据可删除'}</label></div><div class="field"><label for="field-confirmation">输入 YES 确认本批安装</label><div class="toolbar-left"><input id="field-confirmation" name="confirmation" required autocomplete="off" pattern="YES"><button class="small" type="button" data-action="fill-install-confirmation">一键填入 YES</button></div></div><div id="form-error" class="error" role="alert"></div>${!data.settings.enabled?'<p class="error">真实下发尚未开启。完成隔离验证后，在启动与设置中开启。</p>':''}<div class="form-actions"><button type="button" data-action="close">返回检查</button><button class="danger-button" type="submit" ${!data.settings.enabled?'disabled':''}>确认并执行安装</button></div></form>`);
 }
 function deviceInfoTable(headers, rows) {
   if (!rows.length) return '<p class="modal-help">此项尚未上报。</p>';
