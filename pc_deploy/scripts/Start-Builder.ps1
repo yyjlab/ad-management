@@ -100,7 +100,7 @@ try {
                 Add-Type -AssemblyName System.IO.Compression.FileSystem
                 $archive = [IO.Compression.ZipFile]::OpenRead($zip)
                 try {
-                    foreach ($name in @('config.json','Deploy-Agent.ps1','Start.ps1')) {
+                    foreach ($name in @('config.json','Deploy-Agent.ps1','Start.ps1','DeviceInfo.ps1','HardwareInfo.ps1')) {
                         $entry = $archive.GetEntry($name)
                         if (-not $entry -or $entry.Length -gt 1048576) { throw 'Invalid client package.' }
                         [IO.Compression.ZipFileExtensions]::ExtractToFile($entry,(Join-Path $job $name),$false)

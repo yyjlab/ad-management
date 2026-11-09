@@ -161,6 +161,7 @@ class MediaTests(unittest.TestCase):
             self.assertTrue(cfg['registration_only'])
             self.assertTrue(cfg['include_drivers'])
             self.assertIn('Invoke-WaitingPlatform',z.read('Deploy-Agent.ps1').decode('utf-8-sig'))
+            self.assertIn('HardwareInfo.ps1', z.namelist())
         self.assertNotIn(config['token'],response.data.decode('latin1'))
 
     def test_worker_credentials_cannot_claim_install_or_admin_capabilities(self):
@@ -313,7 +314,7 @@ class MediaTests(unittest.TestCase):
             self.assertIsNone(config['expires_at'])
             self.assertFalse(config['registration_only'])
             self.assertTrue(config['include_drivers'])
-            for name in ('Start-Build.cmd','Build-OnThisPC.ps1','Build-LocalMedia.ps1','Deploy-Agent.ps1','Start.ps1'):
+            for name in ('Start-Build.cmd','Build-OnThisPC.ps1','Build-LocalMedia.ps1','Deploy-Agent.ps1','Start.ps1','DeviceInfo.ps1','HardwareInfo.ps1'):
                 self.assertIn(name,z.namelist())
             self.assertNotIn('builder-registration.json',z.namelist())
             self.assertNotIn('Start-Builder.ps1',z.namelist())

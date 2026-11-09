@@ -670,6 +670,39 @@ function deviceInfoTable(headers, rows) {
   return '<div class="table-wrap"><table class="modal-table inventory-table"><thead><tr>'+headers.map(x=>'<th>'+h(x)+'</th>').join('')+'</tr></thead><tbody>'+
     rows.map(row=>'<tr>'+row.map(value=>'<td>'+h(value ?? '未上报')+'</td>').join('')+'</tr>').join('')+'</tbody></table></div>';
 }
+const hardwareGroupLabels={system:'整机产品标识',chassis:'机箱 / 资产标签',processors:'CPU 详细参数',memory:'内存条详细参数',disk_drives:'物理硬盘标识',physical_disks:'存储介质与健康（驱动报告）',graphics:'显卡详细参数',bios:'BIOS 详细参数',baseboards:'主板详细参数',network_adapters:'网卡详细参数',network_config:'网络配置',batteries:'电池',sound:'声卡',keyboards:'键盘',pointing_devices:'鼠标 / 触控板',ports:'物理接口（固件报告）',pnp_devices:'即插即用设备 / 硬件 ID',monitors:'显示器 EDID / 原始标识'};
+const hardwareFieldLabels={Vendor:'厂商',Name:'名称 / 型号',Version:'版本',IdentifyingNumber:'整机标识 / SN',UUID:'硬件 UUID',SKUNumber:'SKU',Manufacturer:'厂家 / 厂家代码',Model:'型号',SerialNumber:'序列号',SMBIOSAssetTag:'固件资产标签（不等同于已登记资产编号）',ChassisTypes:'机箱类型代码',ProcessorId:'处理器 ID',SocketDesignation:'插槽',Architecture:'架构代码',AddressWidth:'地址位数',DataWidth:'数据位宽',NumberOfCores:'核心数',NumberOfLogicalProcessors:'线程数',MaxClockSpeed:'最大频率 MHz（固件报告）',L2CacheSize:'二级缓存 KB',L3CacheSize:'三级缓存 KB',VirtualizationFirmwareEnabled:'固件虚拟化已启用',DeviceLocator:'插槽位置',BankLabel:'内存 Bank',PartNumber:'料号',Capacity:'容量',Speed:'速率（内存 MHz / 网卡 bps）',ConfiguredClockSpeed:'配置频率 MHz',FormFactor:'内存形态',SMBIOSMemoryType:'内存类型',TotalWidth:'总位宽',Index:'磁盘编号',FirmwareRevision:'固件版本',Size:'容量',InterfaceType:'接口类型',MediaType:'介质类型',PNPDeviceID:'即插即用实例 ID',Status:'驱动 / 固件状态',AdapterCompatibility:'显卡厂商',VideoProcessor:'图形处理器',AdapterRAM:'显存（驱动报告，可能截断）',DriverVersion:'驱动版本',VideoModeDescription:'当前视频模式',CurrentHorizontalResolution:'PE 当前水平分辨率',CurrentVerticalResolution:'PE 当前垂直分辨率',CurrentRefreshRate:'PE 当前刷新率 Hz',SMBIOSBIOSVersion:'BIOS 版本',ReleaseDate:'BIOS 日期',SMBIOSMajorVersion:'SMBIOS 主版本',SMBIOSMinorVersion:'SMBIOS 次版本',Product:'主板产品',MACAddress:'MAC',AdapterType:'网卡类型',PhysicalAdapter:'物理网卡',NetEnabled:'网卡已启用',NetConnectionStatus:'网卡连接状态代码',DeviceID:'设备 ID',BatteryStatus:'电池状态代码',EstimatedChargeRemaining:'剩余电量 %',DesignCapacity:'设计容量 mWh',FullChargeCapacity:'满充容量 mWh',DesignVoltage:'设计电压 mV',Description:'描述',Layout:'键盘布局',NumberOfFunctionKeys:'功能键数量',PointingType:'指针设备类型代码',NumberOfButtons:'按键数量',DeviceInterface:'设备接口代码',ExternalReferenceDesignator:'外部接口标记',InternalReferenceDesignator:'内部接口标记',PortType:'端口类型代码',ConnectorType:'连接器类型代码',PNPClass:'设备类别',HardwareID:'硬件 ID',Service:'驱动服务',ConfigManagerErrorCode:'设备错误码（0 表示无错误）',InstanceName:'显示器实例',Source:'识别来源',Active:'驱动报告活动状态',ProductCode:'产品代码',ManufactureYear:'生产年 / 型号年',ManufactureWeek:'生产周',EdidVersion:'EDID 版本',DigitalInput:'数字输入',WidthCm:'EDID 宽度 cm',HeightCm:'EDID 高度 cm',DiagonalInches:'尺寸英寸（EDID 估算）',PreferredResolution:'EDID 第一详细时序（不是 PE 当前分辨率）',EdidValid:'EDID 基础块校验通过',EdidBase64:'EDID 基础块 Base64',ConnectionType:'显示输出类型',IsInternal:'内置屏幕',FriendlyName:'设备名称',BusType:'总线类型',FirmwareVersion:'固件版本',HealthStatus:'健康状态代码',OperationalStatus:'工作状态代码',SpindleSpeed:'转速 RPM',PhysicalLocation:'物理位置',IPAddress:'IP 地址',IPSubnet:'子网掩码 / 前缀',DefaultIPGateway:'默认网关',DNSServerSearchOrder:'DNS 服务器',DHCPEnabled:'DHCP 已启用',DHCPServer:'DHCP 服务器',DNSDomain:'DNS 后缀'};
+const hardwareStatusLabels={ok:'已读取',empty:'本次未发现',unavailable:'驱动或接口不可用，已跳过',budget_exceeded:'达到采集时间预算，已跳过',truncated:'设备较多，已保留前部记录',size_limit:'达到上报大小限制，已跳过'};
+function hardwareValue(key,value,group) {
+  if(typeof value==='boolean')return value?'是':'否';
+  if(['Capacity','Size','AdapterRAM'].includes(key)&&typeof value==='number')return size(value)+'（'+value+' 字节）';
+  const memory={24:'DDR3',26:'DDR4',27:'LPDDR',28:'LPDDR2',29:'LPDDR3',30:'LPDDR4',34:'DDR5',35:'LPDDR5'};
+  const bus={1:'SCSI',7:'USB',8:'RAID',10:'SAS',11:'SATA',12:'SD',13:'MMC',17:'NVMe'};
+  const connections={0:'VGA',4:'DVI',5:'HDMI',6:'LVDS 内置',10:'DisplayPort',11:'eDP 内置',12:'UDI',13:'UDI 内置',15:'Miracast',16:'间接有线输出',2147483648:'内置'};
+  const label=key==='SMBIOSMemoryType'?memory[value]:key==='BusType'?bus[value]:key==='ConnectionType'?connections[value]:key==='MediaType'&&group==='physical_disks'?({0:'未指定',3:'HDD',4:'SSD',5:'SCM'})[value]:null;
+  return label?label+'（'+value+'）':String(value ?? '未读取');
+}
+function renderHardwareInformation(report) {
+  const hardware=report?.hardware;
+  if(!hardware)return '<section class="device-detail-section"><h3>扩展硬件与显示器</h3><p class="modal-help">这条记录尚无扩展硬件快照。使用新版 ISO 进入 PE 后采集；旧任务不会自动补录。</p></section>';
+  const monitors=hardware.monitors||[], statuses=hardware.query_status||{};
+  let html='<section class="device-detail-section"><h3>显示器 / 笔记本内屏</h3><p class="modal-help">来自 PE 硬件接口；尺寸为 EDID 估算，详细时序不代表当前分辨率。内外屏无法判断时不自动归类。</p>'+
+    deviceInfoTable(['内 / 外屏','厂家 / 型号','SN','尺寸 / EDID 时序','连接 / 来源'],monitors.map(m=>[
+      m.IsInternal===true?'内置屏幕':m.IsInternal===false?'外接显示器':'内外屏未判定',
+      [m.Manufacturer,m.Name||m.ProductCode].filter(Boolean).join(' / ')||'未读取',m.SerialNumber||'未读取',
+      [m.DiagonalInches?m.DiagonalInches+' 英寸（估算）':'',m.PreferredResolution].filter(Boolean).join(' / ')||'未读取',
+      [m.ConnectionType!==undefined?hardwareValue('ConnectionType',m.ConnectionType,'monitors'):'',m.Source].filter(Boolean).join(' / ')||'未读取'
+    ]))+'</section><section class="device-detail-section"><h3>PE 扩展硬件明细</h3><p class="modal-help">保留装机前快照'+(report.reported_at?' · 上报 '+h(date(report.reported_at)):'')+'。展开各项查看已读取字段；空缺或跳过不代表电脑没有该硬件。</p>';
+  for(const [group,label] of Object.entries(hardwareGroupLabels)){
+    const rows=hardware[group]||[], status=statuses[group];
+    html+='<details class="hardware-group"><summary>'+h(label)+' <span class="muted">（'+rows.length+' 项'+(status?' · '+h(hardwareStatusLabels[status]||status):'')+'）</span></summary>'+
+      (rows.length?rows.map((row,index)=>'<h4>'+h(row.Name||row.Model||row.FriendlyName||row.DeviceLocator||('设备 '+(index+1)))+'</h4>'+
+        deviceInfoTable(['字段','读取结果'],Object.entries(row).map(([key,value])=>[hardwareFieldLabels[key]||key,hardwareValue(key,value,group)]))).join(''):
+        '<p class="modal-help">'+h(hardwareStatusLabels[status]||'未读取到此项；接口、驱动或硬件可能不提供')+'</p>')+'</details>';
+  }
+  const monitorStatus=['monitor_ids','monitor_edid','monitor_connections'].map(key=>key+'：'+(hardwareStatusLabels[statuses[key]]||'未读取')).join('；');
+  return html+'<p class="modal-help">'+h(monitorStatus)+(Number.isFinite(hardware.duration_ms)?'；扩展采集 '+(hardware.duration_ms/1000).toFixed(1)+' 秒':'')+'</p></section>';
+}
 function renderDeviceInformation(d, job=null) {
   const report=d.system_info || {}, windows=report.source==='windows';
   const show=value=>firmwareText(value)||'未上报';
@@ -706,6 +739,7 @@ function renderDeviceInformation(d, job=null) {
   html+=section('主板与 BIOS','<dl class="detail-grid">'+field('主板厂家 / 型号',[report.board_manufacturer,report.board_model].filter(Boolean).join(' / ')||'未上报')+
     field('主板序列号',show(report.board_serial))+field('BIOS 厂家 / 版本',[report.bios_manufacturer,report.bios_version].filter(Boolean).join(' / ')||'未上报')+
     field('固件原始型号 / 产品版本',[d.model,d.product_version].filter(Boolean).join(' / ')||'未上报')+'</dl>');
+  html+=renderHardwareInformation(report.source==='pe'?report:d.pe_system_info);
   return html;
 }
 function renderJobDeviceDetail() {

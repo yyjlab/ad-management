@@ -186,6 +186,76 @@ def profile_record(data, source):
                 username=username, computer_prefix=prefix, system_gib=size)
 
 
+HARDWARE_GROUPS = {
+    'system': (1, 'Vendor Name Version IdentifyingNumber UUID SKUNumber'.split()),
+    'chassis': (4, 'Manufacturer Model SerialNumber SMBIOSAssetTag ChassisTypes'.split()),
+    'processors': (8, 'Name Manufacturer ProcessorId SocketDesignation Architecture AddressWidth DataWidth NumberOfCores NumberOfLogicalProcessors MaxClockSpeed L2CacheSize L3CacheSize VirtualizationFirmwareEnabled'.split()),
+    'memory': (32, 'DeviceLocator BankLabel Manufacturer PartNumber SerialNumber Capacity Speed ConfiguredClockSpeed FormFactor SMBIOSMemoryType TotalWidth DataWidth'.split()),
+    'disk_drives': (32, 'Index Model SerialNumber FirmwareRevision Size InterfaceType MediaType PNPDeviceID Status'.split()),
+    'graphics': (8, 'Name AdapterCompatibility VideoProcessor AdapterRAM PNPDeviceID DriverVersion VideoModeDescription CurrentHorizontalResolution CurrentVerticalResolution CurrentRefreshRate Status'.split()),
+    'bios': (1, 'Manufacturer Name SMBIOSBIOSVersion Version SerialNumber ReleaseDate SMBIOSMajorVersion SMBIOSMinorVersion'.split()),
+    'baseboards': (4, 'Manufacturer Product Version SerialNumber PartNumber Status'.split()),
+    'network_adapters': (32, 'Name Manufacturer MACAddress PNPDeviceID AdapterType Speed PhysicalAdapter NetEnabled NetConnectionStatus'.split()),
+    'batteries': (8, 'Name DeviceID PNPDeviceID BatteryStatus EstimatedChargeRemaining DesignCapacity FullChargeCapacity DesignVoltage Status'.split()),
+    'sound': (16, 'Name Manufacturer PNPDeviceID Status'.split()),
+    'keyboards': (16, 'Name Description Layout NumberOfFunctionKeys PNPDeviceID Status'.split()),
+    'pointing_devices': (16, 'Name Manufacturer PointingType NumberOfButtons DeviceInterface PNPDeviceID Status'.split()),
+    'ports': (32, 'ExternalReferenceDesignator InternalReferenceDesignator PortType ConnectorType'.split()),
+    'pnp_devices': (64, 'Name Manufacturer PNPClass PNPDeviceID HardwareID Service ConfigManagerErrorCode Status'.split()),
+    'physical_disks': (32, 'FriendlyName SerialNumber MediaType BusType Size FirmwareVersion HealthStatus OperationalStatus SpindleSpeed PhysicalLocation'.split()),
+    'network_config': (32, 'Description MACAddress IPAddress IPSubnet DefaultIPGateway DNSServerSearchOrder DHCPEnabled DHCPServer DNSDomain'.split()),
+    'monitors': (16, 'InstanceName Source Active Manufacturer Name SerialNumber ProductCode ManufactureYear ManufactureWeek EdidVersion DigitalInput WidthCm HeightCm DiagonalInches PreferredResolution EdidValid EdidBase64 ConnectionType IsInternal'.split()),
+}
+
+
+def hardware_report(value):
+    """Allowlisted, bounded PE hardware data; no arbitrary CIM objects or registry dump."""
+    if not isinstance(value, dict) or type(value.get('schema_version')) is not int or value['schema_version'] != 1:
+        return {}
+    result = {'schema_version': 1}
+    flags = {'Active', 'EdidValid', 'DigitalInput', 'IsInternal', 'PhysicalAdapter',
+             'NetEnabled', 'DHCPEnabled', 'VirtualizationFirmwareEnabled'}
+    for group, (limit, fields) in HARDWARE_GROUPS.items():
+        if not isinstance(value.get(group), list):
+            continue
+        rows = []
+        for item in value[group][:limit]:
+            if not isinstance(item, dict):
+                continue
+            row = {}
+            for key in fields:
+                raw = item.get(key)
+                if key == 'EdidBase64':
+                    if isinstance(raw, str) and len(raw) <= 172:
+                        try:
+                            if len(base64.b64decode(raw, validate=True)) == 128:
+                                row[key] = raw
+                        except ValueError:
+                            pass
+                elif key in flags:
+                    if type(raw) is bool:
+                        row[key] = raw
+                elif isinstance(raw, str):
+                    cleaned = re.sub(r'[\x00-\x1f\x7f]', ' ', raw).strip()[:160]
+                    if cleaned:
+                        row[key] = cleaned
+                elif type(raw) in (int, float) and 0 <= raw <= 2**53 - 1:
+                    row[key] = raw
+            if row:
+                rows.append(row)
+        result[group] = rows
+    statuses = value.get('query_status')
+    if isinstance(statuses, dict):
+        allowed = set(HARDWARE_GROUPS) | {'monitor_ids', 'monitor_edid', 'monitor_connections'}
+        result['query_status'] = {key: status for key, status in statuses.items() if key in allowed
+                                  and isinstance(status, str) and status in
+                                  ('ok', 'empty', 'unavailable', 'budget_exceeded', 'truncated', 'size_limit')}
+    duration = value.get('duration_ms')
+    if type(duration) is int and 0 <= duration <= 3600000:
+        result['duration_ms'] = duration
+    return result
+
+
 def device_report(value, source):
     """Optional display-only telemetry; never part of the destructive-target hash."""
     if not isinstance(value, dict):
@@ -242,6 +312,9 @@ def device_report(value, source):
                 rows.append(row)
         if rows:
             result[group] = rows
+    hardware = hardware_report(value.get('hardware')) if source == 'pe' else {}
+    if hardware:
+        result['hardware'] = hardware
     if result:
         result['source'] = source
     return result

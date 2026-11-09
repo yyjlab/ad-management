@@ -320,6 +320,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
                           partition_count=len(disk['partitions']) if 'partitions' in disk else None)
                           for disk in display.get('disks', [])]
         detail['system_info'] = data.get('system_info') or display.get('system_info', {})
+        detail['pe_system_info'] = data['target']['inventory'].get('system_info', {})
         finished = None if row['state'] in ACTIVE else timing.get('finished_at') or row['updated']
         ready = data.get('installed_at') or timing.get('windows_reported_at')
         joining = data.get('domain_join') or {}
@@ -761,7 +762,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
             z.writestr('config.json', json.dumps(cfg, indent=2))
-            for name in ('Deploy-Agent.ps1', 'Start.ps1', 'DeviceInfo.ps1'):
+            for name in ('Deploy-Agent.ps1', 'Start.ps1', 'DeviceInfo.ps1', 'HardwareInfo.ps1'):
                 z.write(ROOT / 'agent' / name, name)
             z.write(ROOT / 'scripts' / 'Build-WinPE.ps1', 'Build-WinPE.ps1')
         buf.seek(0)

@@ -9,7 +9,7 @@ $work = [IO.Path]::GetFullPath($WorkDirectory)
 if ([IO.Directory]::Exists($work) -or [IO.File]::Exists($work) -or $work.Length -lt 10) {
     throw 'WorkDirectory must be a new dedicated folder. Existing folders are never overwritten or deleted.'
 }
-foreach ($name in @('config.json', 'Deploy-Agent.ps1', 'Start.ps1', 'DeviceInfo.ps1')) {
+foreach ($name in @('config.json', 'Deploy-Agent.ps1', 'Start.ps1', 'DeviceInfo.ps1', 'HardwareInfo.ps1')) {
     if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot $name))) { throw "Missing bootstrap package file: $name" }
 }
 $oc = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment\amd64\WinPE_OCs'
@@ -44,7 +44,7 @@ try {
     }
     $dest = Join-Path $mount 'PCDeploy'
     New-Item -ItemType Directory -Path $dest | Out-Null
-    foreach ($name in @('config.json', 'Deploy-Agent.ps1', 'Start.ps1', 'DeviceInfo.ps1')) {
+    foreach ($name in @('config.json', 'Deploy-Agent.ps1', 'Start.ps1', 'DeviceInfo.ps1', 'HardwareInfo.ps1')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $dest $name)
     }
     if ($RegistrationOnly) {

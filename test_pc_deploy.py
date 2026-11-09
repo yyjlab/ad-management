@@ -409,6 +409,69 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(self.post(route, ready, token).json['password'], 'Test-only-domain-password')
 
 
+    def test_extended_hardware_is_bounded_allowlisted_and_pe_only(self):
+        from pc_deploy.deployment import device_report, hardware_report
+        raw = dict(schema_version=1, monitors=[dict(Name='Panel\x00name', SerialNumber='SN-01',
+                   EdidValid=True, EdidBase64=base64.b64encode(bytes(128)).decode(), DiagonalInches=24.1,
+                   IsInternal=False, token='must-not-store')]*40,
+                   memory=[dict(Capacity=16*1024**3, SerialNumber='M'*300, Password='hidden')]*50,
+                   pnp_devices=[dict(Name='<img src=x>', ConfigManagerErrorCode=0)]*100,
+                   graphics=[dict(Name='GPU', AdapterRAM=True)],
+                   query_status={'monitors':'ok','password':'hidden','pnp_devices':{'bad':True},
+                                 'bios':'unavailable','memory':'size_limit'}, duration_ms=2100, password='hidden')
+        cleaned = hardware_report(raw)
+        self.assertEqual(len(cleaned['monitors']), 16)
+        self.assertEqual(cleaned['monitors'][0]['Name'], 'Panel name')
+        self.assertFalse(cleaned['monitors'][0]['IsInternal'])
+        self.assertEqual(len(cleaned['memory']), 32)
+        self.assertEqual(len(cleaned['memory'][0]['SerialNumber']), 160)
+        self.assertEqual(len(cleaned['pnp_devices']), 64)
+        self.assertNotIn('AdapterRAM', cleaned['graphics'][0])
+        self.assertEqual(cleaned['query_status'], {'monitors':'ok','bios':'unavailable','memory':'size_limit'})
+        self.assertNotIn('must-not-store', canonical(cleaned))
+        self.assertNotIn('hidden', canonical(cleaned))
+        self.assertEqual(device_report(dict(hardware=raw), 'pe')['hardware'], cleaned)
+        self.assertNotIn('hardware', device_report(dict(hardware=raw), 'windows'))
+        self.assertEqual(hardware_report(dict(schema_version=True)), {})
+        self.assertEqual(hardware_report(None), {})
+        bad = hardware_report(dict(schema_version=1, monitors=[dict(EdidBase64='!invalid', Active='yes',
+                              DiagonalInches=float('inf'), ManufactureYear=-1)], bios='invalid'))
+        self.assertEqual(bad['monitors'], [])
+        self.assertNotIn('bios', bad)
+
+    def test_pe_hardware_snapshot_survives_windows_report_and_later_boot(self):
+        raw = machine()
+        raw['system_info'] = dict(cpus=[dict(name='PE CPU')], hardware=dict(schema_version=1,
+            monitors=[dict(Name='PE monitor', SerialNumber='MONITOR-01', IsInternal=False)],
+            memory=[dict(SerialNumber='MEMORY-01', Capacity=16*1024**3)], query_status={'memory':'ok'}))
+        inv, reg, _, profile = self.fixtures(raw)
+        preview = self.preview(inv, profile)
+        self.enable()
+        commit = self.post('/pc-deploy/api/jobs/commit', dict(preview_id=preview.json['id'],
+                           confirmation='YES', physical_confirmed=True))
+        job = commit.json['ids'][0]
+        self.assertEqual(self.post('/pc-deploy/api/agent/poll', inv, reg['token']).status_code, 200)
+        self.assertEqual(self.post(f'/pc-deploy/api/agent/jobs/{job}/start', inv, reg['token']).status_code, 200)
+        with self.store.connect() as c:
+            token = self.store.decrypt(c.execute('SELECT secret FROM jobs WHERE id=?', (job,)).fetchone()[0])['finish_token']
+        expected = 'TEST-' + digest(inv['hardware_uuid'])[:8].upper()
+        finished = self.post(f'/pc-deploy/api/agent/jobs/{job}/finish',
+            dict(hardware_uuid=inv['hardware_uuid'], computer_name=expected, os_build=26100,
+                 image_state='IMAGE_STATE_COMPLETE', oobe_done=True,
+                 device_info={'system_info': {'os_name':'Windows 11', 'cpus':[{'name':'Windows CPU'}]}}), token)
+        self.assertEqual(finished.status_code, 200, finished.json)
+        reentry = copy.deepcopy(inv)
+        reentry['boot_id'] = str(uuid.uuid4())
+        reentry['system_info']['hardware']['monitors'][0]['Name'] = 'Later monitor'
+        self.register(reentry)
+        dashboard = self.client.get('/pc-deploy/api/dashboard').json
+        detail = dashboard['jobs'][0]['device_info']
+        self.assertEqual(detail['system_info']['cpus'][0]['name'], 'Windows CPU')
+        self.assertEqual(detail['pe_system_info']['hardware']['monitors'][0]['Name'], 'PE monitor')
+        self.assertEqual(dashboard['devices'][0]['system_info']['hardware']['monitors'][0]['Name'], 'Later monitor')
+        logs = self.client.get(f'/pc-deploy/api/jobs/{job}/events').json
+        self.assertEqual(logs['job']['device_info']['pe_system_info'], detail['pe_system_info'])
+
     def test_device_details_are_optional_and_do_not_change_disk_authorization(self):
         raw = machine()
         raw['system_info'] = dict(computer_name='MININT-TEST', cpus=[dict(name='Original CPU', cores=8, threads=16)],

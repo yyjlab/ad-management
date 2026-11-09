@@ -1,6 +1,7 @@
 param([string]$ConfigPath = "$PSScriptRoot\config.json", [switch]$LibraryOnly, [switch]$RegistrationOnly)
 $ErrorActionPreference = 'Stop'
 if (Test-Path -LiteralPath "$PSScriptRoot\DeviceInfo.ps1") { . "$PSScriptRoot\DeviceInfo.ps1" }
+if (Test-Path -LiteralPath "$PSScriptRoot\HardwareInfo.ps1") { . "$PSScriptRoot\HardwareInfo.ps1" }
 
 function Assert-WinPE {
     if (-not (Test-Path 'HKLM:\SYSTEM\CurrentControlSet\Control\MiniNT')) {
@@ -230,6 +231,7 @@ function Get-Inventory {
     if (-not $serial) { $serial = 'Unknown' }
     $details = @{}
     try { if (Get-Command Get-DeploymentDeviceInfo -ErrorAction SilentlyContinue) { $details = Get-DeploymentDeviceInfo -Stage pe } } catch { }
+    try { if (Get-Command Get-DeploymentHardwareInfo -ErrorAction SilentlyContinue) { $details.hardware = Get-DeploymentHardwareInfo } } catch { }
     @{
         hardware_uuid = ([guid]$product.UUID).ToString().ToLowerInvariant(); boot_id = $BootId
         model = [string]$computer.Model; serial = $serial; architecture = 'amd64'

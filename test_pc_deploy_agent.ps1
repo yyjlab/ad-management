@@ -1,5 +1,6 @@
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\pc_deploy\agent\Deploy-Agent.ps1" -LibraryOnly
+function Get-DeploymentHardwareInfo { @{schema_version=1;query_status=@{}} }
 $disk = @{number=3; serial='TEST-SSD'; unique_id='TEST-ID'; size_bytes=512GB;
           bus='NVMe'; read_only=$false; offline=$false}
 $expected = $disk.Clone()
@@ -19,7 +20,7 @@ try { Select-VerifiedDisk @($disk,$disk) $expected | Out-Null } catch { $rejecte
 if (-not $rejected) { throw 'Ambiguous disk selection was not rejected.' }
 $count++
 $tokens=$null;$errors=$null
-foreach ($file in @('agent/Deploy-Agent.ps1','agent/Start.ps1','agent/Finalize.ps1','agent/DeviceInfo.ps1',
+foreach ($file in @('agent/Deploy-Agent.ps1','agent/Start.ps1','agent/Finalize.ps1','agent/DeviceInfo.ps1','agent/HardwareInfo.ps1',
                     'scripts/Build-WinPE.ps1','scripts/Inspect-InstallSource.ps1')) {
     [Management.Automation.Language.Parser]::ParseFile((Join-Path "$PSScriptRoot\pc_deploy" $file),[ref]$tokens,[ref]$errors) | Out-Null
     if ($errors.Count) { throw "PowerShell parsing failed: $file" }
@@ -703,6 +704,74 @@ $count++
 $count+=5
 
 
+
+# Extended PE inventory uses only synthetic CIM/EDID fixtures, never this PC's hardware.
+& {
+    . "$PSScriptRoot\pc_deploy\agent\HardwareInfo.ps1"
+    $script:DeploymentHardwareInfoCache=$null
+    $edid=New-Object byte[] 128
+    ([byte[]]@(0,255,255,255,255,255,255,0)).CopyTo($edid,0)
+    $vendor=(4 -shl 10) -bor (5 -shl 5) -bor 12
+    $edid[8]=[byte]($vendor -shr 8);$edid[9]=[byte]($vendor -band 255)
+    $edid[10]=52;$edid[11]=18;$edid[16]=20;$edid[17]=34;$edid[18]=1;$edid[19]=4
+    $edid[20]=128;$edid[21]=53;$edid[22]=30
+    $edid[54]=2;$edid[55]=58;$edid[56]=128;$edid[58]=112;$edid[59]=56;$edid[61]=64
+    $edid[75]=252;[Text.Encoding]::ASCII.GetBytes('FIXTURE PANEL').CopyTo($edid,77)
+    $edid[93]=255;[Text.Encoding]::ASCII.GetBytes('SERIAL-0001').CopyTo($edid,95)
+    $sum=0;foreach($n in $edid){$sum+=[int]$n};$edid[127]=[byte]((256-($sum%256))%256)
+    $decoded=ConvertFrom-DeploymentEdid $edid
+    if(-not $decoded.EdidValid -or $decoded.Manufacturer -ne 'DEL'){throw 'Valid EDID manufacturer was not decoded'}
+    if($decoded.Name -ne 'FIXTURE PANEL' -or $decoded.SerialNumber -ne 'SERIAL-0001'){throw 'EDID descriptor name or serial missing'}
+    if($decoded.PreferredResolution -ne '1920 x 1080' -or $decoded.DiagonalInches -ne 24.0){throw 'EDID size or timing incorrect'}
+    if($decoded.ManufactureYear -ne 2024 -or $decoded.ProductCode -ne '1234'){throw 'EDID year or product code incorrect'}
+    if((ConvertFrom-DeploymentEdid ([byte[]]@(0,1))).EdidValid){throw 'Short EDID was accepted'}
+    $bad=$edid.Clone();$bad[127]=[byte](($bad[127]+1)%256)
+    $invalid=ConvertFrom-DeploymentEdid $bad
+    if($invalid.EdidValid -or $invalid.ContainsKey('Name')){throw 'Invalid EDID checksum became trusted identity'}
+    function Read-DeploymentEdidRegistry { @{InstanceName='DISPLAY\TEST\INSTANCE';Bytes=$edid} }
+    $script:hardwareQueries=0
+    function Get-CimInstance {
+        param($Namespace,$ClassName,$Property,$OperationTimeoutSec,$ErrorAction)
+        $script:hardwareQueries++
+        if($OperationTimeoutSec -ne 2){throw 'Extended queries must be bounded'}
+        switch($ClassName){
+            'WmiMonitorID' { [pscustomobject]@{InstanceName='DISPLAY\TEST\INSTANCE_0';Active=$true;ManufacturerName=@(68,69,76);UserFriendlyName=@(80);SerialNumberID=@(83)} }
+            'WmiMonitorConnectionParams' { [pscustomobject]@{InstanceName='DISPLAY\TEST\INSTANCE_0';VideoOutputTechnology=5} }
+            'Win32_Processor' { [pscustomobject]@{Name='Fixture CPU';ProcessorId='CPU-ID';NumberOfCores=8} }
+            'Win32_PhysicalMemory' { [pscustomobject]@{SerialNumber='MEMORY-01';Capacity=16GB;Speed=3200;SMBIOSMemoryType=26} }
+            'MSFT_PhysicalDisk' { if($Namespace -ne 'root/Microsoft/Windows/Storage'){throw 'Wrong storage namespace'};[pscustomobject]@{FriendlyName='Fixture SSD';MediaType=4;Size=512GB} }
+            'Win32_PnPEntity' { [pscustomobject]@{Name='Fixture camera';PNPClass='Camera';ConfigManagerErrorCode=0;HardwareID=@('USB\VID_TEST','USB\CLASS_TEST')} }
+            default { throw 'Optional fixture provider unavailable' }
+        }
+    }
+    $hardware=Get-DeploymentHardwareInfo
+    if($hardware.monitors.Count -ne 1 -or $hardware.monitors[0].Source -ne 'WMI + EDID'){throw 'Monitor sources were not merged by instance'}
+    if($hardware.monitors[0].IsInternal -ne $false -or $hardware.monitors[0].ConnectionType -ne 5){throw 'HDMI external monitor not classified'}
+    if($hardware.memory[0].SerialNumber -ne 'MEMORY-01' -or $hardware.memory[0].Capacity -ne 16GB){throw 'Memory identity missing'}
+    if($hardware.physical_disks[0].MediaType -ne 4){throw 'Physical storage details missing'}
+    if($hardware.pnp_devices[0].HardwareID -ne 'USB\VID_TEST; USB\CLASS_TEST'){throw 'PnP hardware identifiers missing'}
+    if($hardware.query_status.bios -ne 'unavailable' -or $hardware.processors[0].Name -ne 'Fixture CPU'){throw 'One missing provider stopped other hardware'}
+    $before=$script:hardwareQueries
+    $again=Get-DeploymentHardwareInfo
+    if($script:hardwareQueries -ne $before){throw 'PE poll did not reuse hardware cache'}
+    function Get-CimInstance { throw 'All optional providers unavailable' }
+    function Read-DeploymentEdidRegistry { }
+    $minimal=Get-DeploymentHardwareInfo -Refresh
+    if($minimal.monitors.Count -ne 0 -or $minimal.query_status.processors -ne 'unavailable'){throw 'Unavailable providers must yield partial inventory'}
+    if([Text.Encoding]::UTF8.GetByteCount(($hardware|ConvertTo-Json -Depth 8 -Compress)) -gt 98304){throw 'Hardware fixture exceeded upload budget'}
+    function Get-CimInstance {
+        param($Namespace,$ClassName,$Property,$OperationTimeoutSec,$ErrorAction)
+        if($Namespace -eq 'root/wmi'){return}
+        foreach($index in 1..100){
+            $row=@{};foreach($propertyName in $Property){$row[$propertyName]=('Z'*500)}
+            [pscustomobject]$row
+        }
+    }
+    $oversized=Get-DeploymentHardwareInfo -Refresh
+    if([Text.Encoding]::UTF8.GetByteCount(($oversized|ConvertTo-Json -Depth 8 -Compress)) -gt 98304){throw 'Oversized optional hardware was not reduced to the upload budget'}
+    if($oversized.query_status.Values -notcontains 'size_limit'){throw 'Hardware size trimming was not explicitly reported'}
+}
+$count+=17
 
 # Network statistics use generated counter snapshots; no benchmark traffic is sent.
 & {

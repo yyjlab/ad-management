@@ -1251,6 +1251,41 @@ async function run() {
     await page.locator('[data-action=asset-register][data-id=laptop-1]').click();
     assert.ok(await page.locator('#asset-registration-form').isVisible());checks++;
     await page.locator('#close-modal').click();
+    // Task-name details retain PE monitor/hardware information after a sparse Windows callback.
+    const fullHardware={schema_version:1,duration_ms:1200,query_status:{memory:'ok',bios:'unavailable',pnp_devices:'ok'},
+      monitors:[{Name:'Fixture external panel',Manufacturer:'DEL',SerialNumber:'MON-001',IsInternal:false,
+        DiagonalInches:24,PreferredResolution:'1920 x 1080',ConnectionType:5,Source:'EDID',EdidValid:true},
+        {Name:'Fixture laptop panel',IsInternal:true,ConnectionType:11,Source:'WMI'}],
+      memory:[{DeviceLocator:'DIMM0',SerialNumber:'MEM-001',Capacity:16*1024**3,SMBIOSMemoryType:26}],
+      physical_disks:[{FriendlyName:'Fixture SSD',MediaType:4,HealthStatus:0,Size:512*1024**3}],
+      pnp_devices:[{Name:'<img src=x onerror="window.hardwareInjected=true">',PNPClass:'Camera',
+        HardwareID:'USB\\VID_FIXTURE',ConfigManagerErrorCode:0}],bios:[]};
+    fixture.jobs=[{...fixture.jobs[0],id:'hardware-snapshot-job',state:'completed',domain_join:null,
+      device_info:{system_info:{source:'windows',os_name:'Windows 11 Pro'},
+        pe_system_info:{source:'pe',reported_at:fixture.server_time,hardware:fullHardware}}}];
+    await page.locator('[data-view=jobs]').click();
+    await page.locator('#refresh').click();
+    await page.locator('[data-action=job-device-detail][data-id=hardware-snapshot-job]').waitFor();
+    await page.locator('[data-action=job-device-detail][data-id=hardware-snapshot-job]').click();
+    assert.ok((await page.locator('#modal-body').textContent()).includes('Fixture external panel'));checks++;
+    assert.ok((await page.locator('#modal-body').textContent()).includes('Fixture laptop panel'));checks++;
+    assert.ok((await page.locator('#modal-body').textContent()).includes('外接显示器'));checks++;
+    assert.ok((await page.locator('#modal-body').textContent()).includes('内置屏幕'));checks++;
+    assert.ok((await page.locator('#modal-body').textContent()).includes('24 英寸（估算）'));checks++;
+    assert.ok((await page.locator('#modal-body').textContent()).includes('1920 x 1080'));checks++;
+    assert.ok((await page.locator('#modal-body').textContent()).includes('Windows 11 Pro'));checks++;
+    const memoryDetails=page.locator('.hardware-group').filter({has:page.locator('summary', {hasText:'内存条详细参数'})});
+    await memoryDetails.locator('summary').click();
+    assert.ok((await memoryDetails.textContent()).includes('MEM-001'));checks++;
+    assert.ok((await memoryDetails.textContent()).includes('DDR4（26）'));checks++;
+    const pnpDetails=page.locator('.hardware-group').filter({has:page.locator('summary', {hasText:'即插即用设备'})});
+    await pnpDetails.locator('summary').click();
+    assert.ok((await pnpDetails.textContent()).includes('USB\\VID_FIXTURE'));checks++;
+    assert.equal(await page.locator('#modal-body img').count(),0);checks++;
+    assert.equal(await page.evaluate(()=>window.hardwareInjected),undefined);checks++;
+    assert.ok((await page.locator('#modal-body').textContent()).includes('驱动或接口不可用，已跳过'));checks++;
+    assert.ok((await page.locator('#modal-body').textContent()).includes('SSD（4）'));checks++;
+    await page.locator('#close-modal').click();
     assert.deepEqual(errors,[]);checks++;
     console.log(`${checks} nested menu, embedded page, HTTP form, role, message origin, lifecycle, mobile, WIM restore and per-task log UI checks passed. No live system contacted.`);
   }finally{await browser.close();}
