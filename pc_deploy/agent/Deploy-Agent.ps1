@@ -454,7 +454,7 @@ function Invoke-WimImageApply {
         Send-DeploymentProgress $Job $Token 'applying' -Metrics @{mode=$mode}
         Invoke-DeploymentNative dism.exe @('/Apply-Image', ('/ImageFile:"' + $ImagePath + '"'),
             ('/Index:' + [int]$Job.profile.image_index), ('/ApplyDir:' + $Root),
-            ('/ScratchDir:"' + $scratch + '"'), '/CheckIntegrity', '/Verify') 'applying' $Job $Token
+            ('/ScratchDir:"' + $scratch + '"'), '/CheckIntegrity', '/Verify') 'applying' $Job $Token -MeasureNetwork:($mode -eq 'network_direct')
     } finally {
         if ($lock) { $lock.Dispose() }
         # Only our fresh work directory is eligible. Never recurse into image-created content.
@@ -472,8 +472,58 @@ function Invoke-WimImageApply {
     }
 }
 
+function Get-DeploymentNetworkSample {
+    # .NET reads Windows interface counters without requiring WinPE performance-counter modules.
+    try {
+        $adapters=@{}
+        foreach($adapter in [Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()){
+            if($adapter.OperationalStatus -ne [Net.NetworkInformation.OperationalStatus]::Up -or
+               $adapter.NetworkInterfaceType -in @([Net.NetworkInformation.NetworkInterfaceType]::Loopback,
+                                                   [Net.NetworkInformation.NetworkInterfaceType]::Tunnel)){continue}
+            try {
+                $received=[long]$adapter.GetIPv4Statistics().BytesReceived
+                if($received -ge 0){$adapters[[string]$adapter.Id]=$received}
+            } catch { }
+        }
+        if($adapters.Count){return @{ticks=[Diagnostics.Stopwatch]::GetTimestamp();adapters=$adapters}}
+    } catch { }
+    return $null
+}
+function Get-DeploymentNetworkDelta {
+    param($Previous,$Current)
+    if(-not $Previous -or -not $Current){return $null}
+    $seconds=([double]$Current.ticks-[double]$Previous.ticks)/[Diagnostics.Stopwatch]::Frequency
+    if($seconds -le 0){return $null}
+    $bytes=0L;$valid=0
+    foreach($id in $Current.adapters.Keys){
+        if($Previous.adapters.ContainsKey($id) -and [long]$Current.adapters[$id] -ge [long]$Previous.adapters[$id]){
+            $bytes+=[long]$Current.adapters[$id]-[long]$Previous.adapters[$id];$valid++
+        }
+    }
+    if(-not $valid -or $bytes/$seconds -gt 1e13){return $null}
+    return @{bytes=$bytes;seconds=$seconds;rate=[long]($bytes/$seconds)}
+}
+function Get-DeploymentNetworkMetrics {
+    param([hashtable]$Tracker,[switch]$Finished)
+    try {
+    $current=Get-DeploymentNetworkSample
+    $delta=Get-DeploymentNetworkDelta $Tracker.previous $current
+    $Tracker.previous=$current
+    $result=@{network_speed_available=$false}
+    if($delta){
+        $Tracker.bytes+=$delta.bytes;$Tracker.seconds+=$delta.seconds
+        $result.network_speed_available=$true;$result.network_bytes_per_second=$delta.rate
+    }
+    if($Finished -and $Tracker.seconds -gt 0){
+        $result.network_average_bytes_per_second=[long]($Tracker.bytes/$Tracker.seconds)
+    }
+    return $result
+    } catch { return @{network_speed_available=$false} }
+}
 function Invoke-DeploymentNative {
-    param([string]$File, [string[]]$Arguments, [string]$Stage, $Job, [string]$Token)
+    param([string]$File, [string[]]$Arguments, [string]$Stage, $Job, [string]$Token, [switch]$MeasureNetwork)
+    $network=@{previous=$null;bytes=0L;seconds=0.0}
+    if($MeasureNetwork){try{$network.previous=Get-DeploymentNetworkSample}catch{}}
     $log = Join-Path $PSScriptRoot ($Job.id + '-' + $Stage + '-' + [guid]::NewGuid().ToString('N'))
     $operationClock=[Diagnostics.Stopwatch]::StartNew()
     $process = Start-Process -FilePath $File -ArgumentList $Arguments -PassThru -NoNewWindow `
@@ -493,9 +543,15 @@ function Invoke-DeploymentNative {
             }
         }
         # Heartbeats remain useful when DISM pauses; only stage changes become operation logs.
-        if ($reportClock.ElapsedMilliseconds -ge 10000 -or
-            ($percent -ne $lastReported -and $reportClock.ElapsedMilliseconds -ge 5000)) {
-            Send-DeploymentProgress $Job $Token $Stage -Percent $percent -Metrics @{elapsed_seconds=[int][Math]::Floor($operationClock.Elapsed.TotalSeconds)}
+        if ($reportClock.ElapsedMilliseconds -ge 10000 -or ($MeasureNetwork -and $reportClock.ElapsedMilliseconds -ge 2000) -or
+            ($null -ne $percent -and $percent -ne $lastReported -and
+             ($null -eq $lastReported -or $reportClock.ElapsedMilliseconds -ge 2000))) {
+            $metrics=@{elapsed_seconds=[int][Math]::Floor($operationClock.Elapsed.TotalSeconds)}
+            if($MeasureNetwork){
+                $networkMetrics=Get-DeploymentNetworkMetrics $network
+                foreach($key in $networkMetrics.Keys){$metrics[$key]=$networkMetrics[$key]}
+            }
+            Send-DeploymentProgress $Job $Token $Stage -Percent $percent -Metrics $metrics
             $lastReported=$percent
             $reportClock.Restart()
         }
@@ -506,7 +562,12 @@ function Invoke-DeploymentNative {
     if ($Stage -eq 'applying') {
         if ($process.ExitCode -eq 0) {
             Write-DeploymentProgress 100
-            Send-DeploymentProgress $Job $Token $Stage -Percent 100 -Metrics @{elapsed_seconds=[int][Math]::Ceiling($operationSeconds)}
+            $metrics=@{elapsed_seconds=[int][Math]::Ceiling($operationSeconds)}
+            if($MeasureNetwork){
+                $networkMetrics=Get-DeploymentNetworkMetrics $network -Finished
+                foreach($key in $networkMetrics.Keys){$metrics[$key]=$networkMetrics[$key]}
+            }
+            Send-DeploymentProgress $Job $Token $Stage -Percent 100 -Metrics $metrics
         }
         Write-Host ''
     }
@@ -570,6 +631,24 @@ function Merge-CompletionAnswer {
     return $xml.OuterXml
 }
 
+function Add-CompletionSetupHook {
+    param([string]$WindowsRoot,[string]$JobId,[string]$Startup)
+    $null=[IO.Directory]::CreateDirectory((Join-Path $WindowsRoot 'Setup\Scripts'))
+    # SetupComplete runs as SYSTEM; RunOnce and specialize remain fallback entry points.
+    # Prepend our short command so an existing script's exit cannot skip the bootstrap.
+    $setupComplete=Join-Path $WindowsRoot 'Setup\Scripts\SetupComplete.cmd'
+    $existingBytes=if(Test-Path -LiteralPath $setupComplete){[IO.File]::ReadAllBytes($setupComplete)}else{[byte[]]@()}
+    if($existingBytes.Length -ge 2 -and (($existingBytes[0] -eq 255 -and $existingBytes[1] -eq 254) -or
+       ($existingBytes[0] -eq 254 -and $existingBytes[1] -eq 255))){
+        Write-Host 'Existing UTF-16 SetupComplete retained. Specialize and administrator RunOnce remain available.'
+    } else {
+        if($existingBytes.Length -ge 3 -and $existingBytes[0] -eq 239 -and $existingBytes[1] -eq 187 -and $existingBytes[2] -eq 191){
+            $existingBytes=if($existingBytes.Length -gt 3){$existingBytes[3..($existingBytes.Length-1)]}else{[byte[]]@()}
+        }
+        $prefix=[Text.Encoding]::ASCII.GetBytes(('@rem PCDeploy completion '+$JobId+"`r`n@"+$startup+"`r`n"))
+        [IO.File]::WriteAllBytes($setupComplete,[byte[]]($prefix+$existingBytes))
+    }
+}
 function Add-OfflineCompletion {
     param([string]$WindowsRoot, [string]$JobId, [string]$Command)
     if ($JobId -notmatch '^[a-f0-9-]{36}$' -or
@@ -602,6 +681,7 @@ function Add-OfflineCompletion {
         & reg.exe unload "HKLM\$hiveName" | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'Cannot unload the restored Windows SOFTWARE hive.' }
     }
+    Add-CompletionSetupHook $WindowsRoot $JobId $startup
     # For generalized/OOBE images, add only our specialize command; preserve existing settings.
     $panther = Join-Path $WindowsRoot 'Panther'
     New-Item -ItemType Directory -Path $panther -Force | Out-Null

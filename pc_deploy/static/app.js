@@ -13,6 +13,7 @@ let csrf = '', data = null, view = Object.hasOwn(labels, embedParams.get('view')
 let joinSelection = new Set();
 let chosen = new Set(), disks = new Map(), partitions = new Map(), employeeIds = new Map(), profileId = '', search = '', filter = 'online', previewId = null;
 let toastTimer, settingsDirty = false, jobLog = null, deviceDialog = null, serverTime = 0, serverSample = 0;
+let lastWorkspacePoll = Date.now();
 const jobSnapshots = new Map();
 function latestJob(job, sampledAt) {
   const previous = jobSnapshots.get(job.id);
@@ -41,6 +42,7 @@ async function enter() { $('#auth').hidden = true; $('#workspace').hidden = fals
 async function refresh() {
   if (busy || $('#workspace').hidden) return;
   busy = true;
+  lastWorkspacePoll = Date.now();
   try {
     const snapshot = await api('/api/dashboard');
     snapshot.jobs = snapshot.jobs.map(job => latestJob(job, snapshot.server_time));
@@ -98,6 +100,7 @@ function jobBadge(job) {
   if(join?.state==='waiting_release' && activeStates.includes(job.state))return '<span class="badge '+(join.released_at?'blue':'warn')+'">'+(join.released_at?'已授权，等待加域':'Windows 已安装，待统一加域')+'</span>';
   if(join?.state==='failed'&&!job.review)return '<span class="badge bad">系统已安装，加域失败</span>';
   if(join && ['checking','joining','restarting','verified'].includes(join.state) && activeStates.includes(job.state))return '<span class="badge blue">'+(join.state==='restarting'?'加域后重启验证中':join.state==='verified'?'加域已验证，等待完成回报':'自动加域中')+'</span>';
+  if(job.kind==='wim' && job.state==='installing' && !job.progress)return '<span class="badge blue">安装准备中</span>';
   if (job.state !== 'failed' || !job.review) return badge(job.state);
   return '<span class="badge '+(job.review.outcome === 'installed'?'good':'bad')+'">'+
     (job.review.outcome === 'installed'?'人工核对已安装':'失败，已核对')+'</span><span class="cell-sub">原任务报告失败 · '+h(job.review.operator)+' · '+h(date(job.review.reviewed_at))+'</span>';
@@ -202,6 +205,7 @@ function wimCacheLabel(profile) {
   return profile?.wim_cache_mode==='network_direct'?'网络直接还原（不缓存镜像）':'先缓存到本机 SSD（空间不足时直读）';
 }
 function renderProfileCard(p) {
+  const inUse=data.jobs.some(job=>job.profile_id===p.id&&activeStates.includes(job.state));
   const source=data.sources.find(s=>s.id===p.source_id);
   const image=source?.images.find(i=>i.index===p.image_index);
   const wim=source?.kind==='wim'||p.preserve_image_settings===true, join=p.domain_join;
@@ -233,7 +237,7 @@ function renderProfileCard(p) {
     '<div class="profile-tags">'+(source?'<span class="badge blue">'+(source.family==='windows11'?'Windows 11':'Windows 10')+'</span>':'')+
     '<span class="badge '+(p.disk_mode==='system_partition'?'good':'warn')+'">'+(p.disk_mode==='system_partition'?'保留 D 盘':'整盘重建')+'</span>'+
     '<span class="badge '+(join?(join.mode==='manual'?'warn':'blue'):'muted')+'">'+(join?(join.mode==='manual'?'平台统一加域':'安装后自动加域'):'不加域')+'</span></div>'+
-    details+'<div class="form-actions"><button class="small" data-action="edit-profile" data-id="'+h(p.id)+'">编辑方案</button></div></article>';
+    details+'<div class="form-actions"><button class="small" data-action="edit-profile" data-id="'+h(p.id)+'">编辑方案</button><button class="small danger-button" data-action="delete-profile" data-id="'+h(p.id)+'"'+(inUse?' disabled title="存在进行中或待统一加域任务，暂不能删除"':'')+'>删除方案</button></div></article>';
 }
 function renderProfiles() {
   $('#page-content').innerHTML = data.profiles.length ? '<div class="record-grid profile-grid">'+data.profiles.map(renderProfileCard).join('')+'</div>' : empty('尚未配置装机方案','先添加安装源，再配置系统版本、分区和临时本地账号。');
@@ -318,14 +322,17 @@ function restoreJobProgress(root, previous) {
     fresh.replaceWith(old);
     old.getBoundingClientRect(); // Keep the existing width before transitioning to the new report.
     old.setAttribute('aria-label',label);
-    old.setAttribute('value',value);
+    if(value===null)old.removeAttribute('value');else old.setAttribute('value',value);
   });
 }
 function renderWimPerformance(job) {
+  const status=job.post_install;
+  const labels={started:'新系统脚本已启动',working:'正在执行安装后检查',waiting_setup:'等待 Windows 完成初始化',waiting_retry:'安装后处理未完成，等待重试',timed_out:'安装后检查超时，请查看本地诊断'};
+  const detail=String(status?.detail||'');
+  let html=status?'<small class="post-install-status" title="'+h(detail)+'">'+h(labels[status.phase]||status.phase)+(detail?'：'+h(detail.slice(0,180))+(detail.length>180?'…':''):'')+'</small>':'';
   const perf=job.performance;
-  if(!perf)return '';
+  if(!perf)return html;
   const cache=perf.caching, apply=perf.applying;
-  let html='';
   if(cache && Number.isFinite(cache.bytes_copied) && cache.total_bytes>0){
     const live=job.state==='installing'&&job.progress?.stage==='caching';
     html+='<small class="job-transfer">'+(live?'已缓存 ':'镜像缓存 ')+h(size(cache.bytes_copied))+' / '+h(size(cache.total_bytes))+
@@ -333,6 +340,15 @@ function renderWimPerformance(job) {
       (Number.isFinite(cache.elapsed_seconds)?' · '+duration(cache.elapsed_seconds):'')+'</small>';
   }
   if(apply){
+    if(apply.mode==='network_direct'){
+      const live=job.state==='installing'&&job.progress?.stage==='applying';
+      const average=!live&&Number.isFinite(apply.network_average_bytes_per_second);
+      const rate=average?apply.network_average_bytes_per_second:apply.network_bytes_per_second;
+      const text=average?'平均网络接收 ':apply.network_speed_available===false?'网络接收计数暂不可用':
+        Number.isFinite(rate)?'最近回报网络接收 ':'等待网络速率回报';
+      html+='<small class="job-network-speed" title="PE 活动网卡的实际接收流量，含其他网络流量；不是镜像解压写盘速度">'+
+        text+((average||apply.network_speed_available!==false)&&Number.isFinite(rate)?(rate/1000000).toFixed(1)+' MB/s':'')+'</small>';
+    }
     html+='<small class="job-apply-time">'+(apply.mode==='local_cache'?'本机 SSD 还原':apply.mode==='network_direct'?'网络直接还原':'WIM 还原')+
       (Number.isFinite(apply.elapsed_seconds)?' · 纯还原 '+duration(apply.elapsed_seconds):'')+'</small>';
   }
@@ -346,6 +362,9 @@ function renderJobProgress(job) {
     return '<div class="job-progress'+tone+'"><span class="job-progress-phase">Windows 已安装 · '+h(stages[join.state]||join.state)+'</span>'+renderWimPerformance(job)+(join.updated?'<small>最后回报：'+h(date(join.updated))+'</small>':'')+'</div>';
   }
   const progress = job.progress;
+  if(!progress && job.kind==='wim' && job.state==='installing'){
+    return '<div class="job-progress"><div class="job-progress-head"><span class="job-progress-phase">安装已启动 · 正在准备磁盘与还原环境</span><span class="job-progress-unknown">等待客户端上报真实进度</span></div><progress max="100" data-job-progress="'+h(job.id)+'" aria-label="安装准备中，等待真实进度"></progress></div>';
+  }
   if (!progress || (job.state === 'failed' && job.review)) return '';
   const stages = {caching:'正在缓存镜像到本机 SSD',applying:'正在还原 WIM',boot_files:'WIM 还原已结束 · 正在配置 UEFI 引导',awaiting_report:'镜像还原及引导已完成 · 等待新系统回报'};
   if (!Object.hasOwn(stages, progress.stage)) return '';
@@ -358,13 +377,13 @@ function renderJobProgress(job) {
   const label = completed ? '安装后系统已回报' : stopped ? '已停止 · 最后阶段：'+haltedStages[progress.stage] : stages[progress.stage];
   const tone = completed ? ' completed' : job.state === 'failed' ? ' stopped' : job.state === 'cancelled' ? ' cancelled' : progress.stage === 'awaiting_report' ? ' pending' : '';
   return '<div class="job-progress'+tone+'"><div class="job-progress-head"><span class="job-progress-phase">'+h(label)+'</span>'+(terminal ? '' : percent === null ? '<span class="job-progress-unknown">等待真实进度</span>' : '<strong class="job-progress-percent">'+percent+'%</strong>')+'</div>' +
-    (terminal ? '' : '<progress max="100" value="'+(percent ?? 0)+'" data-job-progress="'+h(job.id+(progress.stage==='caching'?'-caching':''))+'" aria-label="'+h(label)+'"></progress>')+
+    (terminal ? '' : '<progress max="100"'+(percent===null?'':' value="'+percent+'"')+' data-job-progress="'+h(job.id+(progress.stage==='caching'?'-caching':''))+'" aria-label="'+h(label)+'"></progress>')+
     renderWimPerformance(job)+(Number.isFinite(progress.updated) ? '<small>最后回报：'+h(date(progress.updated))+'</small>' : '')+'</div>';
 }
 function renderLogEvents(events) {
   const kinds = {queued:['任务确认','muted'],preflight:['安装前检查','blue'],installing:['安装过程','blue'],
     awaiting_report:['等待回报','warn'],completed:['完成','good'],failed:['失败','bad'],cancelled:['取消','muted'],
-    security:['执行设置','warn'],device:['设备登记','muted'],source:['安装源','muted'],profile:['装机方案','muted'],bootstrap:['启动包','muted'],review:['人工核对','muted'],domain_join:['自动加域','blue']};
+    security:['执行设置','warn'],post_install:['安装后诊断','blue'],device:['设备登记','muted'],source:['安装源','muted'],profile:['装机方案','muted'],bootstrap:['启动包','muted'],review:['人工核对','muted'],domain_join:['自动加域','blue']};
   return events.map(e => {
     const [label,tone] = Object.hasOwn(kinds,e.kind) ? kinds[e.kind] : ['操作','muted'];
     return '<div class="log event-'+tone+'"><time>'+h(date(e.created))+'</time><div class="log-content"><span class="badge '+tone+'">'+h(label)+'</span><span class="log-message">'+h(e.message)+'</span></div></div>';
@@ -373,12 +392,14 @@ function renderLogEvents(events) {
 function renderJobLogs() {
   const current = jobLog;
   if (!current || !$('#job-log')) return;
-  const result = current.result, job = result?.job;
+  const result = current.result;
+  if(result?.job)result.job=latestJob(result.job,result.server_time);
+  const job = result?.job;
   const scroll = $('#modal').scrollTop;
   const previous = captureJobProgress($('#job-log'));
   $('#job-log').innerHTML = (job ?
     '<dl class="detail-grid"><div><dt>设备 / 整机序列号</dt><dd>'+h(deviceLabel(job))+'<br><span class="mono">'+h(job.serial)+'</span>'+renderJobIdentity(job)+'</dd></div><div><dt>安装时间</dt><dd>'+renderJobTiming(job)+'</dd></div><div><dt>方案 / 目标盘</dt><dd>'+h(job.profile)+'<br>磁盘 '+h(job.disk.number)+' · '+h(size(job.disk.size_bytes))+'</dd></div><div><dt>任务状态</dt><dd>'+jobBadge(job)+renderJobProgress(job)+'</dd></div></dl><p class="job-log-id">任务编号：<span class="mono">'+h(job.id)+'</span></p>' : '') +
-    '<div class="job-log-toolbar"><small>'+(current.before === null ? '最新记录在前 · 进行中每 8 秒刷新' : '正在查看历史记录')+'</small><div><button class="small" data-action="refresh-job-logs" '+(current.busy?'disabled':'')+'>'+(current.before === null?'刷新日志':'返回最新')+'</button> <button class="small" data-action="older-job-logs" '+(current.busy || !result?.next_before?'disabled':'')+'>更早记录</button></div></div>' +
+    '<div class="job-log-toolbar"><small>'+(current.before === null ? '最新记录在前'+(activeStates.includes(job?.state)?' · 进行中每 2 秒刷新':'') : '正在查看历史记录')+'</small><div><button class="small" data-action="refresh-job-logs" '+(current.busy?'disabled':'')+'>'+(current.before === null?'刷新日志':'返回最新')+'</button> <button class="small" data-action="older-job-logs" '+(current.busy || !result?.next_before?'disabled':'')+'>更早记录</button></div></div>' +
     '<p id="job-log-error" class="error" role="alert" '+(current.error?'':'hidden')+'>'+h(current.error)+'</p><div class="log-list job-log-list">'+
     (result ? renderLogEvents(result.events) || empty('此任务暂无操作记录','尚未收到任务日志；已保存的记录不会因其他任务增多而消失。') : '<p class="modal-help">正在读取此任务日志…</p>')+'</div>';
   restoreJobProgress($('#job-log'), previous);
@@ -669,6 +690,10 @@ document.addEventListener('click', async e=>{
     else if(a==='fill-install-confirmation'){const input=$('#commit-form [name=confirmation]');if(input){input.value='YES';input.dispatchEvent(new Event('input',{bubbles:true}));input.focus();}}
     else if(a==='new-source'||a==='edit-source')editSource(id);
     else if(a==='new-profile'||a==='edit-profile')editProfile(id);
+    else if(a==='delete-profile'){
+      const p=data.profiles.find(p=>p.id===id);
+      modal('删除装机方案','<form id="delete-profile-form" data-id="'+h(id)+'" data-revision="'+h(p.revision)+'"><p><strong>'+h(profileDisplayName(p))+'</strong></p><p>仅删除这个方案及其保存的凭据，历史任务、安装源和电脑上的文件保留。存在进行中或待统一加域任务时不能删除。</p><label class="check-label"><input name="confirmed" type="checkbox" required>确认删除此方案</label><div id="form-error" class="error" role="alert"></div><div class="form-actions"><button type="button" data-action="close">取消</button><button class="danger-button" type="submit">确认删除</button></div></form>');
+    }
     else if(a==='device-detail')deviceDetail(id);
     else if(a==='job-device-detail')jobDeviceDetail(id);
     else if(a==='review-job')reviewJob(id);
@@ -694,7 +719,7 @@ document.addEventListener('click', async e=>{
       try { const result=await api('/api/enrollments/'+encodeURIComponent(id)+'/extend','POST',{}); toast('登记包有效期：'+(result.expires_at===null?'永不过期':date(result.expires_at))+'，现有 ISO 可继续使用'); await refresh(); }
       finally { b.disabled=false; }
     }
-    else if(a==='cancel-job'||a==='reconcile-job')modal(a==='cancel-job'?'取消安装前任务':'人工结束异常记录',`<form id="job-action-form" data-id="${h(id)}" data-kind="${a}"><p>${a==='cancel-job'?'仅允许取消尚未启动安装或还原的任务。':'客户端长时间未回报。请先现场确认电脑已停止安装，再结束这条记录。结束后将不再接受此任务的自动成功回报；不会停止电脑或重新安装。'}</p>${a==='reconcile-job'?field('输入 CHECKED','confirmation','text','','required pattern="CHECKED" autocomplete="off"'):''}<div id="form-error" class="error" role="alert"></div><div class="form-actions"><button type="button" data-action="close">返回</button><button class="primary" type="submit">确认</button></div></form>`);
+    else if(a==='cancel-job'||a==='reconcile-job')modal(a==='cancel-job'?'取消安装前任务':'人工结束异常记录',`<form id="job-action-form" data-id="${h(id)}" data-kind="${a}"><p>${a==='cancel-job'?'仅允许取消尚未启动安装或还原的任务。':'客户端长时间未回报。请先现场确认电脑已停止安装，再结束这条记录。结束后将不再接受此任务的自动成功回报；不会停止电脑或重新安装。'}</p>${a==='reconcile-job'&&data.jobs.find(j=>j.id===id)?.domain_join?'<label class="check-label"><input type="checkbox" name="end_domain_join" required>我确认结束此任务的自动改名、加域及安装完成回报，且已现场核对电脑状态</label>':''}${a==='reconcile-job'?field('输入 CHECKED','confirmation','text','','required pattern="CHECKED" autocomplete="off"'):''}<div id="form-error" class="error" role="alert"></div><div class="form-actions"><button type="button" data-action="close">返回</button><button class="primary" type="submit">确认</button></div></form>`);
   } catch(err){toast(err.message);}
 });
 document.addEventListener('input',e=>{if(e.target.closest('#settings-form,#enrollment-policy-form,#media-form'))settingsDirty=true;if(e.target.dataset.employee)employeeIds.set(e.target.dataset.employee,e.target.value.toUpperCase());if(e.target.closest('#profile-form')&&['join_domain','join_user','join_password'].includes(e.target.name))updateDomainJoinPassword();if(e.target.closest('#profile-form')&&e.target.name==='system_gib')updateProfileName();if(e.target.id==='search'){search=e.target.value;renderDeviceRows();}});
@@ -725,6 +750,11 @@ document.addEventListener('submit',async e=>{
   const button=$('[type="submit"]',form);if(button)button.disabled=true;
   try {
     if(form.id==='source-form'){const m=JSON.parse(f.manifest);m.password=f.password;await api('/api/sources'+(form.dataset.id?'/'+form.dataset.id:''),form.dataset.id?'PUT':'POST',m);}
+    else if(form.id==='delete-profile-form'){
+      if(!f.confirmed)throw new Error('请确认删除此方案');
+      await api('/api/profiles/'+encodeURIComponent(form.dataset.id),'DELETE',{confirmation:'DELETE',revision:form.dataset.revision});
+      if(profileId===form.dataset.id){profileId='';partitions.clear();}
+    }
     else if(form.id==='profile-form'){
       updateProfileName();f.name=form.elements.name.value;
       f.image_index=Number(f.image_index);f.system_gib=Number(f.system_gib||0);f.clear_product_key=!!f.clear_product_key;
@@ -747,7 +777,7 @@ document.addEventListener('submit',async e=>{
     else if(form.id==='media-action-form')await api(form.dataset.kind==='revoke-builder'?'/api/builders/'+encodeURIComponent(form.dataset.id)+'/revoke':'/api/media/'+encodeURIComponent(form.dataset.id)+'/cancel','POST',{});
     else if(form.id==='settings-form'){await api('/api/settings','POST',{...f,concurrency:Number(f.concurrency),enabled:!!f.enabled,isolated_network_confirmed:!!f.isolated_network_confirmed});settingsDirty=false;toast('设置已保存');await refresh();return;}
     else if(form.id==='job-review-form')await api('/api/jobs/'+encodeURIComponent(form.dataset.id)+'/review','POST',{outcome:f.outcome,note:f.note,physical_confirmed:!!f.physical_confirmed});
-    else if(form.id==='job-action-form'){await api(`/api/jobs/${form.dataset.id}/${form.dataset.kind==='cancel-job'?'cancel':'reconcile'}`,'POST',f);}
+    else if(form.id==='job-action-form'){f.end_domain_join=!!f.end_domain_join;await api(`/api/jobs/${form.dataset.id}/${form.dataset.kind==='cancel-job'?'cancel':'reconcile'}`,'POST',f);}
     else if(form.id==='rearm-form'){await api(`/api/devices/${form.dataset.id}/rearm`,'POST',f);}
     else return;
     if($('#modal').open)$('#modal').close();toast('操作成功');await refresh();
@@ -761,15 +791,22 @@ $('#modal').addEventListener('close',()=>{
     deviceDialog = null;
     const wasJobLog = jobLog !== null;
     jobLog = null;
+    $('#modal-body').replaceChildren();
     if (wasJobLog) refresh();
   }
 });
 setInterval(()=>{if(!document.hidden)updateJobTimers();},1000);
-setInterval(()=>{
-  if (document.hidden) return;
-  if (!$('#modal').open || deviceDialog) refresh();
-  else if (jobLog?.before === null && activeStates.includes(jobLog.result?.job.state)) loadJobLogs(null, true);
-},8000);
+async function pollWorkspace(now = Date.now()) {
+  if(document.hidden || $('#workspace').hidden)return;
+  const live=activeStates.includes(jobLog?.result?.job.state) || data?.jobs.some(job=>activeStates.includes(job.state));
+  if(now-lastWorkspacePoll<(live?2000:8000))return;
+  const modalOpen=$('#modal').open;
+  if(modalOpen && !deviceDialog && !(jobLog?.before===null && activeStates.includes(jobLog.result?.job.state)))return;
+  lastWorkspacePoll=now;
+  if(!modalOpen || deviceDialog)await refresh();
+  else await loadJobLogs(null,true);
+}
+setInterval(pollWorkspace,1000);
 window.addEventListener('message', event => {
   if (!embedded || event.origin !== location.origin || event.source !== window.parent) return;
   if (event.data && event.data.type === 'pc-deploy:navigate' && Object.hasOwn(labels, event.data.view)) {

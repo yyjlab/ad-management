@@ -255,6 +255,56 @@ exit $LASTEXITCODE
     $timeoutSent=[IO.File]::ReadAllText((Join-Path $timeoutDirectory 'sent.json'))|ConvertFrom-Json
     Assert-Join ($timeoutSent.detail -ceq $failedReport.journal.detail) 'Finalizer timeout reported a generic error instead of the first diagnosis'
 
+
+    # Exercise finalizer startup before Windows is ready, with all OS/network calls intercepted.
+    foreach($diagnosticCase in @('waiting','error','identity')){
+        $directory=New-JoinCase
+        foreach($name in @('Finalize.ps1','DeviceInfo.ps1')){
+            [IO.File]::Copy((Join-Path $PSScriptRoot ('pc_deploy\agent\'+$name)),(Join-Path $directory $name))
+        }
+        $fixtureConfig=@{server_url='https://deploy.test/pc-deploy';job_id='diagnostic-fixture';
+            hardware_uuid=[guid]::NewGuid().ToString();token='fixture-only-token';diagnostic_case=$diagnosticCase}
+        [IO.File]::WriteAllText((Join-Path $directory 'config.json'),($fixtureConfig|ConvertTo-Json))
+        $runner=@'
+$ErrorActionPreference='Stop'
+$fixtureConfig=[IO.File]::ReadAllText((Join-Path $PSScriptRoot 'config.json'))|ConvertFrom-Json
+function Get-CimInstance {
+    param($ClassName)
+    if($ClassName -ne 'Win32_ComputerSystemProduct'){throw 'Unexpected hardware query'}
+    $identity=if($fixtureConfig.diagnostic_case -eq 'identity'){[guid]::NewGuid().ToString()}else{$fixtureConfig.hardware_uuid}
+    return @{UUID=$identity}
+}
+function Get-ItemProperty {
+    param($Path,$ErrorAction)
+    if($fixtureConfig.diagnostic_case -eq 'error'){throw 'Fixture setup query failed fixture-only-token'}
+    return @{ImageState='IMAGE_STATE_UNDEPLOYABLE';SystemSetupInProgress=1;OOBEInProgress=1}
+}
+function Invoke-RestMethod {
+    param($Method,$Uri,$Headers,$ContentType,$Body,$TimeoutSec,[switch]$UseBasicParsing)
+    [IO.File]::WriteAllBytes((Join-Path $PSScriptRoot 'status.json'),$Body)
+}
+function Start-Sleep {param($Seconds) exit 42}
+function Unregister-ScheduledTask {throw 'Pending startup must not remove its scheduled task'}
+& (Join-Path $PSScriptRoot 'Finalize.ps1')
+exit $LASTEXITCODE
+'@
+        [IO.File]::WriteAllText((Join-Path $directory 'Startup.ps1'),$runner)
+        & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -File (Join-Path $directory 'Startup.ps1')
+        Assert-Join ($LASTEXITCODE -eq 42) 'Finalizer did not wait for a safe ready state'
+        $journal=[IO.File]::ReadAllText((Join-Path $directory 'finalize-state.json'))|ConvertFrom-Json
+        $expectedPhase=if($diagnosticCase -eq 'waiting'){'waiting_setup'}else{'waiting_retry'}
+        Assert-Join ($journal.phase -eq $expectedPhase) 'Startup diagnosis did not identify the blocked phase'
+        Assert-Join (-not $journal.detail.Contains('fixture-only-token')) 'Startup diagnosis leaked the completion token'
+        Assert-Join (-not (Test-Path -LiteralPath (Join-Path $directory 'domain-join-state.json'))) 'Finalizer joined a domain before a validated Windows ready state'
+        $status=Join-Path $directory 'status.json'
+        if($diagnosticCase -eq 'identity'){
+            Assert-Join (-not (Test-Path -LiteralPath $status)) 'Foreign hardware sent an authorized task diagnosis'
+        }else{
+            $sent=[IO.File]::ReadAllText($status)|ConvertFrom-Json
+            Assert-Join ($sent.phase -eq $expectedPhase -and $sent.hardware_uuid -ceq $fixtureConfig.hardware_uuid) 'Platform did not receive the same safe startup diagnosis'
+        }
+    }
+
     function Test-JoinHttpDetail {
         . $taskSource
         $config=[pscustomobject]@{server_url='http://deploy.test/pc-deploy';token='fixture-only-completion-token';domain_join=@{domain='corp.test'}}

@@ -12,7 +12,7 @@ async function run() {
     const errors=[], requests=[];
     page.on('pageerror',error=>errors.push(error.message));
     let role='super_admin',expired=false,saves=0,extensions=0,policyPayload=null,validityPayload=null,mediaPayload=null,enrollmentExpires=1793433600,fixture=null,profilePayload=null,previewPayload=null;
-    const jobLogEvents={};let releasePayload=null,jobLogError=false,jobLogGate=null,dashboardGate=null,jobReviewPayload=null;
+    const jobLogEvents={};let releasePayload=null,profileDeletePayload=null,jobLogError=false,jobLogGate=null,dashboardGate=null,jobReviewPayload=null;
     const settings={public_url:'http://ad-menu.test/pc-deploy',enabled:false,concurrency:2,ca_pem:'',http_allowed:true};
     const media={builders:[{id:'test-builder',name:'测试制作电脑',online:true,template_name:'WinPE',driver_name:'ASIX'}],builds:[]};
     const adHtml=fs.readFileSync(path.join(__dirname,'admin_manage.html'),'utf8');
@@ -31,6 +31,15 @@ async function run() {
       if(url.pathname==='/api/admin/check') return route.fulfill({json:{logged_in:true,username:'test-admin',role,
         permissions:['view_user','view_dashboard','view_computers','view_logs','manage_admins','system_settings','password_policy']}});
       if(url.pathname==='/pc-deploy/api/session') return route.fulfill(expired ? {status:401,json:{error:'请先登录 AD 管理后台'}} : {json:{authenticated:true,username:'test-admin',csrf:'fixture-csrf',test_mode:true}});
+      if(/^\/pc-deploy\/api\/profiles\/[^/]+$/.test(url.pathname) && request.method()==='DELETE'){
+        assert.equal(request.headers()['x-csrf-token'],'fixture-csrf');
+        profileDeletePayload=request.postDataJSON();
+        const id=url.pathname.split('/').pop();
+        if(fixture.jobs.some(j=>j.profile_id===id&&['queued','preflight','installing','awaiting_report'].includes(j.state)))
+          return route.fulfill({status:400,json:{error:'此方案仍有进行中的任务，暂不能删除'}});
+        fixture.profiles=fixture.profiles.filter(p=>p.id!==id);
+        return route.fulfill({json:{ok:true}});
+      }
       if(/^\/pc-deploy\/api\/profiles(?:\/[^/]+)?$/.test(url.pathname) && ['POST','PUT'].includes(request.method())) {
         profilePayload=request.postDataJSON();
         return route.fulfill({json:{ok:true,id:'new-profile'}});
@@ -359,7 +368,19 @@ async function run() {
       profile:'WIM preserve',kind:'wim',state:'installing',created:1793345800,started_at:1793346000,finished_at:null,updated:1793347300,stale:false,
       progress:{stage:'applying',percent:37,updated:1793347300}}];
     await page.setViewportSize({width:1440,height:1000});
+    fixture.jobs[0].progress=null;
     await page.locator('#refresh').click();
+    await page.waitForFunction(()=>document.querySelector('.job-progress progress')?.matches(':indeterminate'));
+    assert.ok((await page.locator('.job-row').textContent()).includes('安装准备中'));checks++;
+    assert.ok((await page.locator('.job-progress').textContent()).includes('等待客户端上报真实进度'));checks++;
+    assert.equal(await page.locator('.job-progress-percent').count(),0);checks++;
+    const preparingBar=await page.locator('.job-progress progress').elementHandle();
+    await page.locator('#refresh').click();
+    assert.equal(await preparingBar.evaluate(el=>el.isConnected&&el.matches(':indeterminate')),true);checks++;
+    fixture.jobs[0].progress={stage:'applying',percent:37,updated:1793347300};
+    await page.locator('#refresh').click();
+    await page.waitForFunction(()=>document.querySelector('.job-progress progress')?.getAttribute('value')==='37');
+    assert.equal(await preparingBar.evaluate(el=>el.isConnected&&el.getAttribute('value')==='37'),true);checks++;
     fixture.jobs[0].progress={stage:'caching',percent:50,updated:1793347300};
     fixture.jobs[0].performance={caching:{bytes_copied:8e9,total_bytes:16e9,bytes_per_second:80e6,elapsed_seconds:100,finished:false}};
     await page.locator('#refresh').click();
@@ -379,13 +400,31 @@ async function run() {
     assert.equal(await cachingBar.evaluate(el=>el.isConnected),false);checks++;
     assert.ok((await page.locator('.job-apply-time').textContent()).includes('纯还原 2分00秒'));checks++;
     fixture.jobs[0].performance.applying.mode='network_direct';
+    fixture.jobs[0].performance.applying.network_speed_available=true;
+    fixture.jobs[0].performance.applying.network_bytes_per_second=111000000;
     await page.locator('#refresh').click();
     await page.waitForFunction(()=>document.querySelector('.job-apply-time')?.textContent.includes('网络直接还原'));
     assert.ok(!(await page.locator('.job-apply-time').textContent()).includes('空间不足'));checks++;
+    assert.ok((await page.locator('.job-network-speed').textContent()).includes('111.0 MB/s'));checks++;
     fixture.jobs[0].performance.applying.mode='local_cache';
     await page.locator('#refresh').click();
     assert.ok((await liveProgress.textContent()).includes('37%'));checks++;
     assert.equal(await page.locator('[data-action=reconcile-job]').count(),0);checks++;
+    fixture.jobs[0].performance.applying.mode='network_direct';
+    await page.locator('#refresh').click();
+    await page.locator('.job-row [data-action=job-logs]').click();
+    await page.locator('#job-log .job-progress-percent').waitFor();
+    fixture.jobs[0].progress.percent=54;fixture.jobs[0].updated++;
+    fixture.jobs[0].performance.applying.network_bytes_per_second=85000000;
+    fixture.jobs[0].post_install={phase:'started',updated:fixture.jobs[0].updated,detail:''};
+    await page.locator('[data-action=refresh-job-logs]').click();
+    await page.waitForFunction(()=>Array.from(document.querySelectorAll('.job-progress-percent')).length===2&&
+      Array.from(document.querySelectorAll('.job-progress-percent')).every(e=>e.textContent==='54%'));
+    assert.deepEqual(await page.locator('.job-progress-percent').allTextContents(),['54%','54%']);checks++;
+    assert.ok((await page.locator('.job-row .job-network-speed').textContent()).includes('85.0 MB/s'));checks++;
+    assert.equal(await page.locator('#job-log .job-network-speed').textContent(),await page.locator('.job-row .job-network-speed').textContent());checks++;
+    assert.equal(await page.locator('#job-log .post-install-status').textContent(),await page.locator('.job-row .post-install-status').textContent());checks++;
+    await page.locator('#close-modal').click();
     fixture.jobs[0].stale=true;
     await page.locator('#refresh').click();
     await page.getByRole('button',{name:'结束异常记录',exact:true}).waitFor();
@@ -522,9 +561,9 @@ async function run() {
     fixture.jobs[0].state='installing';
     fixture.jobs[0].progress={stage:'applying',percent:null,updated:1793347200};
     await page.locator('#refresh').click();
-    await page.waitForFunction(()=>document.querySelector('.job-progress progress')?.getAttribute('value')==='0');
+    await page.waitForFunction(()=>document.querySelector('.job-progress progress')?.matches(':indeterminate'));
     assert.ok((await page.locator('.job-progress').textContent()).includes('等待真实进度'));checks++;
-    assert.equal(await page.locator('progress:indeterminate').count(),0);checks++;
+    assert.equal(await page.locator('progress:indeterminate').count(),1);checks++;
     fixture.jobs[0].progress=null;
     fixture.jobs[0].state='failed';
 
@@ -1041,7 +1080,7 @@ async function run() {
     // Labels describe the configuration, including legacy handwritten profiles, without changing IDs.
     const namingSource={...sourceBase,id:'naming-source',kind:'wim',family:'windows10',name:'办公镜像',
       images:[{index:1,name:'Windows10专业版',build:19045,architecture:'amd64',language:'zh-CN'}]};
-    const namingProfile={id:'naming-1',name:'随便写的旧名称',source_id:namingSource.id,image_index:1,
+    const namingProfile={id:'naming-1',revision:'fixture-naming-revision',name:'随便写的旧名称',source_id:namingSource.id,image_index:1,
       disk_mode:'wipe_disk',system_gib:200,wim_cache_mode:'network_direct',preserve_image_settings:true,
       domain_join:{domain:'corp.test',username:'join-service@corp.test',mode:'manual',allow_http:true}};
     fixture.sources=[namingSource,{...namingSource,id:'naming-win11',family:'windows11',
@@ -1076,6 +1115,67 @@ async function run() {
     await page.locator('#source-choice').selectOption('naming-win11');
     assert.ok((await page.locator('#profile-form [name=name]').inputValue()).startsWith('Win11专业版'));checks++;
     await page.locator('#profile-form [data-action=close]').click();
+    // Faster active polling must keep idle/hidden pages quiet.
+    fixture.jobs=[{...verifiedIdentity,id:'poll-fixture',state:'installing',domain_join:null,progress:null}];
+    await page.locator('#refresh').click();
+    await page.waitForFunction(()=>!busy&&data.jobs.some(j=>j.id==='poll-fixture'&&j.state==='installing'));
+    let polls=requests.filter(p=>p==='/pc-deploy/api/dashboard').length;
+    await page.evaluate(async()=>{lastWorkspacePoll=Date.now();await pollWorkspace(lastWorkspacePoll+1999);});
+    assert.equal(requests.filter(p=>p==='/pc-deploy/api/dashboard').length,polls);checks++;
+    await page.evaluate(async()=>{lastWorkspacePoll=Date.now();await pollWorkspace(lastWorkspacePoll+2000);});
+    assert.equal(requests.filter(p=>p==='/pc-deploy/api/dashboard').length,polls+1);checks++;
+    fixture.jobs[0].state='completed';
+    await page.locator('#refresh').click();
+    await page.waitForFunction(()=>!busy&&data.jobs.some(j=>j.id==='poll-fixture'&&j.state==='completed'));
+    polls=requests.filter(p=>p==='/pc-deploy/api/dashboard').length;
+    await page.evaluate(async()=>{lastWorkspacePoll=Date.now();await pollWorkspace(lastWorkspacePoll+7999);});
+    assert.equal(requests.filter(p=>p==='/pc-deploy/api/dashboard').length,polls);checks++;
+    await page.evaluate(async()=>{lastWorkspacePoll=Date.now();await pollWorkspace(lastWorkspacePoll+8000);});
+    assert.equal(requests.filter(p=>p==='/pc-deploy/api/dashboard').length,polls+1);checks++;
+    polls=requests.filter(p=>p==='/pc-deploy/api/dashboard').length;
+    await page.evaluate(async()=>{
+      Object.defineProperty(document,'hidden',{configurable:true,value:true});
+      try{await pollWorkspace(lastWorkspacePoll+16000);}finally{delete document.hidden;}
+    });
+    assert.equal(requests.filter(p=>p==='/pc-deploy/api/dashboard').length,polls);checks++;
+    const networkCases=await page.evaluate(()=>{
+      const inspect=job=>{const root=document.createElement('div');root.innerHTML=renderWimPerformance(job);return {text:root.textContent,images:root.querySelectorAll('img').length};};
+      return {average:inspect({state:'completed',performance:{applying:{mode:'network_direct',network_average_bytes_per_second:95000000}}}),
+        zero:inspect({state:'installing',progress:{stage:'applying'},performance:{applying:{mode:'network_direct',network_speed_available:true,network_bytes_per_second:0}}}),
+        missing:inspect({performance:{applying:{mode:'network_direct',network_speed_available:false}}}),
+        detail:inspect({post_install:{phase:'waiting_retry',detail:'<img src=x onerror=alert(1)>'}})};
+    });
+    assert.ok(networkCases.average.text.includes('平均网络接收 95.0 MB/s'));checks++;
+    assert.ok(networkCases.zero.text.includes('0.0 MB/s'));checks++;
+    assert.ok(networkCases.missing.text.includes('暂不可用')&&!networkCases.missing.text.includes('0.0 MB/s'));checks++;
+    assert.equal(networkCases.detail.images,0);checks++;
+    await page.locator('[data-view=profiles]').click();
+    fixture.jobs=[{...fixture.jobs[0],profile_id:'naming-1',state:'installing'}];
+    await page.locator('[data-action=delete-profile][data-id=naming-1]').click();
+    await page.locator('#delete-profile-form [name=confirmed]').check();
+    await page.locator('#delete-profile-form [type=submit]').click();
+    await page.getByText('此方案仍有进行中的任务，暂不能删除',{exact:true}).waitFor();
+    assert.ok(await page.locator('#modal').isVisible());checks++;
+    assert.equal(fixture.profiles.length,3);checks++;
+    await page.locator('#delete-profile-form [data-action=close]').click();
+    await page.locator('#refresh').click();
+    await page.locator('[data-action=delete-profile][data-id=naming-1]:disabled').waitFor();
+    assert.ok((await page.locator('[data-action=delete-profile][data-id=naming-1]').getAttribute('title')).includes('进行中'));checks++;
+    fixture.jobs[0].state='completed';
+    await page.locator('#refresh').click();
+    await page.locator('[data-action=delete-profile][data-id=naming-1]').click();
+    profileDeletePayload=null;
+    await page.locator('#delete-profile-form [type=submit]').click();
+    assert.equal(profileDeletePayload,null);checks++;
+    await page.locator('#delete-profile-form [name=confirmed]').check();
+    await page.locator('#delete-profile-form [type=submit]').click();
+    await page.locator('#modal').waitFor({state:'hidden'});
+    assert.deepEqual(profileDeletePayload,{confirmation:'DELETE',revision:'fixture-naming-revision'});checks++;
+    assert.equal(fixture.profiles.length,2);checks++;
+    assert.equal(fixture.sources.length,2);checks++;
+    assert.equal(fixture.jobs.length,1);checks++;
+    await page.locator('[data-view=devices]').click();
+    assert.equal(await page.locator('#profile-choice').inputValue(),'');checks++;
     assert.deepEqual(errors,[]);checks++;
     console.log(`${checks} nested menu, embedded page, HTTP form, role, message origin, lifecycle, mobile, WIM restore and per-task log UI checks passed. No live system contacted.`);
   }finally{await browser.close();}

@@ -334,8 +334,8 @@ def register_pc_deploy(host_app, current_user, touch_session):
                     model=display.get('model') or data['target']['model'], disk=data['target']['disk'], profile=data['profile']['name'],
                     state=row['state'], state_name=STATES[row['state']], created=row['created'],
                     updated=row['updated'], stale=row['state'] in ACTIVE and now-row['updated'] > 600,
-                    progress=data.get('progress'), performance=data.get('performance'),
-                    kind=data['source'].get('kind', 'setup'), review=data.get('review'),
+                    progress=data.get('progress'), performance=data.get('performance'), post_install=data.get('post_install'),
+                    kind=data['source'].get('kind', 'setup'), review=data.get('review'), profile_id=data['profile'].get('id'),
                     wim_cache_mode=data['profile'].get('wim_cache_mode'),
                     domain_join=data.get('domain_join'), computer_name=data['target'].get('computer_name'),
                     installed_at=ready, timings=phases,
@@ -491,6 +491,25 @@ def register_pc_deploy(host_app, current_user, touch_session):
             event(c, 'profile', '已保存装机方案：' + value['name'])
         return jsonify(ok=True, id=identity)
 
+    @app.delete('/api/profiles/<identity>')
+    @admin
+    def delete_profile(identity):
+        value = body()
+        with store.connect(write=True) as c:
+            _, profile = load(c, 'profiles', identity)
+            if value.get('confirmation') != 'DELETE' or value.get('revision') != profile['revision']:
+                raise Invalid('请确认删除此方案；配置已变化时请刷新后重新确认')
+            for row in c.execute("SELECT data FROM jobs WHERE state IN ('queued','preflight','installing','awaiting_report')"):
+                if json.loads(row['data'])['profile'].get('id') == identity:
+                    raise Invalid('此方案仍有进行中或待统一加域的任务，暂不能删除；请先处理相关任务')
+            c.execute('DELETE FROM profiles WHERE id=?', (identity,))
+            # Task records hold immutable snapshots. Never cascade deletion into jobs or sources.
+            for row in list(c.execute('SELECT id,data FROM previews WHERE used=0')):
+                if json.loads(row['data']).get('profile_id') == identity:
+                    c.execute('DELETE FROM previews WHERE id=?', (row['id'],))
+            event(c, 'profile', '已删除装机方案：' + profile['name'] + '；历史任务与安装源保留')
+        return jsonify(ok=True)
+
     @app.post('/api/settings')
     @admin
     def save_settings():
@@ -618,12 +637,15 @@ def register_pc_deploy(host_app, current_user, touch_session):
     @app.post('/api/jobs/<identity>/reconcile')
     @admin
     def reconcile(identity):
-        if body().get('confirmation') != 'CHECKED':
+        value = body()
+        if value.get('confirmation') != 'CHECKED':
             raise Invalid('必须现场确认电脑状态后输入 CHECKED；不会重试或重新清盘')
         with store.connect(write=True) as c:
             row, _ = load(c, 'jobs', identity)
             if row['state'] not in ACTIVE:
                 raise Invalid('任务已经结束')
+            if json.loads(row['data']).get('domain_join') and value.get('end_domain_join') is not True:
+                raise Invalid('结束记录后将不再执行此任务的改名与加域，请明确确认')
             c.execute('UPDATE jobs SET state=?,updated=? WHERE id=?', ('failed', time.time(), identity))
             event(c, 'failed', '管理员现场核对后结束记录；未向电脑发送停止或重试命令', identity)
         return jsonify(ok=True)
@@ -951,7 +973,8 @@ def register_pc_deploy(host_app, current_user, touch_session):
                 metrics = value.get('metrics')
                 if metrics is not None:
                     if not isinstance(metrics, dict) or set(metrics) - {
-                            'elapsed_seconds', 'bytes_copied', 'total_bytes', 'bytes_per_second', 'mode'}:
+                            'elapsed_seconds', 'bytes_copied', 'total_bytes', 'bytes_per_second', 'mode',
+                            'network_speed_available', 'network_bytes_per_second', 'network_average_bytes_per_second'}:
                         raise Invalid('无效的装机性能回报')
                     measured = {}
                     if 'elapsed_seconds' in metrics:
@@ -967,6 +990,20 @@ def register_pc_deploy(host_app, current_user, touch_session):
                         if stage != 'applying' or metrics['mode'] not in ('local_cache', 'network_direct'):
                             raise Invalid('无效的镜像还原方式')
                         measured['mode'] = metrics['mode']
+                    network_keys = {'network_speed_available', 'network_bytes_per_second', 'network_average_bytes_per_second'}
+                    if network_keys.intersection(metrics):
+                        actual_mode = metrics.get('mode') or job_data.get('performance', {}).get('applying', {}).get('mode')
+                        if stage != 'applying' or actual_mode != 'network_direct':
+                            raise Invalid('只有网络直接还原阶段允许回报网络接收速率')
+                        available = metrics.get('network_speed_available')
+                        if type(available) is not bool:
+                            raise Invalid('请明确网络测速是否可用')
+                        measured['network_speed_available'] = available
+                        for key in ('network_bytes_per_second', 'network_average_bytes_per_second'):
+                            if key in metrics:
+                                measured[key] = integer(metrics[key], key, 0, 10**13)
+                        if available != ('network_bytes_per_second' in metrics):
+                            raise Invalid('网络测速可用状态与速率不一致')
                     performance = job_data.setdefault('performance', {})
                     old = performance.get(stage, {})
                     if old.get('total_bytes') and measured.get('total_bytes') != old['total_bytes']:
@@ -983,6 +1020,39 @@ def register_pc_deploy(host_app, current_user, touch_session):
             c.execute('UPDATE devices SET last_seen=? WHERE id=?', (now, dev['id']))
             if emit_event:
                 event(c, state, message, identity)
+        return jsonify(ok=True)
+
+    @app.post('/api/agent/jobs/<identity>/post-install/status')
+    def post_install_status(identity):
+        value = body()
+        phases = {'started', 'working', 'waiting_setup', 'waiting_retry', 'timed_out'}
+        if not isinstance(value.get('phase'), str) or value['phase'] not in phases:
+            raise Invalid('无效的安装后诊断阶段')
+        with store.connect(write=True) as c:
+            row, job = load(c, 'jobs', identity)
+            secret = store.decrypt(row['secret'])
+            if (not hmac.compare_digest(bearer(), secret['finish_token']) or row['expires'] < time.time()
+                    or value.get('hardware_uuid') != row['device_id']):
+                raise Invalid('安装后诊断凭据或设备身份失效')
+            if row['state'] not in ('installing', 'awaiting_report'):
+                raise Invalid('任务已结束，诊断回报不会重新激活或再次加域')
+            detail = value.get('detail', '')
+            if not isinstance(detail, str):
+                raise Invalid('安装后诊断必须是文本')
+            detail = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', detail)
+            for item in sorted((s for s in secret.values() if isinstance(s, str) and s), key=len, reverse=True):
+                detail = detail.replace(item, '[REDACTED]')
+            detail = detail[:4096]
+            previous = job.get('post_install', {})
+            now = time.time()
+            phase = value['phase']
+            job['post_install'] = dict(phase=phase, detail=detail, updated=now)
+            c.execute('UPDATE jobs SET data=?,updated=? WHERE id=?', (canonical(job), now, identity))
+            if phase != previous.get('phase'):
+                labels = dict(started='新 Windows 安装后脚本已启动', working='正在执行安装后检查',
+                              waiting_setup='等待 Windows 完成初始化', waiting_retry='安装后处理未完成，等待重试',
+                              timed_out='安装后检查超时，需查看客户端诊断')
+                event(c, 'post_install', labels[phase] + ('：' + detail if detail else ''), identity)
         return jsonify(ok=True)
 
     def domain_completion(c, identity, value):

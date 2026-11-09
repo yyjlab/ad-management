@@ -30,12 +30,15 @@ def decoded_bootstrap(command):
 
 
 def bootstrap_files(bootstrap):
+    raw = re.search(r"\$deploymentFilesJson=@'\n(.*?)\n'@", bootstrap, re.S)
+    if raw:
+        return json.loads(raw.group(1))
     packed = re.search(r"\$deploymentFiles='([^']+)'", bootstrap)
     return json.loads(gzip.decompress(base64.b64decode(packed.group(1))))
 
 
 def bootstrap_config(bootstrap):
-    if '$deploymentFiles=' in bootstrap:
+    if '$deploymentFiles=' in bootstrap or '$deploymentFilesJson=' in bootstrap:
         return json.loads(bootstrap_files(bootstrap)['config.json'])
     compressed = re.search(r"Write-DeploymentScript 'config.json' '([^']+)'", bootstrap)
     if compressed:
@@ -267,7 +270,7 @@ class PlatformTests(unittest.TestCase):
         route = f'/pc-deploy/api/agent/jobs/{job}/domain-join/config'
         bootstrap = decoded_bootstrap(authorization['finalizer_command'])
         self.assertNotIn('Test-only-domain-password', bootstrap)
-        self.assertLess(len(authorization['finalizer_command']), 30000)
+        self.assertLess(len(authorization['finalizer_command']), 31500)
         config = bootstrap_config(bootstrap)
         self.assertEqual(config['domain_join']['mode'], 'manual')
         self.assertGreater(config['expires_at'], time.time())
@@ -618,7 +621,7 @@ class PlatformTests(unittest.TestCase):
                    hardware_uuid=str(uuid.uuid4()), token='T'*54, ca_pem=ca,
                    domain_join=dict(domain='corp.example.test', computer_name='WFQ101755', employee_id='WFQ101755'))
         command = finalizer_command(cfg)
-        self.assertLess(len(command), 30000)
+        self.assertLess(len(command), 31500)
         bootstrap = decoded_bootstrap(command)
         files = bootstrap_files(bootstrap)
         scripts = {name: content for name, content in files.items() if name.endswith('.ps1')}
@@ -627,12 +630,16 @@ class PlatformTests(unittest.TestCase):
             expected = (Path(__file__).parent/'pc_deploy'/'agent'/name).read_text(encoding='utf-8-sig')
             self.assertEqual(actual.replace('\r\n', '\n'), expected)
         self.assertEqual(bootstrap_config(bootstrap), cfg)
+        oversized = dict(cfg, ca_pem=secrets.token_urlsafe(16000))
+        with self.assertRaises(Invalid):
+            finalizer_command(oversized)
         if os.name == 'nt':
             # Run the actual PS5.1 extraction while intercepting every scheduling/ACL command.
             mock = """$ErrorActionPreference='Stop'
 function icacls.exe { $global:LASTEXITCODE=0 }
 function New-ScheduledTaskAction {}
 function New-ScheduledTaskTrigger {}
+function New-ScheduledTaskSettingsSet {}
 function Register-ScheduledTask {}
 function Start-ScheduledTask {}
 """
@@ -653,10 +660,10 @@ function Start-ScheduledTask {}
     def test_domain_join_wim_bootstrap_contains_no_join_password_and_stays_within_command_limit(self):
         inv, _, job, token, authorization = self.join_fixtures(wim=True)
         command = authorization['finalizer_command']
-        self.assertLess(len(command), 30000)
+        self.assertLess(len(command), 31500)
         bootstrap = decoded_bootstrap(command)
         self.assertIn('DomainJoin.ps1', bootstrap_files(bootstrap))
-        self.assertIn('GZipStream', bootstrap)
+        self.assertIn('GZipStream', base64.b64decode(command.rsplit(' ', 1)[1]).decode('utf-16le'))
         self.assertNotIn('Test-only-domain-password', bootstrap)
         payload = dict(hardware_uuid=inv['hardware_uuid'], computer_name='WFQ101755',
                        os_build=22631, image_state='IMAGE_STATE_COMPLETE', oobe_done=True,
@@ -1690,6 +1697,104 @@ function Start-ScheduledTask {}
         self.assertTrue(p['preserve_image_settings'])
         self.assertEqual(p['username'], '')
         self.assertFalse(d['settings']['enabled'])
+
+    def test_delete_profile_requires_confirmation_revision_and_admin(self):
+        _, _, _, profile = self.wim_fixtures()
+        saved = self.client.get('/pc-deploy/api/dashboard').json['profiles'][0]
+        route = '/pc-deploy/api/profiles/' + profile
+        body = dict(confirmation='DELETE', revision=saved['revision'])
+        self.assertEqual(self.post(route, {}, method='DELETE').status_code, 400)
+        self.assertEqual(self.post(route, dict(body, revision='stale'), method='DELETE').status_code, 400)
+        self.assertEqual(self.client.delete(route, json=body).status_code, 403)
+        with self.client.session_transaction() as value:
+            value['admin_role'] = 'viewer'
+        self.assertEqual(self.post(route, body, method='DELETE').status_code, 403)
+        with self.client.session_transaction() as value:
+            value['admin_role'] = 'super_admin'
+        self.assertEqual(self.post(route, body, method='DELETE').status_code, 200)
+        self.assertEqual(self.client.get('/pc-deploy/api/dashboard').json['profiles'], [])
+        self.assertEqual(len(self.client.get('/pc-deploy/api/dashboard').json['sources']), 1)
+
+    def test_delete_profile_keeps_task_history_and_blocks_active_jobs(self):
+        inv, _, _, profile = self.wim_fixtures()
+        saved = self.client.get('/pc-deploy/api/dashboard').json['profiles'][0]
+        preview = self.wim_preview(inv, profile).json
+        unused = self.wim_preview(inv, profile).json
+        self.enable()
+        queued = self.post('/pc-deploy/api/jobs/commit', dict(preview_id=preview['id'],
+            confirmation='YES', physical_confirmed=True))
+        self.assertEqual(queued.status_code, 200, queued.json)
+        job = queued.json['ids'][0]
+        route = '/pc-deploy/api/profiles/' + profile
+        body = dict(confirmation='DELETE', revision=saved['revision'])
+        self.assertEqual(self.post(route, body, method='DELETE').status_code, 400)
+        self.assertEqual(self.post('/pc-deploy/api/jobs/'+job+'/cancel').status_code, 200)
+        self.assertEqual(self.post(route, body, method='DELETE').status_code, 200)
+        dashboard = self.client.get('/pc-deploy/api/dashboard').json
+        self.assertEqual(dashboard['profiles'], [])
+        self.assertEqual(dashboard['jobs'][0]['id'], job)
+        self.assertEqual(dashboard['jobs'][0]['profile'], saved['name'])
+        self.assertEqual(len(dashboard['sources']), 1)
+        with self.store.connect() as c:
+            self.assertIsNone(c.execute('SELECT id FROM previews WHERE id=?', (unused['id'],)).fetchone())
+
+    def test_network_direct_speed_is_measured_metadata_and_strictly_scoped(self):
+        inv, reg, job = self.wim_queued()
+        self.post('/pc-deploy/api/agent/poll', inv, reg['token'])
+        self.assertEqual(self.post(f'/pc-deploy/api/agent/jobs/{job}/start', inv, reg['token']).status_code, 200)
+        route = f'/pc-deploy/api/agent/jobs/{job}/event'
+        metric = dict(mode='network_direct', network_speed_available=True, network_bytes_per_second=111000000)
+        result = self.post(route, dict(stage='applying', percent=35, metrics=metric), reg['token'])
+        self.assertEqual(result.status_code, 200, result.json)
+        for changes in (dict(network_bytes_per_second=-1), dict(network_speed_available='true'),
+                        dict(network_bytes_per_second=True), dict(network_bytes_per_second=10**14),
+                        dict(mode='local_cache'), dict(network_speed_available=False)):
+            with self.subTest(changes=changes):
+                self.assertEqual(self.post(route, dict(stage='applying', percent=36,
+                    metrics=dict(metric, **changes)), reg['token']).status_code, 400)
+        self.assertEqual(self.post(route, dict(stage='boot_files', metrics=metric), reg['token']).status_code, 400)
+        metric.update(network_average_bytes_per_second=95000000, elapsed_seconds=120)
+        self.assertEqual(self.post(route, dict(stage='applying', percent=100, metrics=metric), reg['token']).status_code, 200)
+        item = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
+        self.assertEqual(item['performance']['applying']['network_bytes_per_second'], 111000000)
+        self.assertEqual(item['performance']['applying']['network_average_bytes_per_second'], 95000000)
+        self.assertEqual(item['state'], 'installing')
+        unavailable = dict(stage='applying', metrics=dict(network_speed_available=False))
+        self.assertEqual(self.post(route, unavailable, reg['token']).status_code, 200)
+
+    def test_post_install_diagnostics_do_not_claim_installation_or_revive_tasks(self):
+        inv, reg, job = self.wim_queued()
+        self.post('/pc-deploy/api/agent/poll', inv, reg['token'])
+        self.post(f'/pc-deploy/api/agent/jobs/{job}/start', inv, reg['token'])
+        with self.store.connect() as c:
+            secret = self.store.decrypt(c.execute('SELECT secret FROM jobs WHERE id=?', (job,)).fetchone()['secret'])
+        token = secret['finish_token']
+        route = f'/pc-deploy/api/agent/jobs/{job}/post-install/status'
+        body = dict(hardware_uuid=inv['hardware_uuid'], phase='started', detail=token+' '+secret['source_password'])
+        self.assertEqual(self.post(route, body, token).status_code, 200)
+        item = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
+        self.assertIsNone(item['installed_at'])
+        self.assertEqual(item['state'], 'installing')
+        self.assertNotIn(token, item['post_install']['detail'])
+        self.assertNotIn(secret['source_password'], item['post_install']['detail'])
+        self.assertEqual(self.post(route, body, token).status_code, 200)
+        with self.store.connect() as c:
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM events WHERE job_id=? AND kind='post_install'", (job,)).fetchone()[0], 1)
+        for changes in (dict(phase=[]), dict(phase='verified'), dict(hardware_uuid=str(uuid.uuid4())), dict(detail={})):
+            with self.subTest(changes=changes):
+                self.assertEqual(self.post(route, dict(body, **changes), token).status_code, 400)
+        self.assertEqual(self.post(route, body, reg['token']).status_code, 400)
+        self.assertEqual(self.post(f'/pc-deploy/api/jobs/{job}/reconcile', dict(confirmation='CHECKED')).status_code, 200)
+        self.assertEqual(self.post(route, body, token).status_code, 400)
+        self.assertEqual(self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]['state'], 'failed')
+
+    def test_ending_domain_task_requires_explicit_join_stop_confirmation(self):
+        inv, _, job, token, _ = self.join_fixtures(wim=True)
+        route = f'/pc-deploy/api/jobs/{job}/reconcile'
+        self.assertEqual(self.join_post(route, dict(confirmation='CHECKED')).status_code, 400)
+        self.assertEqual(self.join_post(route, dict(confirmation='CHECKED', end_domain_join=True)).status_code, 200)
+        body = dict(hardware_uuid=inv['hardware_uuid'], phase='started')
+        self.assertEqual(self.join_post(f'/pc-deploy/api/agent/jobs/{job}/post-install/status', body, token).status_code, 400)
 
     def test_automatic_profile_name_saves_without_input_and_freezes_new_tasks(self):
         inv, reg, source, profile = self.wim_fixtures()

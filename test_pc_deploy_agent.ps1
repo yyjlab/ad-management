@@ -615,7 +615,7 @@ foreach ($case in @(@{exit=0;offline=$false},@{exit=87;offline=$false},@{exit=0;
                 param($Timeout)
                 if (-not $PSBoundParameters.ContainsKey('Timeout')) { return }
                 $script:nativeTick++
-                if ($script:nativeTick -eq 1) { Start-Sleep -Milliseconds 5100; return $false }
+                if ($script:nativeTick -eq 1) { return $false }
                 if ($script:nativeTick -eq 2) { return $false }
                 return $true
             }
@@ -623,6 +623,7 @@ foreach ($case in @(@{exit=0;offline=$false},@{exit=87;offline=$false},@{exit=0;
         }
         function Get-DeploymentNativePercent { if ($script:nativeTick -eq 1) { 43 } else { 18 } }
         function Write-DeploymentProgress { param($Percent) $shown.Add($Percent) }
+        function Get-DeploymentNetworkSample { @{ticks=([long]$script:nativeTick+1)*[Diagnostics.Stopwatch]::Frequency;adapters=@{fixture=([long]$script:nativeTick+1)*1000000L}} }
         function Invoke-Platform {
             param($Route,$Token,$Data,$TimeoutSec)
             $sent.Add($Data)
@@ -631,10 +632,11 @@ foreach ($case in @(@{exit=0;offline=$false},@{exit=87;offline=$false},@{exit=0;
         function Get-Content { param($LiteralPath,$Tail,$ErrorAction) 'Simulated native failure.' }
         function Write-Host { }
         $failed=$false
-        try { Invoke-DeploymentNative 'fixture.exe' @('/fixture') 'applying' @{id='progress-fixture'} 'fixture-token' }
+        try { Invoke-DeploymentNative 'fixture.exe' @('/fixture') 'applying' @{id='progress-fixture'} 'fixture-token' -MeasureNetwork }
         catch { $failed=$true }
         if ($failed -ne ($case.exit -ne 0) -or $script:nativeStarts -ne 1) { throw 'Progress handling retried or masked the native result.' }
         if ($sent[0].percent -ne 43 -or $shown.Contains(18)) { throw 'Live progress was lost or moved backwards.' }
+        if(-not $sent[0].metrics.network_speed_available -or $sent[0].metrics.network_bytes_per_second -ne 1000000){throw 'Native progress omitted measured receive rate'}
         if ($case.exit -eq 0 -and $sent[$sent.Count-1].percent -ne 100) { throw 'Successful native completion did not publish 100 percent.' }
         if ($case.exit -ne 0 -and @($sent | Where-Object { $_.percent -eq 100 }).Count) { throw 'Failed native tool falsely reported completion.' }
     } $case
@@ -700,6 +702,62 @@ $count++
 }
 $count+=5
 
+
+
+# Network statistics use generated counter snapshots; no benchmark traffic is sent.
+& {
+    $hz=[Diagnostics.Stopwatch]::Frequency
+    $previous=@{ticks=0L;adapters=@{a=100L;b=500L}}
+    $current=@{ticks=2L*$hz;adapters=@{a=2000100L;b=4000500L;new=999999999L}}
+    $delta=Get-DeploymentNetworkDelta $previous $current
+    if($delta.rate -ne 3000000 -or $delta.bytes -ne 6000000){throw 'Network rate was not measured from matching adapter byte counters'}
+    $reset=@{ticks=3L*$hz;adapters=@{a=0L}}
+    if($null -ne (Get-DeploymentNetworkDelta $current $reset)){throw 'Counter reset became a negative or fabricated rate'}
+    $same=@{ticks=4L*$hz;adapters=@{a=0L}}
+    if((Get-DeploymentNetworkDelta $reset $same).rate -ne 0){throw 'Measured zero traffic was treated as missing'}
+    if($null -ne (Get-DeploymentNetworkDelta $same $same)){throw 'Zero sample duration yielded a rate'}
+    $tracker=@{previous=$previous;bytes=0L;seconds=0.0}
+    function Get-DeploymentNetworkSample {return $current}
+    $metrics=Get-DeploymentNetworkMetrics $tracker -Finished
+    if(-not $metrics.network_speed_available -or $metrics.network_average_bytes_per_second -ne 3000000){throw 'Network phase average was not based on sampled bytes and time'}
+    function Get-DeploymentNetworkSample {throw 'fixture counter unavailable'}
+    if((Get-DeploymentNetworkMetrics $tracker).network_speed_available){throw 'Unavailable counter became a false speed'}
+}
+$count+=6
+
+# SetupComplete is modified only inside a generated private fixture, never on this Windows installation.
+& {
+    $fixture=Join-Path ([IO.Path]::GetTempPath()) ('pcdeploy-setuphook-test-'+[guid]::NewGuid().ToString('N'))
+    $null=[IO.Directory]::CreateDirectory($fixture)
+    try {
+        $id=[guid]::NewGuid().ToString()
+        $startup='cmd.exe /d /c powershell.exe -NoProfile -File "%SystemRoot%\Setup\Scripts\PCDeploy-'+$id+'\Bootstrap.ps1"'
+        foreach($case in @('new','existing','bom','utf16')){
+            $root=Join-Path $fixture $case
+            $scripts=Join-Path $root 'Setup\Scripts'
+            $null=[IO.Directory]::CreateDirectory($scripts)
+            $path=Join-Path $scripts 'SetupComplete.cmd'
+            $original=[Text.Encoding]::ASCII.GetBytes((@('@echo off','rem Existing OEM commands','exit /b 0') -join [Environment]::NewLine))
+            if($case -eq 'existing'){[IO.File]::WriteAllBytes($path,$original)}
+            if($case -eq 'bom'){[IO.File]::WriteAllBytes($path,[byte[]]@(239,187,191))}
+            if($case -eq 'utf16'){[IO.File]::WriteAllText($path,'existing UTF16',[Text.Encoding]::Unicode);$original=[IO.File]::ReadAllBytes($path)}
+            Add-CompletionSetupHook $root $id $startup
+            $actual=[IO.File]::ReadAllBytes($path)
+            if($case -eq 'utf16'){
+                if([Convert]::ToBase64String($actual) -cne [Convert]::ToBase64String($original)){throw 'Unsupported existing script encoding was overwritten'}
+            }else{
+                $text=[Text.Encoding]::ASCII.GetString($actual)
+                if(-not $text.Contains($startup)){throw 'SYSTEM completion bootstrap hook missing'}
+                if($case -eq 'existing' -and -not $text.EndsWith([Text.Encoding]::ASCII.GetString($original))){throw 'Existing SetupComplete commands changed'}
+            }
+        }
+    } finally {
+        $safe=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')+'\'
+        if(-not [IO.Path]::GetFullPath($fixture).StartsWith($safe,[StringComparison]::OrdinalIgnoreCase)){throw 'Unsafe fixture cleanup path'}
+        [IO.Directory]::Delete($fixture,$true)
+    }
+}
+$count+=4
 
 # Real background copy and measured metrics, using only generated local fixture files.
 & {

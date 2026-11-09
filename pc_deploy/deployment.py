@@ -386,32 +386,45 @@ def finalizer_command(config):
     names = ['Finalize.ps1', 'DeviceInfo.ps1']
     if config.get('domain_join'):
         names.append('DomainJoin.ps1')
-    # One compressed bundle shares repeated script text and avoids nested base64 expansion.
+    # Keep file JSON inside the compressed bootstrap so repeated script text shares one compression pass.
     files = {name: (Path(__file__).parent / 'agent' / name).read_text(encoding='utf-8-sig') for name in names}
     files['config.json'] = canonical(config)
-    packed = base64.b64encode(gzip.compress(canonical(files).encode())).decode()
-    # Only constant file names and base64-encoded JSON enter PowerShell.
+    files_json = canonical(files)
+    # Canonical JSON is one physical line inside a literal here-string; values never become PowerShell syntax.
     bootstrap = f"""$ErrorActionPreference='Stop'
 $task='PCDeploy-{config['job_id']}'
 $p=Join-Path $env:ProgramData ('PCDeploy\\'+$task.Substring(9))
 $null=[IO.Directory]::CreateDirectory($p)
 & icacls.exe $p /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
 if($LASTEXITCODE -ne 0){{throw 'Cannot protect finalizer directory'}}
-$deploymentFiles='{packed}'
-$m=[IO.MemoryStream]::new([Convert]::FromBase64String($deploymentFiles))
-$z=[IO.Compression.GZipStream]::new($m,[IO.Compression.CompressionMode]::Decompress)
-$r=[IO.StreamReader]::new($z)
-try{{$files=$r.ReadToEnd()|ConvertFrom-Json}}finally{{$r.Dispose()}}
+$deploymentFilesJson=@'
+{files_json}
+'@
+$files=$deploymentFilesJson|ConvertFrom-Json
+function Trace-Bootstrap($message){{[IO.File]::WriteAllText((Join-Path $p 'bootstrap.log'),[string]$message)}}
+try{{
+Trace-Bootstrap 'Registering SYSTEM task'
 foreach($file in $files.PSObject.Properties){{
 [IO.File]::WriteAllText((Join-Path $p $file.Name),[string]$file.Value,[Text.UTF8Encoding]::new($false))
 }}
 $a=New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -ExecutionPolicy Bypass -File "'+$p+'\\Finalize.ps1"')
-$t=New-ScheduledTaskTrigger -AtStartup
-Register-ScheduledTask $task -Action $a -Trigger $t -User 'SYSTEM' -RunLevel Highest -Force | Out-Null
+$t=@((New-ScheduledTaskTrigger -AtStartup),(New-ScheduledTaskTrigger -AtLogOn))
+$s=New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Days 4)
+Register-ScheduledTask $task -Action $a -Trigger $t -Settings $s -User 'SYSTEM' -RunLevel Highest -Force | Out-Null
 Start-ScheduledTask $task
+Trace-Bootstrap 'SYSTEM task started'
+}}catch{{
+Trace-Bootstrap $_.Exception.Message
+throw
+}}
 """
-    command = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + base64.b64encode(bootstrap.encode('utf-16le')).decode()
-    if len(command) > 30000:
+    # Compress the bootstrap once: UTF-16/base64 expansion must
+    # not exceed Windows' command-line limit when a full CA certificate is included.
+    packed_bootstrap = base64.b64encode(gzip.compress(bootstrap.encode())).decode()
+    launcher = "$deploymentBootstrap='" + packed_bootstrap + """';$r=[IO.StreamReader]::new([IO.Compression.GZipStream]::new([IO.MemoryStream]::new([Convert]::FromBase64String($deploymentBootstrap)),[IO.Compression.CompressionMode]::Decompress));try{&([ScriptBlock]::Create($r.ReadToEnd()))}finally{$r.Dispose()}"""
+    command = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + base64.b64encode(launcher.encode('utf-16le')).decode()
+    # CreateProcessW allows 32767 characters; reserve over 1200 for path expansion and wrappers.
+    if len(command) > 31500:
         raise Invalid('安装回报配置过大，不能安全写入应答文件')
     return command
 

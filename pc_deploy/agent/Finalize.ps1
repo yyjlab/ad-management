@@ -1,4 +1,19 @@
 $ErrorActionPreference = 'Stop'
+$hardware=''
+function Save-FinalizerState {
+    param([string]$Phase,[string]$Detail='')
+    try {
+        if($cfg.token){$Detail=$Detail.Replace([string]$cfg.token,'[REDACTED]')}
+        if($Detail.Length -gt 1600){$Detail=$Detail.Substring(0,1600)}
+        $body=@{phase=$Phase;hardware_uuid=$hardware;detail=$Detail;updated=[DateTime]::UtcNow.ToString('o')}|ConvertTo-Json -Compress
+        [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'finalize-state.json'),$body,[Text.UTF8Encoding]::new($false))
+        if($hardware -and $hardware -ceq $cfg.hardware_uuid){
+            Invoke-RestMethod -UseBasicParsing -Method Post -Uri ($cfg.server_url+'/api/agent/jobs/'+$cfg.job_id+'/post-install/status') -Headers @{Authorization=('Bearer '+$cfg.token)} -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($body)) -TimeoutSec 3|Out-Null
+        }
+    } catch { }
+}
+Save-FinalizerState 'starting'
+try {
 $cfg = Get-Content -LiteralPath "$PSScriptRoot\config.json" -Raw -Encoding UTF8 | ConvertFrom-Json
 $server = [uri]$cfg.server_url
 if (-not $server.IsAbsoluteUri -or $server.Scheme -notin @('http', 'https') -or
@@ -19,18 +34,25 @@ if ($cfg.domain_join) {
     Assert-JoinTransport $cfg
 }
 . "$PSScriptRoot\DeviceInfo.ps1"
+} catch { Save-FinalizerState 'initialization_failed' $_.Exception.Message; throw }
 $deadline = [DateTime]::UtcNow.AddHours(2)
 if ($cfg.domain_join.mode -eq 'manual') {
     $deadline = ([DateTime]'1970-01-01T00:00:00Z').ToUniversalTime().AddSeconds([double]$cfg.expires_at)
 }
+Save-FinalizerState 'started'
+$reportedStartup=$false
+$workingStarted=$false
+$hardware=''
 while ([DateTime]::UtcNow -lt $deadline) {
     try {
+        $product = Get-CimInstance Win32_ComputerSystemProduct
+        $hardware = ([guid]$product.UUID).ToString().ToLowerInvariant()
+        if ($hardware -cne $cfg.hardware_uuid) { throw 'Machine identity mismatch.' }
+        if(-not $reportedStartup){Save-FinalizerState 'started';$reportedStartup=$true}
         $setup = Get-ItemProperty 'HKLM:\SYSTEM\Setup'
         $state = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State').ImageState
         if ($state -eq 'IMAGE_STATE_COMPLETE' -and $setup.SystemSetupInProgress -eq 0 -and $setup.OOBEInProgress -eq 0) {
-            $product = Get-CimInstance Win32_ComputerSystemProduct
-            $hardware = ([guid]$product.UUID).ToString().ToLowerInvariant()
-            if ($hardware -cne $cfg.hardware_uuid) { throw 'Machine identity mismatch.' }
+            if(-not $workingStarted){Save-FinalizerState 'working';$workingStarted=$true}
             $build = [int](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').CurrentBuildNumber
             $display = @{}
             try {
@@ -63,10 +85,16 @@ while ([DateTime]::UtcNow -lt $deadline) {
             # Remove only this task's one-time token, not its diagnostic script or logs.
             Remove-Item -LiteralPath "$PSScriptRoot\config.json"
             exit 0
+        } else {
+            Save-FinalizerState 'waiting_setup' ('ImageState='+$state+'; SystemSetupInProgress='+$setup.SystemSetupInProgress+'; OOBEInProgress='+$setup.OOBEInProgress)
         }
-    } catch { }
+    } catch {
+        $detail=$_.Exception.Message
+        Save-FinalizerState 'waiting_retry' $detail
+    }
     Start-Sleep -Seconds 20
 }
+Save-FinalizerState 'timed_out' 'Post-install checks timed out; see finalize-state.json and domain-join-state.json.'
 if ($cfg.domain_join) {
     try {
         $last = try {
