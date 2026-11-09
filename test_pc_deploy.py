@@ -176,6 +176,127 @@ class PlatformTests(unittest.TestCase):
         return inv, reg, job, token, started.json
 
 
+    def test_asset_registration_saves_pe_snapshot_without_install_or_asset_connection(self):
+        inv = machine()
+        inv['system_info'] = dict(cpus=[dict(name='Fixture CPU', cores=4, threads=8)],
+                                  memory_modules=[dict(capacity_bytes=8*1024**3, speed_mhz=3200)],
+                                  gpus=[dict(name='Fixture GPU')], computer_name='MINWINPC',
+                                  domain='must-not-copy', networks=[dict(name='Adapter', mac='02:11:22:33:44:55')])
+        inv['disks'].append(dict(number=9, serial='USB-001', unique_id='usb', model='USB boot media',
+                                 size_bytes=128*1024**3, bus='USB', read_only=False, offline=False))
+        self.register(inv)
+        device = self.client.get('/pc-deploy/api/dashboard').json['devices'][0]
+        snapshot = device['asset_inventory']
+        self.assertEqual(snapshot['cpus'][0]['name'], 'Fixture CPU')
+        self.assertEqual(len(snapshot['disks']), 1)
+        self.assertNotIn('domain', snapshot)
+        self.assertNotIn('computer_name', snapshot)
+        self.assertNotIn('macs', snapshot)
+        route = '/pc-deploy/api/asset-registrations/' + device['id']
+        payload = dict(asset_tag='001234567890', version=0, inventory_revision=device['asset_inventory_revision'],
+                       company='forged-company', location='forged-location', assigned_to='administrator',
+                       sync_state='synced', inventory={'cpu': 'forged'})
+        saved = self.post(route, payload)
+        self.assertEqual(saved.status_code, 200, saved.json)
+        record = saved.json['registration']
+        self.assertEqual(record['asset_tag'], '001234567890')
+        self.assertEqual(record['company'], '微丰启')
+        self.assertEqual(record['location'], '公司')
+        self.assertIsNone(record['assigned_to'])
+        self.assertEqual(record['sync_state'], 'not_connected')
+        self.assertEqual(record['inventory'], snapshot)
+        self.assertEqual(record['saved_by'], 'test-super-admin')
+        dashboard = self.client.get('/pc-deploy/api/dashboard').json
+        self.assertEqual(dashboard['asset_registrations'], [record])
+        self.assertEqual(dashboard['jobs'], [])
+        self.assertFalse(dashboard['settings']['enabled'])
+        with self.store.connect() as c:
+            self.assertEqual(c.execute('SELECT consumed FROM devices').fetchone()[0], 0)
+        self.assertIn('未发送到 asset', dashboard['events'][0]['message'])
+
+    def test_asset_registration_requires_admin_csrf_and_valid_asset_number(self):
+        inv, _ = self.register()
+        device = self.client.get('/pc-deploy/api/dashboard').json['devices'][0]
+        route = '/pc-deploy/api/asset-registrations/' + inv['hardware_uuid']
+        payload = dict(asset_tag='202611090001', version=0, inventory_revision=device['asset_inventory_revision'])
+        self.assertEqual(self.client.post(route, json=payload).status_code, 403)
+        with self.client.session_transaction() as session_data:
+            session_data['admin_role'] = 'viewer'
+        self.assertEqual(self.post(route, payload).status_code, 403)
+        with self.client.session_transaction() as session_data:
+            session_data['admin_role'] = 'super_admin'
+        for tag in ('', '123', 'x'*12, '１'*12, 123456789012):
+            self.assertEqual(self.post(route, dict(payload, asset_tag=tag)).status_code, 400, str(tag))
+        for version in (True, -1, '0'):
+            self.assertEqual(self.post(route, dict(payload, version=version)).status_code, 400)
+        self.assertEqual(self.post(route, dict(payload, inventory_revision='stale')).status_code, 400)
+        self.assertEqual(self.post('/pc-deploy/api/asset-registrations/missing', payload).status_code, 400)
+        self.assertEqual(self.client.get('/pc-deploy/api/dashboard').json['asset_registrations'], [])
+
+    def test_asset_registration_uses_asset_number_not_sn_for_local_duplicates(self):
+        first, _ = self.register(machine(serial='SAME-SN'))
+        second, _ = self.register(machine(serial='SAME-SN'))
+        devices = {d['id']: d for d in self.client.get('/pc-deploy/api/dashboard').json['devices']}
+        def save(device, tag):
+            return self.post('/pc-deploy/api/asset-registrations/' + device,
+                dict(asset_tag=tag, version=0, inventory_revision=devices[device]['asset_inventory_revision']))
+        self.assertEqual(save(first['hardware_uuid'], '202611090001').status_code, 200)
+        duplicate = save(second['hardware_uuid'], '202611090001')
+        self.assertEqual(duplicate.status_code, 400)
+        self.assertIn('资产编号', duplicate.json['error'])
+        self.assertEqual(save(second['hardware_uuid'], '202611090002').status_code, 200)
+
+    def test_asset_registration_rejects_stale_edits_and_changed_pe_configuration(self):
+        inv, registered = self.register()
+        device = self.client.get('/pc-deploy/api/dashboard').json['devices'][0]
+        route = '/pc-deploy/api/asset-registrations/' + device['id']
+        payload = dict(asset_tag='202611090001', version=0, inventory_revision=device['asset_inventory_revision'])
+        self.assertEqual(self.post(route, payload).status_code, 200)
+        self.assertEqual(self.post(route, dict(payload, asset_tag='202611090002')).status_code, 400)
+        changed = copy.deepcopy(inv)
+        changed['ram_bytes'] = 32*1024**3
+        self.assertEqual(self.post('/pc-deploy/api/agent/poll', changed, registered['token']).status_code, 200)
+        stale = self.post(route, dict(payload, version=1))
+        self.assertEqual(stale.status_code, 400)
+        self.assertIn('PE 配置已更新', stale.json['error'])
+        dashboard = self.client.get('/pc-deploy/api/dashboard').json
+        self.assertEqual(dashboard['asset_registrations'][0]['inventory']['ram_bytes'], 16*1024**3)
+        payload.update(version=1, inventory_revision=dashboard['devices'][0]['asset_inventory_revision'])
+        self.assertEqual(self.post(route, payload).json['registration']['version'], 2)
+        self.assertEqual(self.client.get('/pc-deploy/api/dashboard').json['asset_registrations'][0]['inventory']['ram_bytes'], 32*1024**3)
+
+    def test_asset_registration_keeps_offline_draft_across_pe_reentry_and_restart(self):
+        inv, _ = self.register()
+        device = self.client.get('/pc-deploy/api/dashboard').json['devices'][0]
+        with self.store.connect(write=True) as c:
+            c.execute('UPDATE devices SET last_seen=0')
+        route = '/pc-deploy/api/asset-registrations/' + device['id']
+        saved = self.post(route, dict(asset_tag='202611090001', version=0,
+                         inventory_revision=device['asset_inventory_revision']))
+        self.assertEqual(saved.status_code, 200)
+        reentry = copy.deepcopy(inv)
+        reentry['boot_id'] = str(uuid.uuid4())
+        self.register(reentry)
+        from pc_deploy.storage import Store
+        reopened = Store(self.directory.name)
+        with reopened.connect() as c:
+            record = json.loads(c.execute('SELECT data FROM asset_registrations').fetchone()[0])
+        self.assertEqual(record['asset_tag'], '202611090001')
+        self.assertEqual(record['version'], 1)
+        self.assertEqual(self.client.get('/pc-deploy/api/dashboard').json['asset_registrations'], [record])
+
+    def test_asset_registration_does_not_promote_windows_or_domain_telemetry(self):
+        inv, _ = self.register()
+        with self.store.connect(write=True) as c:
+            record = json.loads(c.execute('SELECT data FROM devices').fetchone()[0])
+            record['system_info'] = dict(source='windows', cpus=[dict(name='Windows CPU')],
+                                         gpus=[dict(name='Windows GPU')], part_of_domain=True, domain='wfq.com')
+            c.execute('UPDATE devices SET data=?', (canonical(record),))
+        snapshot = self.client.get('/pc-deploy/api/dashboard').json['devices'][0]['asset_inventory']
+        self.assertNotIn('cpus', snapshot)
+        self.assertNotIn('gpus', snapshot)
+        self.assertNotIn('domain', snapshot)
+
     def test_manual_domain_join_waits_for_admin_and_completes_after_release(self):
         inv, _, job, token, authorization = self.join_fixtures(manual=True)
         route = f'/pc-deploy/api/agent/jobs/{job}'

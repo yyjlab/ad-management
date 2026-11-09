@@ -207,6 +207,7 @@
                 <button class="pc-deploy-subitem" data-deploy-view="sources" onclick="openPcDeploy('sources')">安装源</button>
                 <button class="pc-deploy-subitem" data-deploy-view="profiles" onclick="openPcDeploy('profiles')">装机方案</button>
                 <button class="pc-deploy-subitem" data-deploy-view="jobs" onclick="openPcDeploy('jobs')">任务记录</button>
+                <button class="pc-deploy-subitem" data-deploy-view="assets" onclick="openPcDeploy('assets')">资产登记</button>
                 <button class="pc-deploy-subitem" data-deploy-view="settings" onclick="openPcDeploy('settings')">启动与设置</button>
             </div>
         </div>
@@ -2379,7 +2380,7 @@ async function restoreBackup() {
 }
 
 // 电脑装机接入：所有既有菜单仍使用原来的 switchPage/openDashboard。
-const pcDeployViews = ['devices', 'sources', 'profiles', 'jobs', 'settings'];
+const pcDeployViews = ['devices', 'sources', 'profiles', 'jobs', 'assets', 'settings'];
 let pcDeployView = 'devices';
 
 function applyPcDeployAccess() {

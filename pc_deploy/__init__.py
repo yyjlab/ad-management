@@ -347,6 +347,53 @@ def register_pc_deploy(host_app, current_user, touch_session):
                     started_at=timing.get('started_at'),
                     finished_at=finished)
 
+    def asset_inventory(inv):
+        # PE-only technical snapshot. Never include credentials, network identity or Windows/join claims.
+        result = {key: inv[key] for key in
+                  ('model', 'manufacturer', 'system_family', 'product_name', 'product_version',
+                   'oem_model', 'serial', 'ram_bytes') if key in inv}
+        report = inv.get('system_info', {})
+        if report.get('source') == 'pe':
+            for key in ('cpus', 'memory_modules', 'gpus'):
+                if key in report:
+                    result[key] = report[key]
+        result['disks'] = [{key: disk[key] for key in ('model', 'size_bytes', 'bus') if key in disk}
+                           for disk in inv.get('disks', [])
+                           if disk.get('bus') in ('NVMe', 'SATA', 'SAS', 'SCSI', 'ATA', 'RAID', 'MMC')]
+        return result
+
+    @app.post('/api/asset-registrations/<identity>')
+    @admin
+    def save_asset_registration(identity):
+        payload = body()
+        tag = text(payload.get('asset_tag'), '资产编号', 12, 12)
+        if not re.fullmatch(r'[0-9]{12}', tag):
+            raise Invalid('资产编号必须为12位数字，与 asset 保持一致')
+        version = integer(payload.get('version'), '登记版本', 0, 2**31 - 1)
+        with store.connect(write=True) as c:
+            device = c.execute('SELECT data FROM devices WHERE id=?', (identity,)).fetchone()
+            if not device:
+                raise Invalid('设备不存在，请刷新设备列表')
+            snapshot = asset_inventory(json.loads(device['data']))
+            if payload.get('inventory_revision') != digest(snapshot):
+                raise Invalid('PE 配置已更新，请关闭窗口、刷新后重新核对保存')
+            previous = c.execute('SELECT version FROM asset_registrations WHERE device_id=?', (identity,)).fetchone()
+            if version != (previous['version'] if previous else 0):
+                raise Invalid('待登记记录已被其他页面修改，请刷新后重试')
+            if c.execute('SELECT 1 FROM asset_registrations WHERE asset_tag=? AND device_id<>?',
+                         (tag, identity)).fetchone():
+                raise Invalid('此资产编号已用于另一台设备的待登记记录，请核对资产标签')
+            now = time.time()
+            record = dict(device_id=identity, asset_tag=tag, version=version + 1,
+                          company='微丰启', location='公司', assigned_to=None,
+                          sync_state='not_connected', inventory=snapshot, inventory_revision=digest(snapshot),
+                          saved_by=g.pc_deploy_operator, updated=now)
+            c.execute('INSERT INTO asset_registrations VALUES(?,?,?,?,?) ON CONFLICT(device_id) DO UPDATE SET '
+                      'asset_tag=excluded.asset_tag,version=excluded.version,data=excluded.data,updated=excluded.updated',
+                      (identity, tag, version + 1, canonical(record), now))
+            event(c, 'asset_registration', '保存资产待登记记录：' + tag + '；未发送到 asset')
+        return jsonify(ok=True, registration=record)
+
     @app.get('/api/dashboard')
     @admin
     def dashboard():
@@ -357,7 +404,11 @@ def register_pc_deploy(host_app, current_user, touch_session):
                 item = json.loads(row['data'])
                 item.update(id=row['id'], last_seen=row['last_seen'], online=now-row['last_seen'] < 45,
                             boot_code=row['boot_code'], consumed=bool(row['consumed']))
+                item['asset_inventory'] = asset_inventory(item)
+                item['asset_inventory_revision'] = digest(item['asset_inventory'])
                 devices.append(item)
+            asset_registrations = [json.loads(r['data']) for r in c.execute(
+                'SELECT data FROM asset_registrations ORDER BY updated DESC')]
             sources = [dict(json.loads(r['data']), has_password=True) for r in c.execute('SELECT data FROM sources')]
             profiles = [dict(json.loads(r['data']), has_password=True) for r in c.execute('SELECT data FROM profiles')]
             job_rows = list(c.execute('SELECT * FROM jobs ORDER BY created DESC LIMIT 200'))
@@ -375,7 +426,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
                 'SELECT id,job_id,kind,message,created FROM events WHERE job_id IS NULL ORDER BY id DESC LIMIT 100')]
         boot = store.root / 'boot'
         files = {n: (boot / n).is_file() for n in ('wimboot', 'boot.wim', 'BCD', 'boot.sdi')}
-        return jsonify(devices=devices, sources=sources, profiles=profiles, jobs=jobs, settings=settings,
+        return jsonify(devices=devices, asset_registrations=asset_registrations, sources=sources, profiles=profiles, jobs=jobs, settings=settings,
                        events=logs, boot_files=files, server_time=now, enrollments=enrollments, media=media)
 
     @app.get('/api/jobs/<identity>/events')

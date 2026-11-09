@@ -4,7 +4,7 @@ const h = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<
 const size = bytes => `${(Number(bytes) / 1024 ** 3).toFixed(1)} GiB`;
 const date = seconds => new Date(seconds * 1000).toLocaleString('zh-CN', {hour12:false});
 const activeStates = ['queued','preflight','installing','awaiting_report'];
-const labels = {devices:['设备工作台','选择设备和目标系统硬盘，确认后自动完成 Windows 安装。'],sources:['安装源','原版安装文件或封装 WIM 通过专用只读 SMB 账号访问，快速读取镜像版本和索引，不扫描整份镜像。'],profiles:['装机方案','选择原版安装或封装 WIM 还原；封装镜像沿用其账号、软件和系统设置。'],jobs:['任务记录','安装成功以安装后系统回报为准；断线任务不会自动重装。'],settings:['启动与设置','现有 Ventoy 可作为备用引导；纯网络启动使用 iPXE / wimboot。']};
+const labels = {assets:['资产登记','PE 采集配置后填写资产编号，保存待登记记录；无需等待装机完成。'],devices:['设备工作台','选择设备和目标系统硬盘，确认后自动完成 Windows 安装。'],sources:['安装源','原版安装文件或封装 WIM 通过专用只读 SMB 账号访问，快速读取镜像版本和索引，不扫描整份镜像。'],profiles:['装机方案','选择原版安装或封装 WIM 还原；封装镜像沿用其账号、软件和系统设置。'],jobs:['任务记录','安装成功以安装后系统回报为准；断线任务不会自动重装。'],settings:['启动与设置','现有 Ventoy 可作为备用引导；纯网络启动使用 iPXE / wimboot。']};
 const API_BASE = '/pc-deploy';
 const embedParams = new URLSearchParams(location.search);
 const embedded = embedParams.get('embedded') === '1' && window.parent !== window;
@@ -14,6 +14,7 @@ let joinSelection = new Set();
 let chosen = new Set(), disks = new Map(), partitions = new Map(), employeeIds = new Map(), profileId = '', search = '', filter = 'online', previewId = null;
 let toastTimer, settingsDirty = false, jobLog = null, deviceDialog = null, serverTime = 0, serverSample = 0;
 let lastWorkspacePoll = Date.now();
+let assetSearch = '';
 const jobSnapshots = new Map();
 function latestJob(job, sampledAt) {
   const previous = jobSnapshots.get(job.id);
@@ -134,7 +135,7 @@ function render() {
   $('#page-title').textContent = labels[view][0]; $('#page-subtitle').textContent = labels[view][1];
   $('#breadcrumb').textContent = '部署管理 / ' + labels[view][0];
   $('#page-actions').innerHTML = view === 'sources' ? '<a class="button-link" href="/pc-deploy/api/tools/inspect-source">下载检测脚本 ↓</a><button class="primary" data-action="new-source">＋ 添加安装源</button>' : view === 'profiles' ? '<button class="primary" data-action="new-profile">＋ 新建方案</button>' : '';
-  ({devices:renderDevices,sources:renderSources,profiles:renderProfiles,jobs:renderJobs,settings:renderSettings})[view]();
+  ({devices:renderDevices,sources:renderSources,profiles:renderProfiles,jobs:renderJobs,assets:renderAssets,settings:renderSettings})[view]();
   if (embedded) window.parent.postMessage({type:'pc-deploy:view', view}, location.origin);
 }
 function filteredDevices() { return data.devices.filter(d => (!search || [d.serial,deviceLabel(d),...d.macs].join(' ').toLowerCase().includes(search.toLowerCase())) && (filter === 'all' || (filter === 'online' ? d.online : filter === 'ready' ? selectable(d) : !d.online))); }
@@ -164,13 +165,71 @@ function renderDeviceRows() {
   const list = filteredDevices();
   $('#device-rows').innerHTML = list.map(d=>{
     const job = currentJob(d), eligible = selectable(d);
-    return `<tr class="${chosen.has(d.id)?'selected':''}"><td class="check-cell"><input type="checkbox" data-device="${h(d.id)}" aria-label="选择 ${h(d.serial)}" ${chosen.has(d.id)?'checked':''} ${!eligible?'disabled':''}></td><td class="device-name"><button class="inline-link cell-title" data-action="device-detail" data-id="${h(d.id)}">${h(deviceLabel(d))}</button><span class="cell-sub mono">${h(d.serial)}</span>${modelHint(d)}</td><td><input class="filter" data-employee="${h(d.id)}" aria-label="${h(d.serial)} 的员工工号" placeholder="如 WFQ101755" maxlength="14" value="${h(employeeIds.get(d.id)||'')}" ${!eligible?'disabled':''}><span class="cell-sub">${selectedProfile()?.domain_join?'用于加域电脑名；重名追加 A–Z':'可提前填写；加域方案使用'}</span></td><td><span class="badge ${d.firmware==='UEFI'?'good':'warn'}">${h(d.firmware)} · ${h(d.architecture)}</span><span class="cell-sub">TPM 2.0 ${d.tpm2?'✓':'—'} / Secure Boot ${d.secure_boot?'✓':'—'}</span></td><td><select class="disk-select" aria-label="${h(d.serial)} 的目标硬盘" data-disk="${h(d.id)}" ${!eligible?'disabled':''}><option value="">请选择目标硬盘，不自动猜测</option>${d.disks.map(k=>`<option value="${h(k.key)}" ${disks.get(d.id)===k.key?'selected':''} ${!k.eligible?'disabled':''}>磁盘 ${k.number} · ${h(size(k.size_bytes))} · ${h(k.model || k.serial || k.bus)}${!k.eligible?'（不可选）':''}</option>`).join('')}</select>${partitionChoice(d)}<span class="cell-sub">${preservesPartitions()?'同盘 EFI 引导文件会更新':d.disks.filter(k=>k.eligible).length>1?'多硬盘：只清除手动选中的这一块':d.disks.every(k=>!k.eligible)?'没有符合保护规则的内置硬盘':'所选物理盘上的全部分区会被清空'}</span></td><td>${job?jobBadge(job):`<span class="badge ${d.online?'good':'muted'}">${d.online?(d.consumed?'本次启动已执行':'等待确认'):'离线'}</span>`}</td><td><span class="mono">${h(d.boot_code)}</span><span class="cell-sub">${h(date(d.last_seen))}</span></td></tr>`;
+    return `<tr class="${chosen.has(d.id)?'selected':''}"><td class="check-cell"><input type="checkbox" data-device="${h(d.id)}" aria-label="选择 ${h(d.serial)}" ${chosen.has(d.id)?'checked':''} ${!eligible?'disabled':''}></td><td class="device-name"><button class="inline-link cell-title" data-action="device-detail" data-id="${h(d.id)}">${h(deviceLabel(d))}</button><span class="cell-sub mono">${h(d.serial)}</span>${modelHint(d)}<button class="inline-link cell-sub" data-action="asset-register" data-id="${h(d.id)}">登记资产</button></td><td><input class="filter" data-employee="${h(d.id)}" aria-label="${h(d.serial)} 的员工工号" placeholder="如 WFQ101755" maxlength="14" value="${h(employeeIds.get(d.id)||'')}" ${!eligible?'disabled':''}><span class="cell-sub">${selectedProfile()?.domain_join?'用于加域电脑名；重名追加 A–Z':'可提前填写；加域方案使用'}</span></td><td><span class="badge ${d.firmware==='UEFI'?'good':'warn'}">${h(d.firmware)} · ${h(d.architecture)}</span><span class="cell-sub">TPM 2.0 ${d.tpm2?'✓':'—'} / Secure Boot ${d.secure_boot?'✓':'—'}</span></td><td><select class="disk-select" aria-label="${h(d.serial)} 的目标硬盘" data-disk="${h(d.id)}" ${!eligible?'disabled':''}><option value="">请选择目标硬盘，不自动猜测</option>${d.disks.map(k=>`<option value="${h(k.key)}" ${disks.get(d.id)===k.key?'selected':''} ${!k.eligible?'disabled':''}>磁盘 ${k.number} · ${h(size(k.size_bytes))} · ${h(k.model || k.serial || k.bus)}${!k.eligible?'（不可选）':''}</option>`).join('')}</select>${partitionChoice(d)}<span class="cell-sub">${preservesPartitions()?'同盘 EFI 引导文件会更新':d.disks.filter(k=>k.eligible).length>1?'多硬盘：只清除手动选中的这一块':d.disks.every(k=>!k.eligible)?'没有符合保护规则的内置硬盘':'所选物理盘上的全部分区会被清空'}</span></td><td>${job?jobBadge(job):`<span class="badge ${d.online?'good':'muted'}">${d.online?(d.consumed?'本次启动已执行':'等待确认'):'离线'}</span>`}</td><td><span class="mono">${h(d.boot_code)}</span><span class="cell-sub">${h(date(d.last_seen))}</span></td></tr>`;
   }).join('');
   $('#device-empty').innerHTML = list.length ? '' : empty(data.devices.length?'没有匹配的设备':'等待设备进入 WinPE',data.devices.length?'':'连接网线后，还需从网络或 Ventoy 启动部署环境。');
   $('#select-all').checked = list.filter(selectable).length>0 && list.filter(selectable).every(d=>chosen.has(d.id));
   updateSelection();
 }
 function updateSelection() { const b = $('#preview-button'); if(b){ b.disabled = !chosen.size || !profileId; b.textContent = `创建安装批次${chosen.size ? ` (${chosen.size})` : ''}`; } }
+function assetRows() {
+  const saved=new Map((data.asset_registrations||[]).map(row=>[row.device_id,row]));
+  const rows=data.devices.map(device=>({device,saved:saved.get(device.id)}));
+  for(const record of saved.values())if(!data.devices.some(device=>device.id===record.device_id))rows.push({device:null,saved:record});
+  return rows;
+}
+function assetSpecs(info) {
+  const cpus=(info.cpus||[]).map(cpu=>cpu.name).filter(Boolean);
+  const memory=Number(info.ram_bytes)>0?size(info.ram_bytes):'未采集';
+  const disks=(info.disks||[]).map(disk=>[disk.model,size(disk.size_bytes),disk.bus].filter(Boolean).join(' · '));
+  const gpus=(info.gpus||[]).map(gpu=>gpu.name).filter(Boolean);
+  const graphics=gpus.map(name=>/microsoft.*basic|基本显示|标准.*vga|standard.*vga/i.test(name)?'基础显示驱动（具体显卡待确认）':name);
+  return {cpu:cpus.join(' / ')||'未采集',memory,storage:disks.join('；')||'未识别内置物理硬盘',graphics:graphics.join(' / ')||'未采集（PE 可能缺少显卡驱动）'};
+}
+function renderAssets() {
+  const editing=document.activeElement?.id==='asset-search';
+  const caret=editing?[document.activeElement.selectionStart,document.activeElement.selectionEnd]:null;
+  const rows=assetRows(), saved=rows.filter(row=>row.saved).length;
+  $('#page-content').innerHTML='<div class="asset-notice">第一步：保存装机平台内的待登记记录，尚未连接 asset，不会创建或修改正式资产。按资产编号登记，SN 仅附带记录；不需要等待 Windows 安装。</div>'+
+    '<div class="stats"><div class="stat"><span>已采集设备</span><strong>'+rows.length+'</strong></div><div class="stat"><span>待填资产编号</span><strong>'+(rows.length-saved)+'</strong></div><div class="stat"><span>已保存待同步</span><strong>'+saved+'</strong></div><div class="stat"><span>登记默认值</span><strong class="asset-default">微丰启 / 公司</strong><small>领用人留空</small></div></div>'+
+    '<div class="toolbar"><input id="asset-search" class="search" aria-label="搜索资产登记" placeholder="搜索资产编号、型号或 SN" value="'+h(assetSearch)+'"><span class="muted">资产编号使用 asset 的12位数字格式，支持扫码枪输入</span></div>'+
+    '<div class="table-wrap"><table class="asset-table"><thead><tr><th>资产编号 / 设备</th><th>CPU / 内存</th><th>物理硬盘 / 显卡</th><th>登记状态</th><th>操作</th></tr></thead><tbody id="asset-rows"></tbody></table><div id="asset-empty"></div></div>';
+  renderAssetRows();
+  if(editing){$('#asset-search').focus({preventScroll:true});$('#asset-search').setSelectionRange(...caret);}
+}
+function renderAssetRows() {
+  const query=assetSearch.trim().toLowerCase();
+  const rows=assetRows().filter(row=>{
+    const info=row.device?.asset_inventory||row.saved?.inventory||{};
+    return !query||[row.saved?.asset_tag,deviceLabel(info),info.serial].join(' ').toLowerCase().includes(query);
+  });
+  $('#asset-rows').innerHTML=rows.map(({device,saved})=>{
+    const info=device?.asset_inventory||saved?.inventory||{}, specs=assetSpecs(info);
+    const changed=saved&&device&&saved.inventory_revision!==device.asset_inventory_revision;
+    return '<tr><td><strong class="mono">'+h(saved?.asset_tag||'待填写资产编号')+'</strong><span class="cell-sub">'+h(deviceLabel(info))+'</span><span class="cell-sub mono">SN：'+h(info.serial||'未采集')+'</span></td>'+
+      '<td class="asset-spec"><strong>'+h(specs.cpu)+'</strong><span class="cell-sub">内存：'+h(specs.memory)+'</span></td>'+
+      '<td class="asset-spec"><span>'+h(specs.storage)+'</span><span class="cell-sub">显卡：'+h(specs.graphics)+'</span></td>'+
+      '<td><span class="badge '+(saved?'blue':'warn')+'">'+(saved?'已保存 · 未同步':'待填编号')+'</span>'+
+      (changed?'<span class="cell-sub warn-text">PE 配置已变化，请重新核对保存</span>':'')+
+      '<span class="cell-sub">'+(saved?'保存于 '+h(date(saved.updated)):'尚未保存待登记记录')+'</span><span class="cell-sub">'+(device?.online?'PE 在线':'离线配置仍可查看')+'</span></td>'+
+      '<td><button class="small" data-action="asset-register" data-id="'+h(device?.id||saved.device_id)+'" '+(!device?'disabled title="当前设备不在已加载列表中"':'')+'>'+(saved?'核对 / 编辑':'填写编号')+'</button></td></tr>';
+  }).join('');
+  $('#asset-empty').innerHTML=rows.length?'':empty(data.devices.length?'没有匹配记录':'等待电脑进入 PE','采集硬件配置后即可登记，无需安装 Windows。');
+}
+function editAssetRegistration(id) {
+  const device=data.devices.find(item=>item.id===id);if(!device)return;
+  const saved=(data.asset_registrations||[]).find(item=>item.device_id===id);
+  const info=device.asset_inventory||{}, specs=assetSpecs(info);
+  modal('资产待登记 · '+deviceLabel(info),'<form id="asset-registration-form" data-id="'+h(id)+'" data-version="'+h(saved?.version||0)+'" data-inventory-revision="'+h(device.asset_inventory_revision)+'">'+
+    '<p class="modal-help">仅保存待登记记录，尚未发送到 asset。资产编号用于后续查重，SN 不作为查重依据。</p>'+
+    field('资产编号','asset_tag','text',saved?.asset_tag||'','required pattern="[0-9]{12}" minlength="12" maxlength="12" inputmode="numeric" autocomplete="off" placeholder="输入或扫描12位资产编号"')+
+    '<p>公司：<strong>微丰启</strong>　位置：<strong>公司</strong>　领用人：<strong>留空</strong></p>'+
+    '<dl class="asset-details"><dt>型号</dt><dd>'+h(deviceLabel(info))+'</dd><dt>SN（附加记录）</dt><dd>'+h(info.serial||'未采集')+'</dd>'+
+    '<dt>CPU</dt><dd>'+h(specs.cpu)+'</dd><dt>内存</dt><dd>'+h(specs.memory)+'</dd><dt>物理硬盘</dt><dd>'+h(specs.storage)+'</dd><dt>显卡</dt><dd>'+h(specs.graphics)+'</dd></dl>'+
+    '<p class="modal-help">只保存当前 PE 已采集的信息，未识别的项目保留待确认；U 盘和分区容量不计入内置硬盘配置。</p>'+
+    '<div id="form-error" class="error" role="alert"></div><div class="form-actions"><button type="button" data-action="close">返回</button><button class="primary" type="submit">保存待登记</button></div></form>');
+  $('#asset-registration-form [name=asset_tag]').focus();
+}
 function renderSources() {
   $('#page-content').innerHTML = data.sources.length ? `<div class="record-grid">${data.sources.map(s=>`<article class="record"><div class="record-top"><h3>${h(s.name)}</h3><span class="badge blue">${s.family==='windows11'?'Windows 11':'Windows 10'}</span></div><p class="mono">${h(s.path)}${s.kind==='wim'?' / '+h(s.image_file):''}</p><span class="badge muted">${s.kind==='wim'?'封装 WIM 直接还原':'原版 Setup 安装'}</span><span class="badge muted">待装机客户端复核</span><dl><dt>镜像索引</dt><dd>${s.images.length} 个 x64 版本</dd><dt>读取账号</dt><dd>${h(s.smb_user)}</dd><dt>检测方式</dt><dd>快速检测 · 版本与索引</dd></dl><div class="form-actions"><button class="small" data-action="edit-source" data-id="${h(s.id)}">编辑安装源</button></div></article>`).join('')}</div>` : empty('尚未添加安装源','原版 ISO 解压目录和单个封装 WIM 均支持；运行检测脚本后导入清单。');
 }
@@ -694,6 +753,7 @@ document.addEventListener('click', async e=>{
       const p=data.profiles.find(p=>p.id===id);
       modal('删除装机方案','<form id="delete-profile-form" data-id="'+h(id)+'" data-revision="'+h(p.revision)+'"><p><strong>'+h(profileDisplayName(p))+'</strong></p><p>仅删除这个方案及其保存的凭据，历史任务、安装源和电脑上的文件保留。存在进行中或待统一加域任务时不能删除。</p><label class="check-label"><input name="confirmed" type="checkbox" required>确认删除此方案</label><div id="form-error" class="error" role="alert"></div><div class="form-actions"><button type="button" data-action="close">取消</button><button class="danger-button" type="submit">确认删除</button></div></form>');
     }
+    else if(a==='asset-register')editAssetRegistration(id);
     else if(a==='device-detail')deviceDetail(id);
     else if(a==='job-device-detail')jobDeviceDetail(id);
     else if(a==='review-job')reviewJob(id);
@@ -722,7 +782,7 @@ document.addEventListener('click', async e=>{
     else if(a==='cancel-job'||a==='reconcile-job')modal(a==='cancel-job'?'取消安装前任务':'人工结束异常记录',`<form id="job-action-form" data-id="${h(id)}" data-kind="${a}"><p>${a==='cancel-job'?'仅允许取消尚未启动安装或还原的任务。':'客户端长时间未回报。请先现场确认电脑已停止安装，再结束这条记录。结束后将不再接受此任务的自动成功回报；不会停止电脑或重新安装。'}</p>${a==='reconcile-job'&&data.jobs.find(j=>j.id===id)?.domain_join?'<label class="check-label"><input type="checkbox" name="end_domain_join" required>我确认结束此任务的自动改名、加域及安装完成回报，且已现场核对电脑状态</label>':''}${a==='reconcile-job'?field('输入 CHECKED','confirmation','text','','required pattern="CHECKED" autocomplete="off"'):''}<div id="form-error" class="error" role="alert"></div><div class="form-actions"><button type="button" data-action="close">返回</button><button class="primary" type="submit">确认</button></div></form>`);
   } catch(err){toast(err.message);}
 });
-document.addEventListener('input',e=>{if(e.target.closest('#settings-form,#enrollment-policy-form,#media-form'))settingsDirty=true;if(e.target.dataset.employee)employeeIds.set(e.target.dataset.employee,e.target.value.toUpperCase());if(e.target.closest('#profile-form')&&['join_domain','join_user','join_password'].includes(e.target.name))updateDomainJoinPassword();if(e.target.closest('#profile-form')&&e.target.name==='system_gib')updateProfileName();if(e.target.id==='search'){search=e.target.value;renderDeviceRows();}});
+document.addEventListener('input',e=>{if(e.target.id==='asset-search'){assetSearch=e.target.value;renderAssetRows();}if(e.target.closest('#settings-form,#enrollment-policy-form,#media-form'))settingsDirty=true;if(e.target.dataset.employee)employeeIds.set(e.target.dataset.employee,e.target.value.toUpperCase());if(e.target.closest('#profile-form')&&['join_domain','join_user','join_password'].includes(e.target.name))updateDomainJoinPassword();if(e.target.closest('#profile-form')&&e.target.name==='system_gib')updateProfileName();if(e.target.id==='search'){search=e.target.value;renderDeviceRows();}});
 document.addEventListener('change',async e=>{
   const el=e.target;
   if(el.name==='validity_mode'){
@@ -754,6 +814,11 @@ document.addEventListener('submit',async e=>{
       if(!f.confirmed)throw new Error('请确认删除此方案');
       await api('/api/profiles/'+encodeURIComponent(form.dataset.id),'DELETE',{confirmation:'DELETE',revision:form.dataset.revision});
       if(profileId===form.dataset.id){profileId='';partitions.clear();}
+    }
+    else if(form.id==='asset-registration-form'){
+      await api('/api/asset-registrations/'+encodeURIComponent(form.dataset.id),'POST',{
+        asset_tag:f.asset_tag,version:Number(form.dataset.version),inventory_revision:form.dataset.inventoryRevision});
+      $('#modal').close();toast('待登记记录已保存，尚未同步到 asset');await refresh();return;
     }
     else if(form.id==='profile-form'){
       updateProfileName();f.name=form.elements.name.value;

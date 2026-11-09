@@ -13,6 +13,7 @@ async function run() {
     page.on('pageerror',error=>errors.push(error.message));
     let role='super_admin',expired=false,saves=0,extensions=0,policyPayload=null,validityPayload=null,mediaPayload=null,enrollmentExpires=1793433600,fixture=null,profilePayload=null,previewPayload=null;
     const jobLogEvents={};let releasePayload=null,profileDeletePayload=null,jobLogError=false,jobLogGate=null,dashboardGate=null,jobReviewPayload=null;
+    let assetRegistrationPayload=null,assetRegistrationError=false;
     const settings={public_url:'http://ad-menu.test/pc-deploy',enabled:false,concurrency:2,ca_pem:'',http_allowed:true};
     const media={builders:[{id:'test-builder',name:'测试制作电脑',online:true,template_name:'WinPE',driver_name:'ASIX'}],builds:[]};
     const adHtml=fs.readFileSync(path.join(__dirname,'admin_manage.html'),'utf8');
@@ -120,6 +121,18 @@ async function run() {
         if(dashboardGate){const gate=dashboardGate;dashboardGate=null;await gate;}
         return route.fulfill({json:snapshot});
       }
+      if(/^\/pc-deploy\/api\/asset-registrations\/[^/]+$/.test(url.pathname)){
+        assert.equal(request.method(),'POST');
+        assert.equal(request.headers()['x-csrf-token'],'fixture-csrf');
+        assetRegistrationPayload=request.postDataJSON();
+        if(assetRegistrationError)return route.fulfill({status:400,json:{error:'资产编号冲突，请核对'}});
+        const id=decodeURIComponent(url.pathname.split('/').pop()),device=fixture.devices.find(d=>d.id===id);
+        const record={device_id:id,asset_tag:assetRegistrationPayload.asset_tag,version:assetRegistrationPayload.version+1,
+          company:'微丰启',location:'公司',assigned_to:null,sync_state:'not_connected',
+          inventory:device.asset_inventory,inventory_revision:device.asset_inventory_revision,updated:fixture.server_time,saved_by:'test-admin'};
+        fixture.asset_registrations=[record];
+        return route.fulfill({json:{ok:true,registration:record}});
+      }
       if(url.pathname==='/pc-deploy/api/settings'){
         assert.equal(request.headers()['x-csrf-token'],'fixture-csrf');
         const payload=request.postDataJSON();
@@ -140,7 +153,7 @@ async function run() {
     await page.locator('#pcDeployMenu').click();
     await page.locator('#pcDeploySubmenu').waitFor({state:'visible'});
     assert.equal(page.url(),'http://ad-menu.test/admin/manage');checks++;
-    assert.deepEqual(await page.locator('[data-deploy-view]').allTextContents(),['设备工作台','安装源','装机方案','任务记录','启动与设置']);checks++;
+    assert.deepEqual(await page.locator('[data-deploy-view]').allTextContents(),['设备工作台','安装源','装机方案','任务记录','资产登记','启动与设置']);checks++;
     const frame=page.frameLocator('#pcDeployFrame');
     await frame.locator('#workspace:not([hidden])').waitFor();
     assert.ok(await frame.locator('.sidebar').isHidden());checks++;
@@ -149,7 +162,7 @@ async function run() {
     const firstParent=await page.locator('#pcDeployMenu').boundingBox();
     const firstChild=await page.locator('[data-deploy-view=devices]').boundingBox();
     assert.ok(firstChild.x>firstParent.x);checks++;
-    for(const [view,title] of Object.entries({devices:'设备工作台',sources:'安装源',profiles:'装机方案',jobs:'任务记录',settings:'启动与设置'})){
+    for(const [view,title] of Object.entries({devices:'设备工作台',sources:'安装源',profiles:'装机方案',jobs:'任务记录',assets:'资产登记',settings:'启动与设置'})){
       await page.locator(`[data-deploy-view=${view}]`).click();
       await page.waitForFunction(t=>document.getElementById('pcDeployFrame').contentDocument?.getElementById('page-title')?.textContent===t,title);
       assert.equal(page.url(),'http://ad-menu.test/admin/manage');checks++;
@@ -1176,6 +1189,68 @@ async function run() {
     assert.equal(fixture.jobs.length,1);checks++;
     await page.locator('[data-view=devices]').click();
     assert.equal(await page.locator('#profile-choice').inputValue(),'');checks++;
+    // PE asset drafts do not wait for install, join, or online/selectable status.
+    fixture.devices[0].asset_inventory={model:'Fixture Laptop',serial:'OPTIONAL-SN',ram_bytes:16*1024**3,
+      cpus:[{name:'Fixture CPU <img src=x onerror=alert(1)>'}],memory_modules:[],
+      disks:[{model:'Fixture SSD',size_bytes:512*1024**3,bus:'NVMe'}],
+      gpus:[{name:'Microsoft Basic Display Adapter'}]};
+    fixture.devices[0].asset_inventory_revision='pe-inventory-1';
+    fixture.devices[0].online=false;fixture.devices[0].consumed=true;
+    fixture.asset_registrations=[];
+    await page.locator('#refresh').click();
+    await page.waitForFunction(()=>!busy&&data.devices[0].asset_inventory_revision==='pe-inventory-1');
+    await page.locator('[data-view=assets]').click();
+    assert.equal(await page.locator('#page-title').textContent(),'资产登记');checks++;
+    assert.ok((await page.locator('.asset-notice').textContent()).includes('尚未连接 asset'));checks++;
+    assert.ok((await page.locator('#asset-rows').textContent()).includes('16.0 GiB'));checks++;
+    assert.ok((await page.locator('#asset-rows').textContent()).includes('512.0 GiB'));checks++;
+    assert.ok((await page.locator('#asset-rows').textContent()).includes('具体显卡待确认'));checks++;
+    assert.equal(await page.locator('#asset-rows img').count(),0);checks++;
+    await page.locator('[data-action=asset-register][data-id=laptop-1]').click();
+    assert.ok((await page.locator('#asset-registration-form').textContent()).includes('微丰启'));checks++;
+    assert.ok((await page.locator('#asset-registration-form').textContent()).includes('位置：公司'));checks++;
+    assert.ok((await page.locator('#asset-registration-form').textContent()).includes('领用人：留空'));checks++;
+    const assetTag=page.locator('#asset-registration-form [name=asset_tag]');
+    await assetTag.fill('123');
+    assert.equal(await assetTag.evaluate(el=>el.checkValidity()),false);checks++;
+    await assetTag.fill('001234567890');
+    assetRegistrationError=true;
+    await page.locator('#asset-registration-form [type=submit]').click();
+    await page.locator('#form-error').getByText('资产编号冲突，请核对').waitFor();
+    assert.equal(await assetTag.inputValue(),'001234567890');checks++;
+    assetRegistrationError=false;
+    await page.locator('#asset-registration-form [type=submit]').click();
+    await page.locator('#modal').waitFor({state:'hidden'});
+    await page.waitForFunction(()=>!busy&&data.asset_registrations.length===1);
+    assert.deepEqual(assetRegistrationPayload,{asset_tag:'001234567890',version:0,inventory_revision:'pe-inventory-1'});checks++;
+    assert.ok((await page.locator('#asset-rows').textContent()).includes('已保存 · 未同步'));checks++;
+    assert.ok((await page.locator('#asset-rows').textContent()).includes('001234567890'));checks++;
+    await page.locator('#asset-search').fill('does-not-exist');
+    assert.equal(await page.locator('#asset-rows tr').count(),0);checks++;
+    await page.locator('#asset-search').fill('001234567890');
+    assert.equal(await page.locator('#asset-rows tr').count(),1);checks++;
+    await page.locator('#asset-search').evaluate(el=>el.setSelectionRange(3,3));
+    await page.evaluate(()=>refresh());
+    assert.equal(await page.locator('#asset-search').evaluate(el=>document.activeElement===el&&el.selectionStart===3),true);checks++;
+    await page.locator('#asset-search').fill('');
+    await page.reload();
+    await page.locator('#workspace:not([hidden])').waitFor();
+    await page.locator('[data-view=assets]').click();
+    assert.ok((await page.locator('#asset-rows').textContent()).includes('001234567890'));checks++;
+    fixture.devices[0].asset_inventory_revision='pe-inventory-2';
+    fixture.devices[0].asset_inventory.ram_bytes=32*1024**3;
+    await page.locator('#refresh').click();
+    await page.getByText('PE 配置已变化，请重新核对保存').waitFor();
+    assert.ok((await page.locator('#asset-rows').textContent()).includes('32.0 GiB'));checks++;
+    await page.locator('[data-action=asset-register][data-id=laptop-1]').click();
+    assert.equal(await page.locator('#asset-registration-form [name=asset_tag]').inputValue(),'001234567890');checks++;
+    assert.equal(await page.locator('#asset-registration-form').getAttribute('data-version'),'1');checks++;
+    await page.locator('#close-modal').click();
+    await page.locator('[data-view=devices]').click();
+    await page.locator('#filter').selectOption('all');
+    await page.locator('[data-action=asset-register][data-id=laptop-1]').click();
+    assert.ok(await page.locator('#asset-registration-form').isVisible());checks++;
+    await page.locator('#close-modal').click();
     assert.deepEqual(errors,[]);checks++;
     console.log(`${checks} nested menu, embedded page, HTTP form, role, message origin, lifecycle, mobile, WIM restore and per-task log UI checks passed. No live system contacted.`);
   }finally{await browser.close();}
