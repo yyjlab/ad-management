@@ -7,7 +7,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import test_pc_deploy as platform
-from pc_deploy.asset_sync import PATH, INTAKE_PATH, endpoint_url, post_registration
+from pc_deploy.asset_sync import PATH, INTAKE_PATH, endpoint_url, post_registration, asset_display_name
 
 
 class AssetSyncTests(unittest.TestCase):
@@ -176,6 +176,18 @@ class AssetSyncTests(unittest.TestCase):
             saved = json.loads(c.execute('SELECT data FROM asset_registrations').fetchone()[0])
             self.assertEqual(saved['kind'], 'intake')
             self.assertEqual(saved['asset_tag'], '')
+
+    def test_readable_asset_name_is_separate_from_firmware_model(self):
+        self.configure(category_id=None)
+        value = platform.machine()
+        value.update(model='20R4S4E200', manufacturer='LENOVO', system_family='ThinkPad L13', product_version='ThinkPad L13')
+        self.register(value)
+        payload = json.loads(self.row()['payload'])
+        self.assertEqual(payload['name'], 'LENOVO ThinkPad L13')
+        self.assertEqual(payload['snapshot']['model'], '20R4S4E200')
+        self.assertEqual(asset_display_name(dict(model='HKD-WXX', manufacturer='HUAWEI')), 'HUAWEI MateBook 14s')
+        self.assertEqual(asset_display_name(dict(model='HP 288 Pro G4 MT Business PC', manufacturer='HP')), 'HP 288 Pro G4 MT Business PC')
+        self.assertIsNone(asset_display_name(dict(model='System Product Name', manufacturer='System Manufacturer')))
 
     def test_http_settings_are_encrypted_and_not_exposed_to_dashboard(self):
         self.assertEqual(self.configure().status_code, 200)

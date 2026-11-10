@@ -65,6 +65,30 @@ def clean(value, label, maximum=200, required=False):
     return value or None
 
 
+def asset_display_name(inv):
+    def firmware(key):
+        value = re.sub(r'[\x00-\x1f\x7f]', ' ', str(inv.get(key) or '')).strip()
+        if re.fullmatch(r'unknown|none|not (?:specified|applicable)|default string|system (?:manufacturer|family|product name|version)|to be filled by o\.?e\.?m\.?', value, re.I):
+            return ''
+        return value
+    vendor, family, version = firmware('manufacturer'), firmware('system_family'), firmware('product_version')
+    raw = firmware('model') or firmware('product_name') or version or family
+    if not raw:
+        return None
+    code = bool(re.fullmatch(r'[a-z0-9][a-z0-9._-]{2,30}', raw, re.I))
+    readable = next((value for value in (firmware('oem_model'), version, firmware('product_name'))
+                     if value and value not in (vendor, family) and re.search(r'[A-Za-z\u4e00-\u9fff]', value)
+                     and re.search(r'[\s\u4e00-\u9fff]', value)), '')
+    known = 'HUAWEI MateBook 14s' if re.match(r'^HKD(?:-|$)', raw, re.I) and (not vendor or re.search(r'huawei|华为', vendor, re.I)) else ''
+    main = (readable or known) if code else ''
+    main = main or (version if vendor.lower() == 'lenovo' and version else raw)
+    parts = [vendor] if vendor and vendor.lower() not in main.lower() else []
+    if code and family and family.lower() not in main.lower():
+        parts.append(family)
+    parts.append(main)
+    return clean(' '.join(parts), '资产名称', 160)
+
+
 def registration_payload(record, category, external_id, intake=False):
     inv = record['inventory']
     cpus = list(dict.fromkeys(filter(None, (clean(row.get('name'), 'CPU')
@@ -98,6 +122,7 @@ def registration_payload(record, category, external_id, intake=False):
                                  manufacturerSerialNumber=clean(inv.get('serial'), 'SN', 160)))
     if intake:
         payload.pop('assetTag')
+        payload['name'] = asset_display_name(inv)
     encoded = canonical(payload)
     if len(encoded.encode()) > 32768:
         raise Invalid('资产登记请求超过接收端32KiB上限')
@@ -245,7 +270,8 @@ class AssetSender:
                 return sorted((normalized(item) for item in value), key=canonical)
             return value
         try:
-            meaningful = json.loads(registration_payload(record, None, 'fingerprint', intake=True))['snapshot']
+            prepared = json.loads(registration_payload(record, None, 'fingerprint', intake=True))
+            meaningful = dict(snapshot=prepared['snapshot'], name=prepared.get('name'))
         except (Invalid, ValueError, OverflowError):
             meaningful = snapshot
         fingerprint = digest(normalized(meaningful))
