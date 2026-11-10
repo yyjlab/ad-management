@@ -167,6 +167,28 @@ class AssetSyncTests(unittest.TestCase):
         self.assertNotIn(self.token, result.get_data(as_text=True))
         self.assertIn('启用', result.json['error'])
 
+    def test_probe_identifies_each_invalid_dictionary_without_reflecting_unknown_text(self):
+        for label, name in (('公司', '微丰启'), ('位置', '公司'), ('状态', '当前可用')):
+            with self.subTest(label=label):
+                message = f'{label}“{name}”须存在唯一且启用的字典记录；未自动新建'
+                self.sender.probe_transport = lambda *args: (409, dict(
+                    code='DEFAULT_DICTIONARY_INVALID', message=message))
+                result = self.post('/pc-deploy/api/asset-sync/probe', dict(endpoint='http://asset.test', token=self.token))
+                self.assertEqual(result.status_code, 400)
+                self.assertEqual(result.json['error'], 'asset：' + message)
+                state, detail, paused = self.sender.outcome(409, dict(
+                    code='DEFAULT_DICTIONARY_INVALID', message=message), {})
+                self.assertEqual(state, 'blocked')
+                self.assertEqual(detail['message'], 'asset：' + message)
+                self.assertFalse(paused)
+        for response in (dict(code='DEFAULT_DICTIONARY_INVALID', message=self.token),
+                         dict(code='OTHER_ERROR', message=message), [], None):
+            self.sender.probe_transport = lambda *args: (409, response)
+            result = self.post('/pc-deploy/api/asset-sync/probe', dict(endpoint='http://asset.test', token=self.token))
+            self.assertEqual(result.status_code, 400)
+            self.assertNotIn(self.token, result.get_data(as_text=True))
+            self.assertIn('字典不唯一', result.json['error'])
+
     def test_configuration_and_probe_require_admin_and_csrf(self):
         for route in ('/pc-deploy/api/asset-sync/settings', '/pc-deploy/api/asset-sync/probe'):
             self.assertEqual(self.client.post(route, json={}).status_code, 403)

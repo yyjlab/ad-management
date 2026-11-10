@@ -24,6 +24,17 @@ PLACEHOLDERS = {'unknown', 'none', 'default string', 'system product name', 'sys
                 'to be filled by o.e.m.', '未知', '未采集', '未上报'}
 
 
+def dictionary_error(body, fallback):
+    if not isinstance(body, dict) or body.get('code') != 'DEFAULT_DICTIONARY_INVALID':
+        return fallback
+    # Only show known dictionary errors, never arbitrary receiver text or credentials.
+    for label, name in (('公司', '微丰启'), ('位置', '公司'), ('状态', '当前可用')):
+        message = f'{label}“{name}”须存在唯一且启用的字典记录；未自动新建'
+        if body.get('message') == message:
+            return 'asset：' + message
+    return fallback
+
+
 def endpoint_url(value):
     value = text(value, 'asset 地址', 1, 2048)
     try:
@@ -278,6 +289,8 @@ class AssetSender:
                     'VALIDATION_FAILED': 'asset 字段校验未通过，请核对配置后保存新版本',
                     'ASSET_RULE_REJECTED': 'asset 现有业务规则拒绝此记录，请在资产系统核对'}
         message = messages.get(code, 'asset 返回 HTTP ' + str(status) + '，请核对接收服务')
+        if status == 409:
+            message = dictionary_error(body, message)
         retry = (status in (408, 429, 500, 502, 503, 504) or code == 'CONCURRENT_RETRY') and code not in messages
         return ('retry' if retry else 'blocked'), dict(code=code, message=message), code in AUTH_ERRORS or status in (401, 403)
 
@@ -398,7 +411,8 @@ def register_asset_sync(app, host_app, store, admin, body, event):
             hints = {401: '凭据无效、过期或已撤销', 403: '请在 asset 接入设置中允许受信内网 HTTP，或检查权限',
                      404: 'asset 后端尚未更新到支持连接测试的版本', 409: 'asset 的微丰启、公司或当前可用字典不唯一、缺失或停用',
                      503: '请先在 asset 网页启用装机平台接入'}
-            raise Invalid(hints.get(status, 'asset 连接检查返回 HTTP ' + str(status)))
+            message = hints.get(status, 'asset 连接检查返回 HTTP ' + str(status))
+            raise Invalid(dictionary_error(result, message) if status == 409 else message)
         if (not isinstance(result, dict) or result.get('receiver') != 'asset-management'
                 or result.get('protocolVersion') != 1 or not isinstance(result.get('categories'), list)
                 or len(result['categories']) > 1000):
