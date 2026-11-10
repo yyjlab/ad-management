@@ -13,7 +13,7 @@ async function run() {
     page.on('pageerror',error=>errors.push(error.message));
     let role='super_admin',expired=false,saves=0,extensions=0,policyPayload=null,validityPayload=null,mediaPayload=null,enrollmentExpires=1793433600,fixture=null,profilePayload=null,previewPayload=null;
     const jobLogEvents={};let releasePayload=null,profileDeletePayload=null,jobLogError=false,jobLogGate=null,dashboardGate=null,jobReviewPayload=null;
-    let assetRegistrationPayload=null,assetRegistrationError=false;
+    let assetRegistrationPayload=null,assetRegistrationError=false,assetSyncSettingsPayload=null;
     const settings={public_url:'http://ad-menu.test/pc-deploy',enabled:false,concurrency:2,ca_pem:'',http_allowed:true};
     const media={builders:[{id:'test-builder',name:'测试制作电脑',online:true,template_name:'WinPE',driver_name:'ASIX'}],builds:[]};
     const adHtml=fs.readFileSync(path.join(__dirname,'admin_manage.html'),'utf8');
@@ -120,6 +120,16 @@ async function run() {
           boot_files:{wimboot:false,'boot.wim':false,BCD:false,'boot.sdi':false},enrollments:[{id:'a'.repeat(64),expires_at:enrollmentExpires,uses:1}],media,server_time:1793347200}));
         if(dashboardGate){const gate=dashboardGate;dashboardGate=null;await gate;}
         return route.fulfill({json:snapshot});
+      }
+      if(url.pathname==='/pc-deploy/api/asset-sync/probe'){
+        assert.equal(request.headers()['x-csrf-token'],'fixture-csrf');
+        return route.fulfill({json:{ok:true,endpoint:'http://asset.test/api/integrations/ad-deployment/v1/registrations',categories:[{id:37,name:'真实笔记本电脑'}]}});
+      }
+      if(url.pathname==='/pc-deploy/api/asset-sync/settings'){
+        assert.equal(request.headers()['x-csrf-token'],'fixture-csrf');
+        assetSyncSettingsPayload=request.postDataJSON();
+        fixture.asset_sync={enabled:assetSyncSettingsPayload.enabled,endpoint:assetSyncSettingsPayload.endpoint,category_id:assetSyncSettingsPayload.category_id,revision:1,has_token:true,has_ca:false};
+        return route.fulfill({json:{ok:true,settings:fixture.asset_sync}});
       }
       if(/^\/pc-deploy\/api\/asset-registrations\/[^/]+$/.test(url.pathname)){
         assert.equal(request.method(),'POST');
@@ -1201,7 +1211,7 @@ async function run() {
     await page.waitForFunction(()=>!busy&&data.devices[0].asset_inventory_revision==='pe-inventory-1');
     await page.locator('[data-view=assets]').click();
     assert.equal(await page.locator('#page-title').textContent(),'资产登记');checks++;
-    assert.ok((await page.locator('.asset-notice').textContent()).includes('尚未连接 asset'));checks++;
+    assert.ok((await page.locator('.asset-notice').textContent()).includes('尚未开启 asset 自动同步'));checks++;
     assert.ok((await page.locator('#asset-rows').textContent()).includes('16.0 GiB'));checks++;
     assert.ok((await page.locator('#asset-rows').textContent()).includes('512.0 GiB'));checks++;
     assert.ok((await page.locator('#asset-rows').textContent()).includes('具体显卡待确认'));checks++;
@@ -1223,7 +1233,7 @@ async function run() {
     await page.locator('#modal').waitFor({state:'hidden'});
     await page.waitForFunction(()=>!busy&&data.asset_registrations.length===1);
     assert.deepEqual(assetRegistrationPayload,{asset_tag:'001234567890',version:0,inventory_revision:'pe-inventory-1'});checks++;
-    assert.ok((await page.locator('#asset-rows').textContent()).includes('已保存 · 未同步'));checks++;
+    assert.ok((await page.locator('#asset-rows').textContent()).includes('待配置联动'));checks++;
     assert.ok((await page.locator('#asset-rows').textContent()).includes('001234567890'));checks++;
     await page.locator('#asset-search').fill('does-not-exist');
     assert.equal(await page.locator('#asset-rows tr').count(),0);checks++;
@@ -1246,6 +1256,19 @@ async function run() {
     assert.equal(await page.locator('#asset-registration-form [name=asset_tag]').inputValue(),'001234567890');checks++;
     assert.equal(await page.locator('#asset-registration-form').getAttribute('data-version'),'1');checks++;
     await page.locator('#close-modal').click();
+    const syncForm=page.locator('#asset-sync-settings-form');
+    await syncForm.locator('[name=endpoint]').fill('http://asset.test');
+    await syncForm.locator('[name=token]').fill('adp_'+'a'.repeat(36)+'.'+'b'.repeat(43));
+    await page.locator('[data-action=asset-sync-probe]').click();
+    await page.locator('#asset-sync-probe-status').getByText(/连接成功/).waitFor();
+    assert.equal(await syncForm.locator('[name=category_id]').inputValue(),'37');checks++;
+    assert.equal(await syncForm.locator('[name=category_id] option:checked').textContent(),'真实笔记本电脑');checks++;
+    await syncForm.locator('[name=sync_enabled]').check();
+    await syncForm.locator('[type=submit]').click();
+    await page.waitForFunction(()=>data.asset_sync?.enabled&&!assetSyncDirty);
+    assert.equal(assetSyncSettingsPayload.category_id,37);checks++;
+    assert.equal(assetSyncSettingsPayload.endpoint,'http://asset.test');checks++;
+    assert.equal(await page.locator('#asset-sync-settings-form [name=token]').inputValue(),'');checks++;
     await page.locator('[data-view=devices]').click();
     await page.locator('#filter').selectOption('all');
     await page.locator('[data-action=asset-register][data-id=laptop-1]').click();

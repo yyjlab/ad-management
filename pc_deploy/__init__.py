@@ -29,6 +29,7 @@ from .deployment import (ACTIVE, ERRORS, STATES, Invalid, answer_file, canonical
 from .storage import Store
 from .domain_join import available_name, computer_name, employee_id, join_record
 from .media import register_media_routes, media_dashboard
+from .asset_sync import register_asset_sync
 
 ROOT = Path(__file__).parent
 ENROLLMENT_TTL = 7 * 24 * 3600
@@ -372,7 +373,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
             raise Invalid('资产编号必须为12位数字，与 asset 保持一致')
         version = integer(payload.get('version'), '登记版本', 0, 2**31 - 1)
         with store.connect(write=True) as c:
-            device = c.execute('SELECT data FROM devices WHERE id=?', (identity,)).fetchone()
+            device = c.execute('SELECT data,last_seen FROM devices WHERE id=?', (identity,)).fetchone()
             if not device:
                 raise Invalid('设备不存在，请刷新设备列表')
             snapshot = asset_inventory(json.loads(device['data']))
@@ -384,15 +385,21 @@ def register_pc_deploy(host_app, current_user, touch_session):
             if c.execute('SELECT 1 FROM asset_registrations WHERE asset_tag=? AND device_id<>?',
                          (tag, identity)).fetchone():
                 raise Invalid('此资产编号已用于另一台设备的待登记记录，请核对资产标签')
+            asset_sender.ensure_editable(c, identity, tag)
             now = time.time()
+            telemetry = json.loads(device['data']).get('system_info', {})
             record = dict(device_id=identity, asset_tag=tag, version=version + 1,
                           company='微丰启', location='公司', assigned_to=None,
                           sync_state='not_connected', inventory=snapshot, inventory_revision=digest(snapshot),
-                          saved_by=g.pc_deploy_operator, updated=now)
+                          saved_by=g.pc_deploy_operator, updated=now,
+                          captured_at=telemetry.get('reported_at') or device['last_seen'] or now)
             c.execute('INSERT INTO asset_registrations VALUES(?,?,?,?,?) ON CONFLICT(device_id) DO UPDATE SET '
                       'asset_tag=excluded.asset_tag,version=excluded.version,data=excluded.data,updated=excluded.updated',
                       (identity, tag, version + 1, canonical(record), now))
-            event(c, 'asset_registration', '保存资产待登记记录：' + tag + '；未发送到 asset')
+            asset_sender.enqueue(c, record)
+            record = asset_sender.decorate(c, record)
+            event(c, 'asset_registration', '保存资产待登记记录：' + tag +
+                  ('；已加入自动同步队列' if asset_sender.config(c)['enabled'] else '；未发送到 asset'))
         return jsonify(ok=True, registration=record)
 
     @app.get('/api/dashboard')
@@ -408,7 +415,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
                 item['asset_inventory'] = asset_inventory(item)
                 item['asset_inventory_revision'] = digest(item['asset_inventory'])
                 devices.append(item)
-            asset_registrations = [json.loads(r['data']) for r in c.execute(
+            asset_registrations = [asset_sender.decorate(c, json.loads(r['data'])) for r in c.execute(
                 'SELECT data FROM asset_registrations ORDER BY updated DESC')]
             sources = [dict(json.loads(r['data']), has_password=True) for r in c.execute('SELECT data FROM sources')]
             profiles = [dict(json.loads(r['data']), has_password=True) for r in c.execute('SELECT data FROM profiles')]
@@ -425,9 +432,10 @@ def register_pc_deploy(host_app, current_user, touch_session):
                            for r in c.execute('SELECT * FROM enrollments ORDER BY expires DESC')]
             logs = [dict(r) for r in c.execute(
                 'SELECT id,job_id,kind,message,created FROM events WHERE job_id IS NULL ORDER BY id DESC LIMIT 100')]
+            asset_sync = asset_sender.public_config(c)
         boot = store.root / 'boot'
         files = {n: (boot / n).is_file() for n in ('wimboot', 'boot.wim', 'BCD', 'boot.sdi')}
-        return jsonify(devices=devices, asset_registrations=asset_registrations, sources=sources, profiles=profiles, jobs=jobs, settings=settings,
+        return jsonify(devices=devices, asset_registrations=asset_registrations, asset_sync=asset_sync, sources=sources, profiles=profiles, jobs=jobs, settings=settings,
                        events=logs, boot_files=files, server_time=now, enrollments=enrollments, media=media)
 
     @app.get('/api/jobs/<identity>/events')
@@ -1330,6 +1338,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
             return jsonify(error='启动文件尚未准备；请先使用 ADK 构建 WinPE'), 404
         return send_file(path, conditional=True)
 
+    asset_sender = register_asset_sync(app, host_app, store, admin, body, event)
     register_media_routes(app, store, admin, body, tls_required, bearer, event, create_config, bootstrap_zip)
     host_app.register_blueprint(app)
     return app

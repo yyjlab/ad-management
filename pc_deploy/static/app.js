@@ -4,7 +4,7 @@ const h = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<
 const size = bytes => `${(Number(bytes) / 1024 ** 3).toFixed(1)} GiB`;
 const date = seconds => new Date(seconds * 1000).toLocaleString('zh-CN', {hour12:false});
 const activeStates = ['queued','preflight','installing','awaiting_report'];
-const labels = {assets:['资产登记','PE 采集配置后填写资产编号，保存待登记记录；无需等待装机完成。'],devices:['设备工作台','选择设备和目标系统硬盘，确认后自动完成 Windows 安装。'],sources:['安装源','原版安装文件或封装 WIM 通过专用只读 SMB 账号访问，快速读取镜像版本和索引，不扫描整份镜像。'],profiles:['装机方案','选择原版安装或封装 WIM 还原；封装镜像沿用其账号、软件和系统设置。'],jobs:['任务记录','安装成功以安装后系统回报为准；断线任务不会自动重装。'],settings:['启动与设置','现有 Ventoy 可作为备用引导；纯网络启动使用 iPXE / wimboot。']};
+const labels = {assets:['资产登记','PE 配置按资产编号自动同步到 asset，无需等待装机完成。'],devices:['设备工作台','选择设备和目标系统硬盘，确认后自动完成 Windows 安装。'],sources:['安装源','原版安装文件或封装 WIM 通过专用只读 SMB 账号访问，快速读取镜像版本和索引，不扫描整份镜像。'],profiles:['装机方案','选择原版安装或封装 WIM 还原；封装镜像沿用其账号、软件和系统设置。'],jobs:['任务记录','安装成功以安装后系统回报为准；断线任务不会自动重装。'],settings:['启动与设置','现有 Ventoy 可作为备用引导；纯网络启动使用 iPXE / wimboot。']};
 const API_BASE = '/pc-deploy';
 const embedParams = new URLSearchParams(location.search);
 const embedded = embedParams.get('embedded') === '1' && window.parent !== window;
@@ -14,7 +14,7 @@ let joinSelection = new Set();
 let chosen = new Set(), disks = new Map(), partitions = new Map(), employeeIds = new Map(), profileId = '', search = '', filter = 'online', previewId = null;
 let toastTimer, settingsDirty = false, jobLog = null, deviceDialog = null, serverTime = 0, serverSample = 0;
 let lastWorkspacePoll = Date.now();
-let assetSearch = '';
+let assetSearch = '', assetSyncDirty = false;
 const jobSnapshots = new Map();
 function latestJob(job, sampledAt) {
   const previous = jobSnapshots.get(job.id);
@@ -57,7 +57,8 @@ async function refresh() {
     $('#live-badge').textContent = data.settings.enabled ? '真实下发已开启' : '真实下发关闭';
     $('#live-badge').className = `badge ${data.settings.enabled ? 'good' : 'muted'}`;
     $('#last-updated').textContent = '更新于 ' + date(data.server_time);
-    if (!(view === 'settings' && settingsDirty)) render();
+    if (!(view === 'settings' && settingsDirty) && !(view === 'assets' && assetSyncDirty)) render();
+    else if (view === 'assets' && $('#asset-rows')) renderAssetRows();
     else if ($('#media-status')) $('#media-status').innerHTML=renderMediaStatus();
     if (jobLog?.result) {
       jobLog.result.job = latestJob(jobLog.result.job, jobLog.result.server_time);
@@ -186,12 +187,47 @@ function assetSpecs(info) {
   const graphics=gpus.map(name=>/microsoft.*basic|基本显示|标准.*vga|standard.*vga/i.test(name)?'基础显示驱动（具体显卡待确认）':name);
   return {cpu:cpus.join(' / ')||'未采集',memory,storage:disks.join('；')||'未识别内置物理硬盘',graphics:graphics.join(' / ')||'未采集（PE 可能缺少显卡驱动）'};
 }
+const assetSyncLabels={waiting_configuration:['待配置联动','muted'],not_connected:['待配置联动','muted'],pending:['等待自动发送','blue'],sending:['正在同步','blue'],retry:['等待原请求重试','warn'],attention:['重试待确认','warn'],blocked:['同步受阻','bad'],rejected:['资料需核对','bad'],conflict:['配置有差异','warn'],synced:['已同步到 asset','good']};
+function assetSyncBadge(saved) {
+  if(!saved)return '<span class="badge warn">待填编号</span>';
+  const state=saved.sync?.state||saved.sync_state||'waiting_configuration', [label,color]=assetSyncLabels[state]||['待核对','warn'];
+  const result=saved.sync?.result;
+  return '<span class="badge '+color+'">'+h(state==='synced'&&result?.result==='already_exists'?'已关联已有资产':label)+'</span>';
+}
+function renderAssetSyncSettings(open) {
+  const cfg=data.asset_sync||{enabled:false,endpoint:'',category_id:null,revision:0}, required=cfg.enabled?'required':'';
+  return '<details id="asset-sync-settings" class="hardware-group" '+(open?'open':'')+'><summary>asset 联动设置 <span class="muted">· '+(cfg.enabled?'自动发送已开启':'尚未开启')+'</span></summary>'+
+    '<form id="asset-sync-settings-form" data-revision="'+h(cfg.revision)+'"><p class="modal-help">支持受信内网 HTTP；公司“微丰启”、位置“公司”、领用人留空由 asset 执行。填写地址和凭据后测试连接，读取实际电脑分类。地址改变后，原请求不会自动改投。</p>'+
+    (cfg.pause?'<p class="error">'+h(cfg.pause.message)+'；更新凭据设置后恢复。</p>':'')+
+    '<div class="form-grid">'+field('asset 地址','endpoint','url',cfg.endpoint||'',required+' placeholder="http://asset.wfq.com/" autocomplete="off"')+
+    '<div class="field"><label for="asset-sync-category">资产分类</label><select id="asset-sync-category" name="category_id" '+required+'>'+(cfg.category_id?'<option value="'+h(cfg.category_id)+'">已保存分类（ID '+h(cfg.category_id)+'）</option>':'<option value="">请先测试连接并读取分类</option>')+'</select></div>'+
+    field('专用服务凭据（留空保留）','token','password','',(!cfg.has_token?required:'')+' autocomplete="new-password" placeholder="'+(cfg.has_token?'已加密保存，留空保留':'填写 asset 签发的 adp_ 凭据')+'"')+'</div>'+
+    '<div class="form-actions"><button type="button" data-action="asset-sync-probe">测试连接并读取分类</button></div><p id="asset-sync-probe-status" class="modal-help" role="status"></p>'+
+    '<details><summary>HTTPS 证书（HTTP 无需配置）</summary><div class="field"><label for="asset-sync-ca">私有 CA 公开证书（可选，留空保留）</label><textarea id="asset-sync-ca" name="ca_pem" rows="3" maxlength="32768" placeholder="'+(cfg.has_ca?'已保存 CA；不接受私钥':'使用系统信任的证书可留空')+'"></textarea></div></details>'+
+    (cfg.has_ca?'<label class="check-label"><input name="clear_ca" type="checkbox">清除旧 CA，改用系统信任证书</label>':'')+
+    '<label class="check-label"><input id="asset-sync-enabled" name="sync_enabled" type="checkbox" '+(cfg.enabled?'checked':'')+'>开启自动同步：发送已保存及以后保存的登记记录</label>'+
+    '<p class="modal-help">新资产会按编号登记；已有资产配置不同只返回差异，不覆盖。暂停只阻止新发送，不能撤回已在途的请求。服务凭据不会进入 ISO。</p>'+
+    '<div id="asset-sync-error" class="error" role="alert"></div><div class="form-actions"><button class="primary" type="submit">保存联动设置</button></div></form></details>';
+}
+function assetSyncDetail(id) {
+  const saved=(data.asset_registrations||[]).find(row=>row.device_id===id), sync=saved?.sync;
+  if(!sync)return;
+  const result=sync.result, labels={model:'型号',cpu:'CPU',memory:'内存',storage:'硬盘',graphicsCard:'显卡',assetProfile:'资产类型'};
+  const warnings={BASIC_DISPLAY_DRIVER_IGNORED:'基础显示驱动未作为实际显卡登记',INTERNAL_DISKS_NOT_COLLECTED:'未采集到内置物理硬盘'};
+  modal('asset 同步结果 · '+saved.asset_tag,assetSyncBadge(saved)+
+    '<p>'+h(sync.message||'')+'</p>'+(result?'<p>结果：'+h(({created:'新资产登记成功',already_exists:'已有资产配置一致',configuration_conflict:'配置存在差异，未覆盖资产'})[result.result]||result.result)+
+      '<br>资产编号：<strong class="mono">'+h(result.asset.assetTag)+'</strong> · asset ID：'+h(result.asset.id)+'</p>'+
+      deviceInfoTable(['字段','asset 现有值','PE 本次值'],result.differences.map(diff=>[labels[diff.field]||diff.field,diff.existing??'空',diff.incoming??'空']))+
+      result.warnings.map(w=>'<p class="modal-help">'+h(warnings[w]||w)+'</p>').join(''):'')+
+    '<p class="modal-help">发送次数：'+h(sync.attempts)+'<br>外部登记标识：'+h(sync.id)+'<br>接收地址：'+h(sync.endpoint)+'<br>更新：'+h(date(sync.updated))+'</p>');
+}
 function renderAssets() {
   const editing=document.activeElement?.id==='asset-search';
   const caret=editing?[document.activeElement.selectionStart,document.activeElement.selectionEnd]:null;
-  const rows=assetRows(), saved=rows.filter(row=>row.saved).length;
-  $('#page-content').innerHTML='<div class="asset-notice">第一步：保存装机平台内的待登记记录，尚未连接 asset，不会创建或修改正式资产。按资产编号登记，SN 仅附带记录；不需要等待 Windows 安装。</div>'+
-    '<div class="stats"><div class="stat"><span>已采集设备</span><strong>'+rows.length+'</strong></div><div class="stat"><span>待填资产编号</span><strong>'+(rows.length-saved)+'</strong></div><div class="stat"><span>已保存待同步</span><strong>'+saved+'</strong></div><div class="stat"><span>登记默认值</span><strong class="asset-default">微丰启 / 公司</strong><small>领用人留空</small></div></div>'+
+  const rows=assetRows(), saved=rows.filter(row=>row.saved).length, synced=rows.filter(row=>row.saved?.sync?.state==='synced').length;
+  const settingsOpen=$('#asset-sync-settings')?.open??(!data.asset_sync?.enabled||!!data.asset_sync?.pause);
+  $('#page-content').innerHTML='<div class="asset-notice">'+(data.asset_sync?.enabled?'自动同步已开启：保存资产编号后自动发送；已有资产配置不同只显示差异，不覆盖。':'尚未开启 asset 自动同步：可以先保存待登记记录，再配置下方联动设置。')+' SN 仅附带记录，不需要等待 Windows 安装。</div>'+renderAssetSyncSettings(settingsOpen)+
+    '<div class="stats"><div class="stat"><span>已采集设备</span><strong>'+rows.length+'</strong></div><div class="stat"><span>待填资产编号</span><strong>'+(rows.length-saved)+'</strong></div><div class="stat"><span>待同步 / 已同步</span><strong>'+(saved-synced)+' / '+synced+'</strong></div><div class="stat"><span>登记默认值</span><strong class="asset-default">微丰启 / 公司</strong><small>领用人留空</small></div></div>'+
     '<div class="toolbar"><input id="asset-search" class="search" aria-label="搜索资产登记" placeholder="搜索资产编号、型号或 SN" value="'+h(assetSearch)+'"><span class="muted">资产编号使用 asset 的12位数字格式，支持扫码枪输入</span></div>'+
     '<div class="table-wrap"><table class="asset-table"><thead><tr><th>资产编号 / 设备</th><th>CPU / 内存</th><th>物理硬盘 / 显卡</th><th>登记状态</th><th>操作</th></tr></thead><tbody id="asset-rows"></tbody></table><div id="asset-empty"></div></div>';
   renderAssetRows();
@@ -206,28 +242,32 @@ function renderAssetRows() {
   $('#asset-rows').innerHTML=rows.map(({device,saved})=>{
     const info=device?.asset_inventory||saved?.inventory||{}, specs=assetSpecs(info);
     const changed=saved&&device&&saved.inventory_revision!==device.asset_inventory_revision;
+    const locked=['pending','sending','retry'].includes(saved?.sync?.state);
     return '<tr><td><strong class="mono">'+h(saved?.asset_tag||'待填写资产编号')+'</strong><span class="cell-sub">'+h(deviceLabel(info))+'</span><span class="cell-sub mono">SN：'+h(info.serial||'未采集')+'</span></td>'+
       '<td class="asset-spec"><strong>'+h(specs.cpu)+'</strong><span class="cell-sub">内存：'+h(specs.memory)+'</span></td>'+
       '<td class="asset-spec"><span>'+h(specs.storage)+'</span><span class="cell-sub">显卡：'+h(specs.graphics)+'</span></td>'+
-      '<td><span class="badge '+(saved?'blue':'warn')+'">'+(saved?'已保存 · 未同步':'待填编号')+'</span>'+
+      '<td>'+assetSyncBadge(saved)+(saved?.sync?.message?'<span class="cell-sub">'+h(saved.sync.message)+'</span>':'')+
       (changed?'<span class="cell-sub warn-text">PE 配置已变化，请重新核对保存</span>':'')+
       '<span class="cell-sub">'+(saved?'保存于 '+h(date(saved.updated)):'尚未保存待登记记录')+'</span><span class="cell-sub">'+(device?.online?'PE 在线':'离线配置仍可查看')+'</span></td>'+
-      '<td><button class="small" data-action="asset-register" data-id="'+h(device?.id||saved.device_id)+'" '+(!device?'disabled title="当前设备不在已加载列表中"':'')+'>'+(saved?'核对 / 编辑':'填写编号')+'</button></td></tr>';
+      '<td><button class="small" data-action="asset-register" data-id="'+h(device?.id||saved.device_id)+'" '+(!device?'disabled title="当前设备不在已加载列表中"':locked?'disabled title="正在按原请求同步，取得结果后可编辑"':'')+'>'+(saved?'核对 / 编辑':'填写编号')+'</button>'+
+      (saved?.sync?'<button class="small" data-action="asset-sync-detail" data-id="'+h(saved.device_id)+'">同步结果</button>':'')+
+      (saved?.sync&&['retry','attention','blocked'].includes(saved.sync.state)&&data.asset_sync?.enabled&&!data.asset_sync.pause?'<button class="small" data-action="asset-sync-retry" data-id="'+h(saved.device_id)+'">重试原请求</button>':'')+'</td></tr>';
   }).join('');
   $('#asset-empty').innerHTML=rows.length?'':empty(data.devices.length?'没有匹配记录':'等待电脑进入 PE','采集硬件配置后即可登记，无需安装 Windows。');
 }
 function editAssetRegistration(id) {
   const device=data.devices.find(item=>item.id===id);if(!device)return;
   const saved=(data.asset_registrations||[]).find(item=>item.device_id===id);
+  if(['pending','sending','retry'].includes(saved?.sync?.state)){toast('正在同步，请取得结果后再编辑');return;}
   const info=device.asset_inventory||{}, specs=assetSpecs(info);
   modal('资产待登记 · '+deviceLabel(info),'<form id="asset-registration-form" data-id="'+h(id)+'" data-version="'+h(saved?.version||0)+'" data-inventory-revision="'+h(device.asset_inventory_revision)+'">'+
-    '<p class="modal-help">仅保存待登记记录，尚未发送到 asset。资产编号用于后续查重，SN 不作为查重依据。</p>'+
+    '<p class="modal-help">'+(data.asset_sync?.enabled?'保存后自动发送到 asset；已有资产有差异时仅提示，不会覆盖。':'仅保存待登记记录，开启联动后自动发送。')+'资产编号用于查重，SN 不作为查重依据。</p>'+
     field('资产编号','asset_tag','text',saved?.asset_tag||'','required pattern="[0-9]{12}" minlength="12" maxlength="12" inputmode="numeric" autocomplete="off" placeholder="输入或扫描12位资产编号"')+
     '<p>公司：<strong>微丰启</strong>　位置：<strong>公司</strong>　领用人：<strong>留空</strong></p>'+
     '<dl class="asset-details"><dt>型号</dt><dd>'+h(deviceLabel(info))+'</dd><dt>SN（附加记录）</dt><dd>'+h(info.serial||'未采集')+'</dd>'+
     '<dt>CPU</dt><dd>'+h(specs.cpu)+'</dd><dt>内存</dt><dd>'+h(specs.memory)+'</dd><dt>物理硬盘</dt><dd>'+h(specs.storage)+'</dd><dt>显卡</dt><dd>'+h(specs.graphics)+'</dd></dl>'+
     '<p class="modal-help">只保存当前 PE 已采集的信息，未识别的项目保留待确认；U 盘和分区容量不计入内置硬盘配置。</p>'+
-    '<div id="form-error" class="error" role="alert"></div><div class="form-actions"><button type="button" data-action="close">返回</button><button class="primary" type="submit">保存待登记</button></div></form>');
+    '<div id="form-error" class="error" role="alert"></div><div class="form-actions"><button type="button" data-action="close">返回</button><button class="primary" type="submit">'+(data.asset_sync?.enabled?'保存并自动同步':'保存待登记')+'</button></div></form>');
   $('#asset-registration-form [name=asset_tag]').focus();
 }
 function renderSources() {
@@ -787,6 +827,26 @@ document.addEventListener('click', async e=>{
       const p=data.profiles.find(p=>p.id===id);
       modal('删除装机方案','<form id="delete-profile-form" data-id="'+h(id)+'" data-revision="'+h(p.revision)+'"><p><strong>'+h(profileDisplayName(p))+'</strong></p><p>仅删除这个方案及其保存的凭据，历史任务、安装源和电脑上的文件保留。存在进行中或待统一加域任务时不能删除。</p><label class="check-label"><input name="confirmed" type="checkbox" required>确认删除此方案</label><div id="form-error" class="error" role="alert"></div><div class="form-actions"><button type="button" data-action="close">取消</button><button class="danger-button" type="submit">确认删除</button></div></form>');
     }
+    else if(a==='asset-sync-probe'){
+      const form=$('#asset-sync-settings-form'), values=Object.fromEntries(new FormData(form));
+      const payload={endpoint:values.endpoint,token:values.token||'',ca_pem:values.ca_pem||'',clear_ca:!!values.clear_ca};
+      const button=e.target.closest('button');assetSyncDirty=true;button.disabled=true;
+      const output=$('#asset-sync-probe-status');output.textContent='正在验证连接…';
+      try{
+        const result=await api('/api/asset-sync/probe','POST',payload);
+        if(!form.isConnected)return;
+        const current=Object.fromEntries(new FormData(form));
+        if(['endpoint','token','ca_pem'].some(key=>(current[key]||'')!==(values[key]||''))||!!current.clear_ca!==!!values.clear_ca){output.textContent='连接资料已变化，请重新测试';return;}
+        const select=form.elements.category_id, previous=select.value;select.replaceChildren(new Option('请选择电脑分类',''));
+        for(const choice of result.categories)select.add(new Option(choice.name,String(choice.id)));
+        if(result.categories.some(choice=>String(choice.id)===previous))select.value=previous;
+        else if(result.categories.length===1)select.value=String(result.categories[0].id);
+        output.textContent='连接成功，已读取 '+result.categories.length+' 个可用电脑分类；选择后保存即可自动同步。';
+      }catch(err){if(form.isConnected)output.textContent=err.message;}
+      finally{if(button.isConnected)button.disabled=false;}
+    }
+    else if(a==='asset-sync-detail')assetSyncDetail(id);
+    else if(a==='asset-sync-retry'){const record=(data.asset_registrations||[]).find(row=>row.device_id===id);await api('/api/asset-registrations/'+encodeURIComponent(id)+'/retry','POST',{version:record.version});toast('已安排按原登记标识重试');await refresh();}
     else if(a==='asset-register')editAssetRegistration(id);
     else if(a==='device-detail')deviceDetail(id);
     else if(a==='job-device-detail')jobDeviceDetail(id);
@@ -816,9 +876,17 @@ document.addEventListener('click', async e=>{
     else if(a==='cancel-job'||a==='reconcile-job')modal(a==='cancel-job'?'取消安装前任务':'人工结束异常记录',`<form id="job-action-form" data-id="${h(id)}" data-kind="${a}"><p>${a==='cancel-job'?'仅允许取消尚未启动安装或还原的任务。':'客户端长时间未回报。请先现场确认电脑已停止安装，再结束这条记录。结束后将不再接受此任务的自动成功回报；不会停止电脑或重新安装。'}</p>${a==='reconcile-job'&&data.jobs.find(j=>j.id===id)?.domain_join?'<label class="check-label"><input type="checkbox" name="end_domain_join" required>我确认结束此任务的自动改名、加域及安装完成回报，且已现场核对电脑状态</label>':''}${a==='reconcile-job'?field('输入 CHECKED','confirmation','text','','required pattern="CHECKED" autocomplete="off"'):''}<div id="form-error" class="error" role="alert"></div><div class="form-actions"><button type="button" data-action="close">返回</button><button class="primary" type="submit">确认</button></div></form>`);
   } catch(err){toast(err.message);}
 });
-document.addEventListener('input',e=>{if(e.target.id==='asset-search'){assetSearch=e.target.value;renderAssetRows();}if(e.target.closest('#settings-form,#enrollment-policy-form,#media-form'))settingsDirty=true;if(e.target.dataset.employee)employeeIds.set(e.target.dataset.employee,e.target.value.toUpperCase());if(e.target.closest('#profile-form')&&['join_domain','join_user','join_password'].includes(e.target.name))updateDomainJoinPassword();if(e.target.closest('#profile-form')&&e.target.name==='system_gib')updateProfileName();if(e.target.id==='search'){search=e.target.value;renderDeviceRows();}});
+document.addEventListener('input',e=>{if(e.target.closest('#asset-sync-settings-form'))assetSyncDirty=true;if(e.target.id==='asset-search'){assetSearch=e.target.value;renderAssetRows();}if(e.target.closest('#settings-form,#enrollment-policy-form,#media-form'))settingsDirty=true;if(e.target.dataset.employee)employeeIds.set(e.target.dataset.employee,e.target.value.toUpperCase());if(e.target.closest('#profile-form')&&['join_domain','join_user','join_password'].includes(e.target.name))updateDomainJoinPassword();if(e.target.closest('#profile-form')&&e.target.name==='system_gib')updateProfileName();if(e.target.id==='search'){search=e.target.value;renderDeviceRows();}});
 document.addEventListener('change',async e=>{
   const el=e.target;
+  if(el.closest('#asset-sync-settings-form')&&el.name==='endpoint'){
+    const form=el.closest('form');form.elements.category_id.replaceChildren(new Option('地址已变化，请重新测试连接',''));
+  }
+  if(el.id==='asset-sync-enabled'){
+    assetSyncDirty=true;const form=el.closest('form');
+    for(const name of ['endpoint','category_id'])form.elements[name].required=el.checked;
+    form.elements.token.required=el.checked&&!data.asset_sync?.has_token;
+  }
   if(el.name==='validity_mode'){
     const input=el.closest('form').querySelector('[name=days]');
     input.disabled=el.value==='never';input.required=!input.disabled;
@@ -849,10 +917,15 @@ document.addEventListener('submit',async e=>{
       await api('/api/profiles/'+encodeURIComponent(form.dataset.id),'DELETE',{confirmation:'DELETE',revision:form.dataset.revision});
       if(profileId===form.dataset.id){profileId='';partitions.clear();}
     }
+    else if(form.id==='asset-sync-settings-form'){
+      await api('/api/asset-sync/settings','POST',{revision:Number(form.dataset.revision),enabled:!!f.sync_enabled,
+        endpoint:f.endpoint,category_id:f.category_id?Number(f.category_id):null,token:f.token||'',ca_pem:f.ca_pem||'',clear_ca:!!f.clear_ca});
+      assetSyncDirty=false;toast('联动设置已保存；开启后自动发送已保存的登记记录');await refresh();return;
+    }
     else if(form.id==='asset-registration-form'){
       await api('/api/asset-registrations/'+encodeURIComponent(form.dataset.id),'POST',{
         asset_tag:f.asset_tag,version:Number(form.dataset.version),inventory_revision:form.dataset.inventoryRevision});
-      $('#modal').close();toast('待登记记录已保存，尚未同步到 asset');await refresh();return;
+      $('#modal').close();toast(data.asset_sync?.enabled?'记录已保存，已安排自动同步':'待登记记录已保存，开启联动后自动发送');await refresh();return;
     }
     else if(form.id==='profile-form'){
       updateProfileName();f.name=form.elements.name.value;
@@ -880,7 +953,7 @@ document.addEventListener('submit',async e=>{
     else if(form.id==='rearm-form'){await api(`/api/devices/${form.dataset.id}/rearm`,'POST',f);}
     else return;
     if($('#modal').open)$('#modal').close();toast('操作成功');await refresh();
-  } catch(err){const output=form.id==='settings-form'?$('#settings-error'):$('#form-error');if(output)output.textContent=err.message;else toast(err.message);}
+  } catch(err){const output=form.id==='settings-form'?$('#settings-error'):form.id==='asset-sync-settings-form'?$('#asset-sync-error'):$('#form-error');if(output)output.textContent=err.message;else toast(err.message);}
   finally {if(button)button.disabled=false;}
 });
 $('#close-modal').addEventListener('click',()=>$('#modal').close());

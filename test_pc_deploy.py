@@ -203,7 +203,7 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(record['company'], '微丰启')
         self.assertEqual(record['location'], '公司')
         self.assertIsNone(record['assigned_to'])
-        self.assertEqual(record['sync_state'], 'not_connected')
+        self.assertEqual(record['sync_state'], 'waiting_configuration')
         self.assertEqual(record['inventory'], snapshot)
         self.assertEqual(record['saved_by'], 'test-super-admin')
         dashboard = self.client.get('/pc-deploy/api/dashboard').json
@@ -283,7 +283,8 @@ class PlatformTests(unittest.TestCase):
             record = json.loads(c.execute('SELECT data FROM asset_registrations').fetchone()[0])
         self.assertEqual(record['asset_tag'], '202611090001')
         self.assertEqual(record['version'], 1)
-        self.assertEqual(self.client.get('/pc-deploy/api/dashboard').json['asset_registrations'], [record])
+        self.assertEqual(self.client.get('/pc-deploy/api/dashboard').json['asset_registrations'],
+                         [dict(record, sync_state='waiting_configuration', sync=None)])
 
     def test_asset_registration_does_not_promote_windows_or_domain_telemetry(self):
         inv, _ = self.register()

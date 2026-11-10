@@ -22,6 +22,13 @@ CREATE TABLE IF NOT EXISTS devices (
 CREATE TABLE IF NOT EXISTS asset_registrations (
  device_id TEXT PRIMARY KEY REFERENCES devices(id), asset_tag TEXT NOT NULL UNIQUE,
  version INTEGER NOT NULL, data TEXT NOT NULL, updated REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS asset_sync_outbox (
+ id TEXT PRIMARY KEY, device_id TEXT NOT NULL REFERENCES devices(id), registration_version INTEGER NOT NULL,
+ asset_tag TEXT NOT NULL, endpoint TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL,
+ attempts INTEGER NOT NULL, next_attempt REAL NOT NULL, lease_until REAL NOT NULL, claim_token TEXT NOT NULL,
+ data TEXT NOT NULL, created REAL NOT NULL, updated REAL NOT NULL, config_revision INTEGER NOT NULL,
+ UNIQUE(device_id,registration_version));
+CREATE INDEX IF NOT EXISTS asset_sync_due ON asset_sync_outbox(state,next_attempt,lease_until);
 CREATE TABLE IF NOT EXISTS previews (id TEXT PRIMARY KEY, data TEXT NOT NULL, expires REAL NOT NULL,
  session_id TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS jobs (
