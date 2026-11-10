@@ -1211,11 +1211,12 @@ async function run() {
     await page.waitForFunction(()=>!busy&&data.devices[0].asset_inventory_revision==='pe-inventory-1');
     await page.locator('[data-view=assets]').click();
     assert.equal(await page.locator('#page-title').textContent(),'资产登记');checks++;
-    assert.ok((await page.locator('.asset-notice').textContent()).includes('尚未开启 asset 自动同步'));checks++;
+    assert.ok((await page.locator('.asset-notice').textContent()).includes('PE 采集自动保存'));checks++;
     assert.ok((await page.locator('#asset-rows').textContent()).includes('16.0 GiB'));checks++;
     assert.ok((await page.locator('#asset-rows').textContent()).includes('512.0 GiB'));checks++;
     assert.ok((await page.locator('#asset-rows').textContent()).includes('具体显卡待确认'));checks++;
     assert.equal(await page.locator('#asset-rows img').count(),0);checks++;
+    await page.locator('#asset-rows details summary').first().click();
     await page.locator('[data-action=asset-register][data-id=laptop-1]').click();
     assert.ok((await page.locator('#asset-registration-form').textContent()).includes('微丰启'));checks++;
     assert.ok((await page.locator('#asset-registration-form').textContent()).includes('位置：公司'));checks++;
@@ -1252,6 +1253,7 @@ async function run() {
     await page.locator('#refresh').click();
     await page.getByText('PE 配置已变化，请重新核对保存').waitFor();
     assert.ok((await page.locator('#asset-rows').textContent()).includes('32.0 GiB'));checks++;
+    await page.locator('#asset-rows details summary').first().click();
     await page.locator('[data-action=asset-register][data-id=laptop-1]').click();
     assert.equal(await page.locator('#asset-registration-form [name=asset_tag]').inputValue(),'001234567890');checks++;
     assert.equal(await page.locator('#asset-registration-form').getAttribute('data-version'),'1');checks++;
@@ -1261,12 +1263,12 @@ async function run() {
     await syncForm.locator('[name=token]').fill('adp_'+'a'.repeat(36)+'.'+'b'.repeat(43));
     await page.locator('[data-action=asset-sync-probe]').click();
     await page.locator('#asset-sync-probe-status').getByText(/连接成功/).waitFor();
-    assert.equal(await syncForm.locator('[name=category_id]').inputValue(),'37');checks++;
-    assert.equal(await syncForm.locator('[name=category_id] option:checked').textContent(),'真实笔记本电脑');checks++;
+    assert.equal(await syncForm.locator('[name=category_id]').inputValue(),'');checks++;
+    assert.equal(await syncForm.locator('[name=category_id] option:checked').textContent(),'自动上报不需要分类');checks++;
     await syncForm.locator('[name=sync_enabled]').check();
     await syncForm.locator('[type=submit]').click();
     await page.waitForFunction(()=>data.asset_sync?.enabled&&!assetSyncDirty);
-    assert.equal(assetSyncSettingsPayload.category_id,37);checks++;
+    assert.equal(assetSyncSettingsPayload.category_id,null);checks++;
     assert.equal(assetSyncSettingsPayload.endpoint,'http://asset.test');checks++;
     assert.equal(await page.locator('#asset-sync-settings-form [name=token]').inputValue(),'');checks++;
     await page.locator('[data-view=devices]').click();

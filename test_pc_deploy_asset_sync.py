@@ -7,7 +7,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import test_pc_deploy as platform
-from pc_deploy.asset_sync import PATH, endpoint_url, post_registration
+from pc_deploy.asset_sync import PATH, INTAKE_PATH, endpoint_url, post_registration
 
 
 class AssetSyncTests(unittest.TestCase):
@@ -42,9 +42,15 @@ class AssetSyncTests(unittest.TestCase):
 
     def save(self, version=0):
         if version == 0:
+            with self.store.connect(write=True) as c:
+                config = self.sender.config(c)
+                self.store.put(c, 'asset_sync', dict(config, enabled=False))
             value = platform.machine()
             value['system_info'] = dict(cpus=[dict(name='Fixture CPU')], gpus=[dict(name='Fixture GPU')])
             self.register(value)
+            with self.store.connect(write=True) as c:
+                self.store.put(c, 'asset_sync', config)
+                version = c.execute('SELECT version FROM asset_registrations').fetchone()[0]
         device = self.client.get('/pc-deploy/api/dashboard').json['devices'][0]
         result = self.post('/pc-deploy/api/asset-registrations/' + device['id'],
                            dict(asset_tag='001234567890', version=version,
@@ -61,6 +67,115 @@ class AssetSyncTests(unittest.TestCase):
         return dict(created=201, already_exists=200, configuration_conflict=409)[result], dict(
             result=result, externalRegistrationId=request['externalRegistrationId'],
             asset=dict(id=81, assetTag=request['assetTag'], version=0), differences=[], warnings=[], replayed=False)
+
+    def test_auto_intake_needs_no_manual_tag_or_category_and_receives_number_after_approval(self):
+        self.assertEqual(self.configure(category_id=None).status_code, 200)
+        inv, reg = self.register()
+        row = self.row()
+        payload = json.loads(row['payload'])
+        self.assertNotIn('assetTag', payload)
+        self.assertIsNone(payload['categoryId'])
+        self.assertEqual(row['endpoint'], 'http://asset.test' + INTAKE_PATH)
+        self.sender.transport = lambda *args: (202, dict(externalRegistrationId=row['id'], result='pending_review', asset=None))
+        self.sender.process_one()
+        self.assertEqual(self.row()['state'], 'pending_review')
+        polled = []
+        def approved(*args):
+            polled.append(args)
+            return 200, dict(externalRegistrationId=row['id'], result='approved', asset=dict(id=81, assetTag='202611100001', version=0))
+        self.sender.status_transport = approved
+        self.sender.process_one(now=self.row()['next_attempt'] + 1)
+        self.assertEqual(self.row()['state'], 'approved')
+        self.assertIn('/intakes/ad%3A', polled[0][0])
+        saved = self.client.get('/pc-deploy/api/dashboard').json['asset_registrations'][0]
+        self.assertEqual(saved['asset_tag'], '202611100001')
+        inv['boot_id'] = str(uuid.uuid4())
+        self.register(inv)
+        with self.store.connect() as c:
+            self.assertEqual(c.execute('SELECT count(*) FROM asset_sync_outbox').fetchone()[0], 1)
+
+    def test_auto_intake_freezes_first_request_across_poll_and_reject(self):
+        self.configure(category_id=None)
+        inv, reg = self.register()
+        row = self.row()
+        inv['system_info'] = dict(cpus=[dict(name='Changed CPU')], gpus=[])
+        result = self.post('/pc-deploy/api/agent/poll', inv, reg['token'])
+        self.assertEqual(result.status_code, 200, result.json)
+        self.assertEqual(self.row()['payload'], row['payload'])
+        self.sender.transport = lambda *args: (200, dict(externalRegistrationId=row['id'], result='rejected', asset=None, message='not new'))
+        self.sender.process_one()
+        self.assertEqual(self.row()['state'], 'rejected')
+        self.post('/pc-deploy/api/agent/poll', inv, reg['token'])
+        with self.store.connect() as c:
+            self.assertEqual(c.execute('SELECT count(*) FROM asset_sync_outbox').fetchone()[0], 1)
+
+    def test_enabling_intake_backfills_existing_devices_and_missing_model_can_be_reviewed(self):
+        inv, reg = self.register()
+        with self.store.connect(write=True) as c:
+            saved = json.loads(c.execute('SELECT data FROM asset_registrations').fetchone()[0])
+            saved['inventory']['model'] = ''
+            saved['inventory']['oem_model'] = ''
+            from pc_deploy.asset_sync import registration_payload
+            payload = json.loads(registration_payload(saved, None, 'ad:missing:1', intake=True))
+            self.assertIsNone(payload['snapshot']['model'])
+        self.configure(category_id=None)
+        self.assertEqual(self.row()['state'], 'pending')
+        self.assertEqual(json.loads(self.row()['data'])['kind'], 'intake')
+        self.configure(category_id=None, token='')
+        with self.store.connect() as c:
+            self.assertEqual(c.execute('SELECT count(*) FROM asset_sync_outbox').fetchone()[0], 1)
+
+    def test_intake_lost_response_reuses_identical_request_and_rejects_bad_approved_number(self):
+        self.configure(category_id=None)
+        self.register()
+        before = self.row()
+        self.sender.transport = lambda *args: (_ for _ in ()).throw(OSError('lost response'))
+        self.sender.process_one()
+        self.assertEqual(self.row()['state'], 'retry')
+        received = []
+        def pending(*args):
+            received.append(args[-1])
+            return 202, dict(externalRegistrationId=before['id'], result='pending_review', asset=None)
+        self.sender.transport = pending
+        self.sender.process_one(now=self.row()['next_attempt'] + 1)
+        self.assertEqual(received, [before['payload']])
+        self.sender.status_transport = lambda *args: (200, dict(externalRegistrationId=before['id'], result='approved',
+                                                               asset=dict(id=81, assetTag='not-a-valid-number', version=0)))
+        self.sender.process_one(now=self.row()['next_attempt'] + 1)
+        self.assertEqual(self.row()['state'], 'blocked')
+        self.assertEqual(json.loads(self.row()['data'])['code'], 'RESPONSE_MISMATCH')
+
+    def test_multiple_devices_with_same_sn_have_separate_intake_keys(self):
+        self.configure(category_id=None)
+        self.register(platform.machine(serial='SAME-SN'))
+        self.register(platform.machine(serial='SAME-SN'))
+        with self.store.connect() as c:
+            rows = list(c.execute('SELECT id,asset_tag FROM asset_sync_outbox'))
+            self.assertEqual(len(rows), 2)
+            self.assertNotEqual(rows[0]['id'], rows[1]['id'])
+
+    def test_intake_waits_for_receiver_upgrade_without_losing_request(self):
+        self.configure(category_id=None)
+        self.register()
+        original = self.row()
+        self.sender.transport = lambda *args: (404, None)
+        self.sender.process_one()
+        self.assertEqual(self.row()['state'], 'retry')
+        self.assertEqual(self.row()['payload'], original['payload'])
+        self.sender.transport = lambda *args: (202, dict(externalRegistrationId=original['id'], result='pending_review', asset=None))
+        self.sender.process_one(now=self.row()['next_attempt'] + 1)
+        self.assertEqual(self.row()['state'], 'pending_review')
+
+    def test_old_never_submitted_manual_draft_becomes_review_not_direct_creation(self):
+        self.save()
+        self.assertEqual(self.configure(category_id=None).status_code, 200)
+        row = self.row()
+        self.assertEqual(json.loads(row['data'])['kind'], 'intake')
+        self.assertNotIn('assetTag', json.loads(row['payload']))
+        with self.store.connect() as c:
+            saved = json.loads(c.execute('SELECT data FROM asset_registrations').fetchone()[0])
+            self.assertEqual(saved['kind'], 'intake')
+            self.assertEqual(saved['asset_tag'], '')
 
     def test_http_settings_are_encrypted_and_not_exposed_to_dashboard(self):
         self.assertEqual(self.configure().status_code, 200)
@@ -155,7 +270,7 @@ class AssetSyncTests(unittest.TestCase):
         result = self.post('/pc-deploy/api/asset-sync/probe', dict(endpoint='http://asset.test', token=self.token))
         self.assertEqual(result.status_code, 200, result.json)
         self.assertEqual(result.json['categories'], [dict(id=22, name='实际笔记本电脑')])
-        self.assertEqual(received[0][0], 'http://asset.test' + PATH)
+        self.assertEqual(received[0][0], 'http://asset.test' + INTAKE_PATH)
         self.assertFalse(self.client.get('/pc-deploy/api/dashboard').json['asset_sync']['enabled'])
         with self.store.connect() as c:
             self.assertEqual(c.execute('SELECT count(*) FROM asset_sync_outbox').fetchone()[0], 0)

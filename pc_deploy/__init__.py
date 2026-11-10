@@ -879,6 +879,11 @@ def register_pc_deploy(host_app, current_user, touch_session):
             if old and old['boot_id'] == inv['boot_id']:
                 if old['inventory_hash'] != digest(inv):
                     raise Invalid('登记重试的硬件信息不一致')
+                if not report and json.loads(old['data']).get('system_info'):
+                    record['system_info'] = json.loads(old['data'])['system_info']
+                c.execute('UPDATE devices SET data=?,last_seen=? WHERE id=?',
+                          (canonical(record), time.time(), old['id']))
+                asset_sender.auto_save(c, dict(old, last_seen=time.time()), asset_inventory(record))
                 return jsonify(device_id=old['id'], token=store.decrypt(old['token_secret']), boot_code=old['boot_code'])
             if c.execute('SELECT id FROM jobs WHERE device_id=? AND state IN (?,?,?,?)', (inv['hardware_uuid'], *ACTIVE)).fetchone():
                 raise Invalid('该电脑有未结束任务，请先在平台现场核对，禁止自动接续清盘')
@@ -891,6 +896,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
                       'last_seen=excluded.last_seen,consumed=0',
                       (inv['hardware_uuid'], inv['boot_id'], canonical(record), digest(inv), token_hash(token),
                        store.encrypt(token), code, time.time()))
+            asset_sender.auto_save(c, dict(id=inv['hardware_uuid'], last_seen=time.time()), asset_inventory(record))
             c.execute('UPDATE enrollments SET uses=uses+1 WHERE token_hash=?', (join['token_hash'],))
             event(c, 'device', '设备已登记，等待人工选盘：' + inv['serial'])
         return jsonify(device_id=inv['hardware_uuid'], token=token, boot_code=code)
@@ -907,8 +913,11 @@ def register_pc_deploy(host_app, current_user, touch_session):
             report = device_report(payload.get('system_info'), 'pe')
             if report:
                 record['system_info'] = dict(report, reported_at=time.time())
+            elif json.loads(dev['data']).get('system_info'):
+                record['system_info'] = json.loads(dev['data'])['system_info']
             c.execute('UPDATE devices SET data=?,inventory_hash=?,last_seen=? WHERE id=?',
                       (canonical(record), digest(inv), time.time(), dev['id']))
+            asset_sender.auto_save(c, dict(dev, last_seen=time.time()), asset_inventory(record))
             if payload.get('registration_only') is True:
                 return jsonify(job=None, registration_only=True)
             row = c.execute('SELECT * FROM jobs WHERE device_id=? AND state IN (?,?,?,?)', (dev['id'], *ACTIVE)).fetchone()
@@ -1339,6 +1348,8 @@ def register_pc_deploy(host_app, current_user, touch_session):
         return send_file(path, conditional=True)
 
     asset_sender = register_asset_sync(app, host_app, store, admin, body, event)
+    asset_sender.snapshot = asset_inventory
     register_media_routes(app, store, admin, body, tls_required, bearer, event, create_config, bootstrap_zip)
     host_app.register_blueprint(app)
+    asset_sender.wake()
     return app

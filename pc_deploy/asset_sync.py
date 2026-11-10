@@ -9,13 +9,14 @@ import urllib.error
 import urllib.request
 import uuid
 from datetime import datetime, timezone
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from flask import jsonify, request
 
-from .deployment import Invalid, canonical, integer, text
+from .deployment import Invalid, canonical, digest, integer, text
 
 PATH = '/api/integrations/ad-deployment/v1/registrations'
+INTAKE_PATH = '/api/integrations/ad-deployment/v1/intakes'
 CONNECTION_PATH = '/api/integrations/ad-deployment/v1/connection'
 BUSES = {'NVMe', 'SATA', 'ATA', 'SAS', 'SCSI', 'RAID', 'MMC'}
 AUTH_ERRORS = {'AUTHENTICATION_FAILED', 'FORBIDDEN', 'HTTPS_REQUIRED'}
@@ -41,12 +42,16 @@ def endpoint_url(value):
         parts = urlsplit(value)
         port = parts.port
         if (parts.scheme not in ('http', 'https') or not parts.hostname or parts.username or parts.password
-                or parts.query or parts.fragment or parts.path.rstrip('/') not in ('', PATH)
+                or parts.query or parts.fragment or parts.path.rstrip('/') not in ('', PATH, INTAKE_PATH)
                 or '\\' in value or any(ch.isspace() for ch in value) or port == 0):
             raise ValueError()
     except ValueError:
         raise Invalid('asset 接收接口只允许 HTTP 或 HTTPS 地址，不能包含账号、查询参数或其他路径') from None
-    return urlunsplit((parts.scheme, parts.netloc.lower(), PATH, '', ''))
+    return urlunsplit((parts.scheme, parts.netloc.lower(), INTAKE_PATH, '', ''))
+
+
+def receiver_root(endpoint):
+    return endpoint.removesuffix(INTAKE_PATH).removesuffix(PATH)
 
 
 def clean(value, label, maximum=200, required=False):
@@ -60,7 +65,7 @@ def clean(value, label, maximum=200, required=False):
     return value or None
 
 
-def registration_payload(record, category, external_id):
+def registration_payload(record, category, external_id, intake=False):
     inv = record['inventory']
     cpus = list(dict.fromkeys(filter(None, (clean(row.get('name'), 'CPU')
                     for row in inv.get('cpus', []) if isinstance(row, dict)))))
@@ -87,10 +92,12 @@ def registration_payload(record, category, external_id):
     operator = clean(record.get('saved_by'), '登记操作人', 120, True)
     payload = dict(externalRegistrationId=external_id, assetTag=record['asset_tag'], categoryId=category,
                    capturedAt=captured, operator=dict(id=operator, displayName=operator),
-                   snapshot=dict(model=clean(inv.get('oem_model') or inv.get('model'), '电脑型号', 120, True),
+                   snapshot=dict(model=clean(inv.get('oem_model') or inv.get('model'), '电脑型号', 120, not intake),
                                  cpu=clean(' / '.join(cpus), 'CPU 汇总'), memory=memory,
                                  internalDisks=disks, graphicsCards=graphics,
                                  manufacturerSerialNumber=clean(inv.get('serial'), 'SN', 160)))
+    if intake:
+        payload.pop('assetTag')
     encoded = canonical(payload)
     if len(encoded.encode()) > 32768:
         raise Invalid('资产登记请求超过接收端32KiB上限')
@@ -132,7 +139,7 @@ def post_registration(endpoint, token, ca_pem, encoded):
 
 
 def probe_connection(endpoint, token, ca_pem):
-    return request_json(endpoint.removesuffix(PATH) + CONNECTION_PATH, token, ca_pem)
+    return request_json(receiver_root(endpoint) + CONNECTION_PATH, token, ca_pem)
 
 
 def connection_target(sender, c, value):
@@ -166,10 +173,14 @@ class AssetSender:
         self._thread = None
         self.background_allowed = not app.testing
         self.transport = post_registration
+        self.status_transport = request_json
         self.probe_transport = probe_connection
 
     def config(self, c):
-        return self.store.setting(c, 'asset_sync', dict(enabled=False, endpoint='', category_id=None, revision=0))
+        value = self.store.setting(c, 'asset_sync', dict(enabled=False, endpoint='', category_id=None, revision=0))
+        if value['endpoint']:
+            value['endpoint'] = receiver_root(value['endpoint']) + INTAKE_PATH
+        return value
 
     def secret(self, c):
         encoded = self.store.setting(c, 'asset_sync_secret')
@@ -198,12 +209,56 @@ class AssetSender:
                     **{key: meta[key] for key in ('result', 'code', 'message') if key in meta})
 
     def ensure_editable(self, c, identity, tag):
-        if c.execute("SELECT 1 FROM asset_sync_outbox WHERE device_id=? AND state IN ('pending','retry','sending')",
+        if c.execute("SELECT 1 FROM asset_sync_outbox WHERE device_id=? AND state IN ('pending','retry','sending','pending_review')",
                      (identity,)).fetchone():
             raise Invalid('此设备正在同步或等待原请求重试，请取得结果后再编辑')
         if c.execute('SELECT 1 FROM asset_sync_outbox WHERE device_id=? AND attempts>0 AND asset_tag<>?',
                      (identity, tag)).fetchone():
             raise Invalid('此设备的资产编号已提交到 asset，不能直接改投另一个编号；请先核对关联资产')
+
+    def auto_save(self, c, device, snapshot):
+        identity = device['id']
+        previous = c.execute('SELECT * FROM asset_registrations WHERE device_id=?', (identity,)).fetchone()
+        # Existing legacy work, particularly successful registrations, must never become new intakes.
+        for row in c.execute('SELECT payload,data FROM asset_sync_outbox WHERE device_id=?', (identity,)):
+            metadata = json.loads(row['data'])
+            if metadata.get('kind') == 'intake' and metadata.get('code') != 'LOCAL_VALIDATION_FAILED':
+                return
+            if metadata.get('kind') != 'intake' and 'assetTag' in json.loads(row['payload']):
+                return
+        old = json.loads(previous['data']) if previous else None
+        if old and old.get('kind') != 'intake':
+            if not self.config(c)['enabled']:
+                return
+            # A never-submitted draft is safe to send for review, not direct asset creation.
+            old = dict(old, asset_tag='')
+        now = time.time()
+        record = dict(device_id=identity, asset_tag=old.get('asset_tag', '') if old else '',
+                      version=previous['version'] + 1 if previous else 1, kind='intake',
+                      company='微丰启', location='公司', assigned_to=None, inventory=snapshot,
+                      inventory_revision=digest(snapshot), saved_by='pe-auto', updated=now,
+                      captured_at=device['last_seen'] or now)
+        def normalized(value):
+            if isinstance(value, dict):
+                return {key: normalized(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return sorted((normalized(item) for item in value), key=canonical)
+            return value
+        try:
+            meaningful = json.loads(registration_payload(record, None, 'fingerprint', intake=True))['snapshot']
+        except (Invalid, ValueError, OverflowError):
+            meaningful = snapshot
+        fingerprint = digest(normalized(meaningful))
+        if old and old.get('configuration_hash') == fingerprint:
+            self.enqueue(c, old)
+            return
+        record['configuration_hash'] = fingerprint
+        # The legacy NOT NULL UNIQUE column needs a private key until asset assigns a real number.
+        tag = record['asset_tag'] or '@intake:' + identity
+        c.execute('INSERT INTO asset_registrations VALUES(?,?,?,?,?) ON CONFLICT(device_id) DO UPDATE SET '
+                  'asset_tag=excluded.asset_tag,version=excluded.version,data=excluded.data,updated=excluded.updated',
+                  (identity, tag, record['version'], canonical(record), now))
+        self.enqueue(c, record)
 
     def enqueue(self, c, record):
         config = self.config(c)
@@ -214,15 +269,17 @@ class AssetSender:
             return
         instance = self.store.setting(c, 'asset_sync_instance')
         external_id = 'ad:' + instance + ':' + record['device_id'] + ':' + str(record['version'])
-        state, meta = 'pending', {'retry_limit': 8}
+        intake = record.get('kind') == 'intake'
+        state, meta = 'pending', {'retry_limit': 8, 'kind': 'intake' if intake else 'registration'}
         try:
-            payload = registration_payload(record, config['category_id'], external_id)
+            payload = registration_payload(record, config['category_id'], external_id, intake=intake)
         except (Invalid, ValueError, OverflowError):
             payload, state = '{}', 'rejected'
             meta.update(code='LOCAL_VALIDATION_FAILED', message='采集资料不符合接收端要求，请核对型号、配置长度和操作人后保存新版本')
         now = time.time()
         c.execute('INSERT INTO asset_sync_outbox VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                  (external_id, record['device_id'], record['version'], record['asset_tag'], config['endpoint'],
+                  (external_id, record['device_id'], record['version'], record['asset_tag'],
+                   receiver_root(config['endpoint']) + (INTAKE_PATH if intake else PATH),
                    payload, state, 0, now, 0, '', canonical(meta), now, now, config['revision']))
 
     def claim(self, now):
@@ -232,11 +289,11 @@ class AssetSender:
             if not config['enabled'] or pause:
                 return None
             row = c.execute("""SELECT * FROM asset_sync_outbox
-                WHERE (state IN ('pending','retry') AND next_attempt<=?) OR (state='sending' AND lease_until<=?)
+                WHERE (state IN ('pending','retry','pending_review') AND next_attempt<=?) OR (state='sending' AND lease_until<=?)
                 ORDER BY created LIMIT 1""", (now, now)).fetchone()
             if not row:
                 return None
-            if row['endpoint'] != config['endpoint']:
+            if receiver_root(row['endpoint']) != receiver_root(config['endpoint']):
                 meta = json.loads(row['data'])
                 meta.update(code='TARGET_CHANGED', message='接收地址已改变，原请求未改投；请核对目标后保存新版本')
                 c.execute("UPDATE asset_sync_outbox SET state='blocked',data=?,updated=? WHERE id=?",
@@ -252,6 +309,24 @@ class AssetSender:
 
     @staticmethod
     def outcome(status, body, row):
+        intake = json.loads(row.get('data', '{}')).get('kind') == 'intake'
+        if intake and isinstance(body, dict) and body.get('result') in ('pending_review', 'approved', 'rejected'):
+            result, asset = body['result'], body.get('asset')
+            expected = (200, 202) if result == 'pending_review' else (200,)
+            valid_asset = (isinstance(asset, dict) and type(asset.get('id')) is int and asset['id'] > 0
+                           and type(asset.get('version')) is int and asset['version'] >= 0
+                           and isinstance(asset.get('assetTag'), str) and re.fullmatch(r'[0-9]{12}', asset['assetTag']))
+            if (status not in expected or body.get('externalRegistrationId') != row['id']
+                    or (result == 'approved' and not valid_asset)
+                    or (result != 'approved' and asset is not None)):
+                return 'blocked', dict(code='RESPONSE_MISMATCH', message='asset 审核结果格式或登记标识不一致'), False
+            return result, dict(result=dict(result=result, asset=asset),
+                                message='审核已通过' if result == 'approved' else
+                                        'asset 已驳回，请在资产系统处理' if result == 'rejected' else '等待 asset 审核'), False
+        if intake and 200 <= status < 300:
+            return 'blocked', dict(code='INVALID_RESPONSE', message='asset 审核结果不符合约定'), False
+        if intake and status == 404:
+            return 'retry', dict(code='RECEIVER_NOT_READY', message='asset 审核接口或记录暂未就绪，保留原标识等待重试'), False
         if isinstance(body, dict) and body.get('result') in ('created', 'already_exists', 'configuration_conflict'):
             result = body['result']
             expected = {'created': 201, 'already_exists': 200, 'configuration_conflict': 409}[result]
@@ -300,14 +375,19 @@ class AssetSender:
         if not row:
             return False
         try:
-            status, body = self.transport(row['endpoint'], row['secret']['token'],
-                                          row['secret'].get('ca_pem', ''), row['payload'])
+            meta = json.loads(row['data'])
+            if meta.get('poll'):
+                status, body = self.status_transport(row['endpoint'] + '/' + quote(row['id'], safe=''),
+                                                    row['secret']['token'], row['secret'].get('ca_pem', ''))
+            else:
+                status, body = self.transport(row['endpoint'], row['secret']['token'],
+                                              row['secret'].get('ca_pem', ''), row['payload'])
             state, outcome, pause = self.outcome(status, body, row)
         except (OSError, ValueError, urllib.error.URLError):
             state, outcome, pause = 'retry', dict(code='CONNECTION_FAILED', message='连接或证书校验失败，保留原登记标识等待重试'), False
         with self.store.connect(write=True) as c:
-            active = c.execute("SELECT 1 FROM asset_sync_outbox WHERE id=? AND claim_token=? AND state='sending'",
-                               (row['id'], row['claim'])).fetchone()
+            active = c.execute("SELECT 1 FROM asset_sync_outbox WHERE id=? AND claim_token=? AND state='sending' AND lease_until>?",
+                               (row['id'], row['claim'], time.time())).fetchone()
             if not active:
                 return True
             meta = json.loads(row['data'])
@@ -315,20 +395,46 @@ class AssetSender:
             if pause and current['revision'] != row['config']['revision']:
                 state, pause = 'retry', False
             meta.update(outcome)
+            if meta.get('kind') == 'intake':
+                if meta.get('poll'):
+                    meta['poll_count'] = meta.get('poll_count', 0) + 1
+                if state == 'pending_review':
+                    meta.update(poll=True, failures=0)
+                    if meta.get('poll_count', 0) >= meta.get('poll_limit', 2880):
+                        state = 'attention'
+                        meta['message'] = '自动查询已达上限，可按原登记标识继续查询；审核仍在 asset 处理'
+                if state == 'retry':
+                    meta['failures'] = meta.get('failures', 0) + 1
+                if state == 'approved':
+                    record_row = c.execute('SELECT * FROM asset_registrations WHERE device_id=? AND version=?',
+                                           (row['device_id'], row['registration_version'])).fetchone()
+                    tag = meta['result']['asset']['assetTag']
+                    collision = c.execute('SELECT 1 FROM asset_registrations WHERE asset_tag=? AND device_id<>?',
+                                          (tag, row['device_id'])).fetchone()
+                    if record_row and collision:
+                        state = 'blocked'
+                        meta.update(code='LOCAL_ASSET_TAG_CONFLICT', message='审核编号已关联另一设备，请在 asset 核对')
+                    elif record_row:
+                        record = json.loads(record_row['data'])
+                        record.update(asset_tag=tag, updated=time.time())
+                        c.execute('UPDATE asset_registrations SET asset_tag=?,data=?,updated=? WHERE device_id=? AND version=?',
+                                  (tag, canonical(record), record['updated'], row['device_id'], row['registration_version']))
             # Never persist receiver-reflected credentials.
             for sensitive in row['secret'].values():
                 if sensitive:
                     meta = json.loads(canonical(meta).replace(json.dumps(sensitive)[1:-1], '[redacted]'))
-            if state == 'retry' and row['attempts'] >= meta.get('retry_limit', 8):
+            if state == 'retry' and (meta.get('failures', 0) if meta.get('kind') == 'intake' else row['attempts']) >= meta.get('retry_limit', 8):
                 state = 'attention'
                 meta.update(message='自动重试已达上限，结果仍待确认；可按原请求重试，不会换登记标识')
             if pause:
                 self.store.put(c, 'asset_sync_pause', dict(code=meta.get('code'), message=meta.get('message')))
             delay = min(300, 5 * 2 ** min(row['attempts'] - 1, 6))
+            if state == 'pending_review':
+                delay = min(300, 30 * 2 ** min(meta.get('poll_count', 0), 4))
             c.execute('UPDATE asset_sync_outbox SET state=?,data=?,next_attempt=?,lease_until=0,claim_token=?,updated=? '
                       'WHERE id=? AND claim_token=?',
-                      (state, canonical(meta), now + delay if state == 'retry' else 0, '', time.time(), row['id'], row['claim']))
-            if state != 'retry':
+                      (state, canonical(meta), now + delay if state in ('retry', 'pending_review') else 0, '', time.time(), row['id'], row['claim']))
+            if state not in ('retry', 'pending_review'):
                 self.event(c, 'asset_sync', '资产 ' + row['asset_tag'] + ' 同步结果：' + state)
         return True
 
@@ -376,8 +482,8 @@ def register_asset_sync(app, host_app, store, admin, body, event):
                 raise Invalid('联动设置已变化，请刷新后重试')
             endpoint, secret = connection_target(sender, c, value)
             category = integer(value.get('category_id'), 'asset 电脑分类 ID', 1, 2**53-1) if value.get('category_id') is not None else None
-            if value['enabled'] and not (endpoint and category and secret.get('token')):
-                raise Invalid('开启前请填写 asset 地址、电脑分类 ID 和专用服务凭据')
+            if value['enabled'] and not (endpoint and secret.get('token')):
+                raise Invalid('开启前请填写 asset 地址和专用服务凭据；分类由 asset 审核确定')
             config = dict(enabled=value['enabled'], endpoint=endpoint, category_id=category,
                           revision=previous['revision']+1)
             store.put(c, 'asset_sync', config)
@@ -385,10 +491,13 @@ def register_asset_sync(app, host_app, store, admin, body, event):
             store.put(c, 'asset_sync_pause', None)
             if store.setting(c, 'asset_sync_instance') is None:
                 store.put(c, 'asset_sync_instance', str(uuid.uuid4()))
-            for row in list(c.execute("SELECT id,data FROM asset_sync_outbox WHERE state='blocked' AND endpoint=?", (endpoint,))):
+            for row in list(c.execute("SELECT id,data FROM asset_sync_outbox WHERE state='blocked' AND endpoint IN (?,?)",
+                                     (endpoint, receiver_root(endpoint) + PATH))):
                 if json.loads(row['data']).get('code') in AUTH_ERRORS | {'HTTP_401', 'HTTP_403'}:
                     c.execute("UPDATE asset_sync_outbox SET state='pending',next_attempt=0 WHERE id=?", (row['id'],))
             if config['enabled']:
+                for device in list(c.execute('SELECT * FROM devices')):
+                    sender.auto_save(c, device, sender.snapshot(json.loads(device['data'])))
                 for row in list(c.execute('SELECT data FROM asset_registrations')):
                     sender.enqueue(c, json.loads(row['data']))
             event(c, 'asset_sync', '更新 asset 联动设置；' + ('自动发送已开启' if config['enabled'] else '已暂停新发送'))
@@ -414,19 +523,17 @@ def register_asset_sync(app, host_app, store, admin, body, event):
             message = hints.get(status, 'asset 连接检查返回 HTTP ' + str(status))
             raise Invalid(dictionary_error(result, message) if status == 409 else message)
         if (not isinstance(result, dict) or result.get('receiver') != 'asset-management'
-                or result.get('protocolVersion') != 1 or not isinstance(result.get('categories'), list)
-                or len(result['categories']) > 1000):
+                or result.get('protocolVersion') != 1 or not isinstance(result.get('categories', []), list)
+                or len(result.get('categories', [])) > 1000):
             raise Invalid('接收端不是受支持的 asset 接口')
         categories = []
-        for choice in result['categories']:
+        for choice in result.get('categories', []):
             if (not isinstance(choice, dict) or type(choice.get('id')) is not int or not 0 < choice['id'] <= 2**53-1
                     or not isinstance(choice.get('name'), str) or not 0 < len(choice['name']) <= 160):
                 raise Invalid('asset 返回了无效的电脑分类')
             if any(sensitive and sensitive in choice['name'] for sensitive in secret.values()):
                 raise Invalid('asset 返回了不可信的分类信息')
             categories.append(dict(id=choice['id'], name=choice['name']))
-        if not categories:
-            raise Invalid('asset 尚无可用的电脑分类，请先在基础资料启用或创建实际分类')
         return jsonify(ok=True, endpoint=endpoint, categories=categories)
 
     @app.post('/api/asset-registrations/<identity>/retry')
@@ -442,10 +549,13 @@ def register_asset_sync(app, host_app, store, admin, body, event):
                 raise Invalid('登记记录已变化，请刷新重试')
             row = c.execute('SELECT * FROM asset_sync_outbox WHERE device_id=? AND registration_version=?',
                             (identity, record['version'])).fetchone()
-            if not row or row['state'] not in ('retry','attention','blocked') or row['endpoint'] != config['endpoint']:
+            if (not row or row['state'] not in ('retry','attention','blocked')
+                    or receiver_root(row['endpoint']) != receiver_root(config['endpoint'])):
                 raise Invalid('此记录不允许按原请求重试；配置差异需核对，地址改变需保存新版本')
             meta = json.loads(row['data'])
             meta['retry_limit'] = row['attempts'] + 8
+            if meta.get('kind') == 'intake':
+                meta.update(failures=0, retry_limit=8, poll_limit=meta.get('poll_count', 0) + 2880)
             c.execute("UPDATE asset_sync_outbox SET state='pending',next_attempt=0,data=?,updated=? WHERE id=?",
                       (canonical(meta), time.time(), row['id']))
             event(c, 'asset_sync', '资产 ' + row['asset_tag'] + ' 已安排按原登记标识重试')

@@ -193,7 +193,7 @@ class PlatformTests(unittest.TestCase):
         self.assertNotIn('computer_name', snapshot)
         self.assertNotIn('macs', snapshot)
         route = '/pc-deploy/api/asset-registrations/' + device['id']
-        payload = dict(asset_tag='001234567890', version=0, inventory_revision=device['asset_inventory_revision'],
+        payload = dict(asset_tag='001234567890', version=1, inventory_revision=device['asset_inventory_revision'],
                        company='forged-company', location='forged-location', assigned_to='administrator',
                        sync_state='synced', inventory={'cpu': 'forged'})
         saved = self.post(route, payload)
@@ -231,7 +231,9 @@ class PlatformTests(unittest.TestCase):
             self.assertEqual(self.post(route, dict(payload, version=version)).status_code, 400)
         self.assertEqual(self.post(route, dict(payload, inventory_revision='stale')).status_code, 400)
         self.assertEqual(self.post('/pc-deploy/api/asset-registrations/missing', payload).status_code, 400)
-        self.assertEqual(self.client.get('/pc-deploy/api/dashboard').json['asset_registrations'], [])
+        auto = self.client.get('/pc-deploy/api/dashboard').json['asset_registrations']
+        self.assertEqual(len(auto), 1)
+        self.assertEqual(auto[0]['asset_tag'], '')
 
     def test_asset_registration_uses_asset_number_not_sn_for_local_duplicates(self):
         first, _ = self.register(machine(serial='SAME-SN'))
@@ -239,7 +241,7 @@ class PlatformTests(unittest.TestCase):
         devices = {d['id']: d for d in self.client.get('/pc-deploy/api/dashboard').json['devices']}
         def save(device, tag):
             return self.post('/pc-deploy/api/asset-registrations/' + device,
-                dict(asset_tag=tag, version=0, inventory_revision=devices[device]['asset_inventory_revision']))
+                dict(asset_tag=tag, version=1, inventory_revision=devices[device]['asset_inventory_revision']))
         self.assertEqual(save(first['hardware_uuid'], '202611090001').status_code, 200)
         duplicate = save(second['hardware_uuid'], '202611090001')
         self.assertEqual(duplicate.status_code, 400)
@@ -250,19 +252,19 @@ class PlatformTests(unittest.TestCase):
         inv, registered = self.register()
         device = self.client.get('/pc-deploy/api/dashboard').json['devices'][0]
         route = '/pc-deploy/api/asset-registrations/' + device['id']
-        payload = dict(asset_tag='202611090001', version=0, inventory_revision=device['asset_inventory_revision'])
+        payload = dict(asset_tag='202611090001', version=1, inventory_revision=device['asset_inventory_revision'])
         self.assertEqual(self.post(route, payload).status_code, 200)
         self.assertEqual(self.post(route, dict(payload, asset_tag='202611090002')).status_code, 400)
         changed = copy.deepcopy(inv)
         changed['ram_bytes'] = 32*1024**3
         self.assertEqual(self.post('/pc-deploy/api/agent/poll', changed, registered['token']).status_code, 200)
-        stale = self.post(route, dict(payload, version=1))
+        stale = self.post(route, dict(payload, version=2))
         self.assertEqual(stale.status_code, 400)
         self.assertIn('PE 配置已更新', stale.json['error'])
         dashboard = self.client.get('/pc-deploy/api/dashboard').json
         self.assertEqual(dashboard['asset_registrations'][0]['inventory']['ram_bytes'], 16*1024**3)
-        payload.update(version=1, inventory_revision=dashboard['devices'][0]['asset_inventory_revision'])
-        self.assertEqual(self.post(route, payload).json['registration']['version'], 2)
+        payload.update(version=2, inventory_revision=dashboard['devices'][0]['asset_inventory_revision'])
+        self.assertEqual(self.post(route, payload).json['registration']['version'], 3)
         self.assertEqual(self.client.get('/pc-deploy/api/dashboard').json['asset_registrations'][0]['inventory']['ram_bytes'], 32*1024**3)
 
     def test_asset_registration_keeps_offline_draft_across_pe_reentry_and_restart(self):
@@ -271,7 +273,7 @@ class PlatformTests(unittest.TestCase):
         with self.store.connect(write=True) as c:
             c.execute('UPDATE devices SET last_seen=0')
         route = '/pc-deploy/api/asset-registrations/' + device['id']
-        saved = self.post(route, dict(asset_tag='202611090001', version=0,
+        saved = self.post(route, dict(asset_tag='202611090001', version=1,
                          inventory_revision=device['asset_inventory_revision']))
         self.assertEqual(saved.status_code, 200)
         reentry = copy.deepcopy(inv)
@@ -282,7 +284,7 @@ class PlatformTests(unittest.TestCase):
         with reopened.connect() as c:
             record = json.loads(c.execute('SELECT data FROM asset_registrations').fetchone()[0])
         self.assertEqual(record['asset_tag'], '202611090001')
-        self.assertEqual(record['version'], 1)
+        self.assertEqual(record['version'], 2)
         self.assertEqual(self.client.get('/pc-deploy/api/dashboard').json['asset_registrations'],
                          [dict(record, sync_state='waiting_configuration', sync=None)])
 
