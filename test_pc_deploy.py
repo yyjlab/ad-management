@@ -780,25 +780,23 @@ class PlatformTests(unittest.TestCase):
     def test_domain_join_commands_complete_before_manual_reboot_without_claiming_trust(self):
         inv, _, job, token, _ = self.join_fixtures(wim=True)
         route = f'/pc-deploy/api/agent/jobs/{job}'
-        ready = dict(hardware_uuid=inv['hardware_uuid'], phase='working', os_build=26100,
-                     image_state='IMAGE_STATE_COMPLETE', oobe_done=True)
-        for patch in ({'os_build':19045}, {'oobe_done':False}, {'image_state':'IMAGE_STATE_UNDEPLOYABLE'},
-                      {'hardware_uuid':str(uuid.uuid4())}):
-            invalid = self.join_post(route+'/post-install/status', dict(ready, **patch), token)
-            self.assertEqual(invalid.status_code, 400, invalid.json)
+        ready = dict(hardware_uuid=inv['hardware_uuid'], phase='working')
+        invalid = self.join_post(route+'/post-install/status', dict(ready, hardware_uuid=str(uuid.uuid4())), token)
+        self.assertEqual(invalid.status_code, 400, invalid.json)
         self.assertIsNone(self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]['installed_at'])
         self.assertEqual(self.join_post(route+'/post-install/status', ready, token).status_code, 200)
         startup = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
-        started = startup['installed_at']
-        self.assertGreater(started, 0)
+        self.assertIsNone(startup['installed_at'])
         self.assertEqual(startup['domain_join']['state'], 'pending')
-        self.assertEqual(startup['timings']['windows_ready_at'], started)
+        self.assertIsNone(startup['timings']['windows_ready_at'])
         self.assertIsNone(startup['timings']['join_finished_at'])
         self.assertIsNone(startup['timings']['finished_at'])
         for stage in ('checking', 'joining', 'restarting'):
             result = self.join_post(route+'/domain-join/status',
                 dict(hardware_uuid=inv['hardware_uuid'], stage=stage), token)
             self.assertEqual(result.status_code, 200, result.json)
+        started = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]['installed_at']
+        self.assertGreater(started, 0)
         before = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
         ended = before['domain_join']['commands_completed_at']
         self.assertGreater(ended, 0)

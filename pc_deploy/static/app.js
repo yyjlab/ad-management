@@ -100,7 +100,6 @@ function jobBadge(job) {
   const join=job.domain_join;
   if(join?.state==='verified' && job.state==='completed')return '<span class="badge good">安装并加域完成</span>';
   if(join?.state==='restarting' && job.state==='awaiting_report')return '<span class="badge good">安装并加域完成</span>';
-  if(join?.state==='pending' && job.installed_at)return '<span class="badge blue">Windows 已启动，等待改名及加域</span>';
   if(join?.state==='waiting_release' && activeStates.includes(job.state))return '<span class="badge '+(join.released_at?'blue':'warn')+'">'+(join.released_at?'已授权，等待加域':'Windows 已安装，待统一加域')+'</span>';
   if(join?.state==='failed'&&!job.review)return '<span class="badge bad">系统已安装，加域失败</span>';
   if(join && ['checking','joining','restarting','verified'].includes(join.state) && activeStates.includes(job.state))return '<span class="badge blue">'+(join.state==='restarting'?'等待手动重启验证':join.state==='verified'?'加域已验证，等待完成回报':'自动加域中')+'</span>';
@@ -457,7 +456,6 @@ function renderWimPerformance(job) {
 }
 function renderJobProgress(job) {
   const join=job.domain_join;
-  if(join?.state==='pending' && job.installed_at)return '<div class="job-progress pending"><span class="job-progress-phase">Windows 已启动，等待改名及加域</span>'+renderWimPerformance(job)+'</div>';
   if(join && join.state!=='pending'){
     const stages={waiting_release:join.released_at?'管理员已授权，等待客户端领取':(job.expires_at && job.expires_at<serverNow()?'等待加域已超时，请查看日志':'可先完成现场设置，再在平台统一加域'),checking:'检查域 DNS 与电脑名',joining:'正在加入 AD 域',restarting:'改名及加域已完成',verified:'域信任验证已通过',failed:'加域失败，不会重新装机'};
     const tone = ['verified','restarting'].includes(join.state) ? ' completed' : join.state==='failed' ? ' stopped' : (join.state==='waiting_release'&&!join.released_at) ? ' pending' : '';

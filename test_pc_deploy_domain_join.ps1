@@ -270,7 +270,7 @@ exit $LASTEXITCODE
     Assert-Join ($LASTEXITCODE -eq 0) 'Finalizer did not exit successfully while waiting for manual restart'
     Assert-Join (Test-Path -LiteralPath (Join-Path $pausedDirectory 'config.json')) 'Manual restart lost the verification token'
     $readyReport=[IO.File]::ReadAllText((Join-Path $pausedDirectory 'windows-ready.json'))|ConvertFrom-Json
-    Assert-Join ($readyReport.os_build -eq 26100 -and $readyReport.image_state -eq 'IMAGE_STATE_COMPLETE' -and $readyReport.oobe_done) 'Windows startup report omitted the validated OS readiness fields'
+    Assert-Join ($readyReport.phase -eq 'working' -and -not $readyReport.PSObject.Properties['os_build']) 'Legacy startup diagnostic format changed'
     Assert-Join (([IO.File]::ReadAllText((Join-Path $pausedDirectory 'finalize-state.json'))|ConvertFrom-Json).phase -ne 'timed_out') 'Waiting for manual restart was marked timed out'
 
     $timeoutDirectory=New-JoinCase
