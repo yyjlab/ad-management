@@ -5,10 +5,13 @@ function Save-FinalizerState {
     try {
         if($cfg.token){$Detail=$Detail.Replace([string]$cfg.token,'[REDACTED]')}
         if($Detail.Length -gt 1600){$Detail=$Detail.Substring(0,1600)}
-        $body=@{phase=$Phase;hardware_uuid=$hardware;detail=$Detail;updated=[DateTime]::UtcNow.ToString('o')}|ConvertTo-Json -Compress
+        $body=@{phase=$Phase;hardware_uuid=$hardware;detail=$Detail;updated=[DateTime]::UtcNow.ToString('o')}
+        if($Phase -eq 'working'){$body.os_build=$build;$body.image_state=$state;$body.oobe_done=$true}
+        $body=$body|ConvertTo-Json -Compress
         [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'finalize-state.json'),$body,[Text.UTF8Encoding]::new($false))
         if($hardware -and $hardware -ceq $cfg.hardware_uuid){
             Invoke-RestMethod -UseBasicParsing -Method Post -Uri ($cfg.server_url+'/api/agent/jobs/'+$cfg.job_id+'/post-install/status') -Headers @{Authorization=('Bearer '+$cfg.token)} -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($body)) -TimeoutSec 3|Out-Null
+            if($Phase -eq 'working'){$script:workingStarted=$true}
         }
     } catch { }
 }
@@ -52,8 +55,8 @@ while ([DateTime]::UtcNow -lt $deadline) {
         $setup = Get-ItemProperty 'HKLM:\SYSTEM\Setup'
         $state = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State').ImageState
         if ($state -eq 'IMAGE_STATE_COMPLETE' -and $setup.SystemSetupInProgress -eq 0 -and $setup.OOBEInProgress -eq 0) {
-            if(-not $workingStarted){Save-FinalizerState 'working';$workingStarted=$true}
             $build = [int](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').CurrentBuildNumber
+            if(-not $workingStarted){Save-FinalizerState 'working'}
             $display = @{}
             try {
                 $computer = Get-CimInstance Win32_ComputerSystem

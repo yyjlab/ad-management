@@ -25,7 +25,7 @@ from pc_deploy.deployment import (Invalid, NAMESPACE, answer_file, canonical, di
 
 def decoded_bootstrap(command):
     launcher = base64.b64decode(command.rsplit(' ', 1)[1]).decode('utf-16le')
-    packed = re.search(r"\$deploymentBootstrap='([^']+)'", launcher)
+    packed = re.search(r"\$(?:deploymentBootstrap|b)='([^']+)'", launcher)
     return gzip.decompress(base64.b64decode(packed.group(1))).decode() if packed else launcher
 
 
@@ -780,6 +780,21 @@ class PlatformTests(unittest.TestCase):
     def test_domain_join_commands_complete_before_manual_reboot_without_claiming_trust(self):
         inv, _, job, token, _ = self.join_fixtures(wim=True)
         route = f'/pc-deploy/api/agent/jobs/{job}'
+        ready = dict(hardware_uuid=inv['hardware_uuid'], phase='working', os_build=26100,
+                     image_state='IMAGE_STATE_COMPLETE', oobe_done=True)
+        for patch in ({'os_build':19045}, {'oobe_done':False}, {'image_state':'IMAGE_STATE_UNDEPLOYABLE'},
+                      {'hardware_uuid':str(uuid.uuid4())}):
+            invalid = self.join_post(route+'/post-install/status', dict(ready, **patch), token)
+            self.assertEqual(invalid.status_code, 400, invalid.json)
+        self.assertIsNone(self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]['installed_at'])
+        self.assertEqual(self.join_post(route+'/post-install/status', ready, token).status_code, 200)
+        startup = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
+        started = startup['installed_at']
+        self.assertGreater(started, 0)
+        self.assertEqual(startup['domain_join']['state'], 'pending')
+        self.assertEqual(startup['timings']['windows_ready_at'], started)
+        self.assertIsNone(startup['timings']['join_finished_at'])
+        self.assertIsNone(startup['timings']['finished_at'])
         for stage in ('checking', 'joining', 'restarting'):
             result = self.join_post(route+'/domain-join/status',
                 dict(hardware_uuid=inv['hardware_uuid'], stage=stage), token)
@@ -790,6 +805,7 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(before['domain_join']['state'], 'restarting')
         self.assertEqual(before['timings']['finished_at'], ended)
         self.assertEqual(before['timings']['join_finished_at'], ended)
+        self.assertEqual(before['timings']['windows_ready_at'], started)
         repeated = self.join_post(route+'/domain-join/status',
             dict(hardware_uuid=inv['hardware_uuid'], stage='restarting'), token)
         self.assertEqual(repeated.status_code, 200)
@@ -806,6 +822,7 @@ class PlatformTests(unittest.TestCase):
         final = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
         self.assertEqual(final['domain_join']['state'], 'verified')
         self.assertEqual(final['timings']['finished_at'], ended)
+        self.assertEqual(final['timings']['windows_ready_at'], started)
 
     def test_domain_join_does_not_complete_until_trust_is_verified(self):
         inv, _, job, token, _ = self.join_fixtures()

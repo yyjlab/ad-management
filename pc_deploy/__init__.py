@@ -339,7 +339,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
         return dict(id=row['id'], device_id=row['device_id'], serial=data['target']['serial'],
                     model=display.get('model') or data['target']['model'], disk=data['target']['disk'], profile=data['profile']['name'],
                     state=row['state'], state_name=STATES[row['state']], created=row['created'],
-                    updated=row['updated'], stale=row['state'] in ACTIVE and now-row['updated'] > 600,
+                    updated=row['updated'], stale=row['state'] in ACTIVE and not operation_finished and now-row['updated'] > 600,
                     progress=data.get('progress'), performance=data.get('performance'), post_install=data.get('post_install'),
                     kind=data['source'].get('kind', 'setup'), review=data.get('review'), profile_id=data['profile'].get('id'),
                     wim_cache_mode=data['profile'].get('wim_cache_mode'),
@@ -1119,6 +1119,15 @@ def register_pc_deploy(host_app, current_user, touch_session):
             previous = job.get('post_install', {})
             now = time.time()
             phase = value['phase']
+            if phase == 'working' and 'os_build' in value:
+                build = integer(value['os_build'], '系统版本', 19041, 99999)
+                if (value.get('image_state') != 'IMAGE_STATE_COMPLETE' or value.get('oobe_done') is not True
+                        or (job['source']['family'] == 'windows11') != (build >= 22000)
+                        or (job['source'].get('kind') == 'wim' and build != next(
+                            image['build'] for image in job['source']['images']
+                            if image['index'] == job['profile']['image_index']))):
+                    raise Invalid('Windows 启动回报与任务系统版本或初始化状态不匹配')
+                job.setdefault('installed_at', now)
             job['post_install'] = dict(phase=phase, detail=detail, updated=now)
             c.execute('UPDATE jobs SET data=?,updated=? WHERE id=?', (canonical(job), now, identity))
             if phase != previous.get('phase'):

@@ -1097,12 +1097,21 @@ async function run() {
         timings:{requested_at:100,restore_finished_at:120,windows_ready_at:150,join_enabled:true,
           join_started_at:150,join_finished_at:200,finished_at:200}};
       const root=document.createElement('div');root.innerHTML=jobBadge(job)+renderPhasedJobTiming(job);
+      const startup={...job,installed_at:150,domain_join:{state:'pending'},
+        timings:{...job.timings,join_finished_at:null,finished_at:null}};
+      const starting=document.createElement('div');
+      starting.innerHTML=jobBadge(startup)+renderJobProgress(startup)+renderPhasedJobTiming(startup);
       return {text:root.textContent,good:root.querySelectorAll('.badge.good').length,
-        active:root.querySelectorAll('[data-active="true"]').length};
+        active:root.querySelectorAll('[data-active="true"]').length,startupText:starting.textContent,
+        windowsEnd:starting.querySelector('[data-phase-timer="windows"]').dataset.end,
+        windowsActive:starting.querySelector('[data-phase-timer="windows"]').dataset.active};
     });
-    assert.ok(commandCompletion.text.includes('改名、加域已完成，待手动重启生效'));checks++;
+    assert.ok(commandCompletion.text.includes('安装并加域完成'));checks++;
     assert.equal(commandCompletion.good,1);checks++;
     assert.equal(commandCompletion.active,0);checks++;
+    assert.ok(commandCompletion.startupText.includes('Windows 已启动，等待改名及加域'));checks++;
+    assert.equal(commandCompletion.windowsEnd,'150');checks++;
+    assert.equal(commandCompletion.windowsActive,'false');checks++;
     assert.ok(identityCases.plain.text.includes('实际电脑名LOCAL-PC')&&identityCases.plain.text.includes('未启用自动加域'));checks++;
     assert.equal(identityCases.plain.green,0);checks++;
     assert.equal(identityCases.legacyVerified.green,2);checks++;

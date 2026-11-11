@@ -253,7 +253,14 @@ function Invoke-DeploymentDomainJoin {
     [IO.File]::WriteAllText((Join-Path $pausedDirectory 'Run.ps1'),@'
 function Get-CimInstance { param($ClassName) [pscustomobject]@{UUID='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';Model='Fixture'} }
 function Get-ItemProperty { param($Path,$ErrorAction) [pscustomobject]@{ImageState='IMAGE_STATE_COMPLETE';SystemSetupInProgress=0;OOBEInProgress=0;CurrentBuildNumber=26100} }
-function Invoke-RestMethod { param($Uri,$Method,$Headers,$Body,$ContentType,$TimeoutSec,[switch]$UseBasicParsing) if($Uri -like '*/finish'){throw 'Premature verified completion'} }
+function Invoke-RestMethod {
+    param($Uri,$Method,$Headers,$Body,$ContentType,$TimeoutSec,[switch]$UseBasicParsing)
+    if($Uri -like '*/finish'){throw 'Premature verified completion'}
+    $report=[Text.Encoding]::UTF8.GetString($Body)|ConvertFrom-Json
+    if($report.phase -eq 'working'){
+        [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'windows-ready.json'),($report|ConvertTo-Json))
+    }
+}
 function Start-Sleep { param($Seconds) throw 'Finalizer kept polling instead of waiting for manual restart' }
 function Unregister-ScheduledTask { throw 'Verification task removed before restart' }
 & (Join-Path $PSScriptRoot 'Finalize.ps1')
@@ -262,6 +269,8 @@ exit $LASTEXITCODE
     & (Join-Path $PSHOME 'pwsh.exe') -NoProfile -NonInteractive -File (Join-Path $pausedDirectory 'Run.ps1')
     Assert-Join ($LASTEXITCODE -eq 0) 'Finalizer did not exit successfully while waiting for manual restart'
     Assert-Join (Test-Path -LiteralPath (Join-Path $pausedDirectory 'config.json')) 'Manual restart lost the verification token'
+    $readyReport=[IO.File]::ReadAllText((Join-Path $pausedDirectory 'windows-ready.json'))|ConvertFrom-Json
+    Assert-Join ($readyReport.os_build -eq 26100 -and $readyReport.image_state -eq 'IMAGE_STATE_COMPLETE' -and $readyReport.oobe_done) 'Windows startup report omitted the validated OS readiness fields'
     Assert-Join (([IO.File]::ReadAllText((Join-Path $pausedDirectory 'finalize-state.json'))|ConvertFrom-Json).phase -ne 'timed_out') 'Waiting for manual restart was marked timed out'
 
     $timeoutDirectory=New-JoinCase
