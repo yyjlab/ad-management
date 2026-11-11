@@ -101,7 +101,7 @@ function jobBadge(job) {
   if(join?.state==='verified' && job.state==='completed')return '<span class="badge good">安装并加域完成</span>';
   if(join?.state==='waiting_release' && activeStates.includes(job.state))return '<span class="badge '+(join.released_at?'blue':'warn')+'">'+(join.released_at?'已授权，等待加域':'Windows 已安装，待统一加域')+'</span>';
   if(join?.state==='failed'&&!job.review)return '<span class="badge bad">系统已安装，加域失败</span>';
-  if(join && ['checking','joining','restarting','verified'].includes(join.state) && activeStates.includes(job.state))return '<span class="badge blue">'+(join.state==='restarting'?'加域后重启验证中':join.state==='verified'?'加域已验证，等待完成回报':'自动加域中')+'</span>';
+  if(join && ['checking','joining','restarting','verified'].includes(join.state) && activeStates.includes(job.state))return '<span class="badge blue">'+(join.state==='restarting'?'等待手动重启验证':join.state==='verified'?'加域已验证，等待完成回报':'自动加域中')+'</span>';
   if(job.kind==='wim' && job.state==='installing' && !job.progress)return '<span class="badge blue">安装准备中</span>';
   if (job.state !== 'failed' || !job.review) return badge(job.state);
   return '<span class="badge '+(job.review.outcome === 'installed'?'good':'bad')+'">'+

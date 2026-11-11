@@ -1235,7 +1235,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
         stage = value.get('stage')
         messages = dict(checking='Windows 已安装，正在检查域 DNS 与电脑名',
                         joining='Windows 已安装，正在加入 AD 域',
-                        restarting='加域命令已成功，正在重启，等待验证域信任',
+                        restarting='改名和加域命令已成功，等待管理员手动重启后验证域信任',
                         verified='重启后域身份与安全通道验证通过',
                         failed='Windows 已安装，自动加域失败；不会重新装机或自动再次加域')
         if not isinstance(stage, str) or stage not in messages:

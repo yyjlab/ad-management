@@ -51,10 +51,10 @@ function Send-JoinState {
     Invoke-JoinService $Config 'status' $payload | Out-Null
 }
 function Test-JoinNameExists {
-    param([string]$Controller, [string]$Domain, [string]$Name, $Credential)
+    param([string]$Controller, [string]$Domain, [string]$Name, $Credential, [string]$OUPath)
     Add-Type -AssemblyName System.DirectoryServices
     $base = ($Domain.Split('.') | ForEach-Object { 'DC=' + $_ }) -join ','
-    $entry = $null; $searcher = $null
+    $entry = $null; $searcher = $null; $matches = $null
     try {
         $flags = [DirectoryServices.AuthenticationTypes]::Secure -bor
             [DirectoryServices.AuthenticationTypes]::Signing -bor [DirectoryServices.AuthenticationTypes]::Sealing
@@ -62,11 +62,17 @@ function Test-JoinNameExists {
             ('LDAP://' + $Controller + '/' + $base), $Credential.UserName,
             $Credential.GetNetworkCredential().Password, $flags)
         $searcher = [DirectoryServices.DirectorySearcher]::new($entry)
-        $searcher.Filter = '(&(objectClass=computer)(sAMAccountName=' + $Name + '$))'
+        $searcher.Filter = '(|(sAMAccountName=' + $Name + '$)(cn=' + $Name + '))'
         $searcher.ClientTimeout = [TimeSpan]::FromSeconds(15)
         $searcher.ServerTimeLimit = [TimeSpan]::FromSeconds(15)
-        return $null -ne $searcher.FindOne()
+        $matches = $searcher.FindAll()
+        foreach ($match in $matches) {
+            if ([string]$match.Properties.samaccountname[0] -ieq ($Name + '$') -or
+                ($OUPath -and [string]$match.Properties.distinguishedname[0] -ieq ('CN=' + $Name + ',' + $OUPath))) { return $true }
+        }
+        return $false
     } finally {
+        if ($matches) { $matches.Dispose() }
         if ($searcher) { $searcher.Dispose() }
         if ($entry) { $entry.Dispose() }
     }
@@ -102,7 +108,8 @@ function Invoke-DeploymentDomainJoin {
         if ($os.ProductType -ne 1) { throw 'Automatic domain join is restricted to newly installed workstations.' }
         $edition = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').EditionID
         if ($edition -match '^(Core|Home)') { throw 'This Windows edition cannot join an AD domain. Use Pro, Enterprise or Education.' }
-        if ($journal.phase -in @('joined', 'restart_requested') -and $journal.boot -ceq $boot) {
+        if ($journal.phase -in @('joined', 'restart_requested') -and
+            ([DateTime]$journal.boot).ToUniversalTime().ToString('o') -ceq $boot) {
             if ($journal.phase -eq 'joined') {
                 try { Send-JoinState $Config $Hardware 'restarting' }
                 catch {
@@ -110,7 +117,6 @@ function Invoke-DeploymentDomainJoin {
                     return 'wait'
                 }
                 Save-JoinJournal 'restart_requested' $boot
-                Restart-Computer -Force -ErrorAction Stop
             }
             return 'wait'
         }
@@ -194,7 +200,7 @@ function Invoke-DeploymentDomainJoin {
         $operation = 'ad_computer_name_lookup'
         $available = $false
         for ($attempt = 0; $attempt -lt 27; $attempt++) {
-            if (-not (Test-JoinNameExists $controller $domain $name $credential)) { $available = $true; break }
+            if (-not (Test-JoinNameExists $controller $domain $name $credential ([string]$configuration.ou_path))) { $available = $true; break }
             try {
                 $assigned = Invoke-JoinService $Config 'name' @{hardware_uuid=$Hardware; unavailable_name=$name}
             } catch {
@@ -239,6 +245,5 @@ function Invoke-DeploymentDomainJoin {
     # Resume reporting without another join.
     Send-JoinState $Config $Hardware 'restarting'
     Save-JoinJournal 'restart_requested' $boot
-    Restart-Computer -Force -ErrorAction Stop
     return 'wait'
 }

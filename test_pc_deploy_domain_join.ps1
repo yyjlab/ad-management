@@ -40,7 +40,9 @@ function Invoke-JoinFixture {
     }
     function Test-ComputerSecureChannel { param($ErrorAction) return -not $Scenario.BadTrust }
     function Test-JoinNameExists {
-        param($Controller,$Domain,$Name,$Credential)
+        param($Controller,$Domain,$Name,$Credential,$OUPath)
+        if ($OUPath -ne 'OU=Workstations,DC=corp,DC=test') { throw 'Name lookup omitted the target OU' }
+        if($Scenario.UserCN){return $Name -eq $Scenario.UserCN}
         if($Scenario.Occupied){return $Name -in $Scenario.Occupied}
         return [bool]$Scenario.Collision
     }
@@ -103,12 +105,12 @@ try {
     $directory=New-JoinCase
     $first=Invoke-JoinFixture $directory
     Assert-Join ($first.result -eq 'wait' -and -not $first.failure) 'Initial join did not wait for reboot'
-    Assert-Join ($first.native.Count -eq 1 -and $first.reboots.Count -eq 1) 'Expected one join and one reboot'
+    Assert-Join ($first.native.Count -eq 1 -and $first.reboots.Count -eq 0) 'Expected one join without automatic reboot'
     Assert-Join ($first.native[0].name -eq 'WFQ101755' -and $first.native[0].ou -like 'OU=Workstations,*') 'Employee name or OU was not passed'
     Assert-Join ($first.native[0].options -match 'AccountCreate' -and $first.native[0].options -match 'JoinWithNewName') 'Rename join omitted account creation'
     Assert-Join ($first.renames.Count -eq 1 -and $first.renames[0] -eq 'WFQ101755') 'Local rename must precede the domain join'
     $sameName=Invoke-JoinFixture (New-JoinCase) @{ExpectedName=$true}
-    Assert-Join ($sameName.native.Count -eq 1 -and $sameName.renames.Count -eq 0 -and $sameName.reboots.Count -eq 1) 'Matching local name was renamed unnecessarily'
+    Assert-Join ($sameName.native.Count -eq 1 -and $sameName.renames.Count -eq 0 -and $sameName.reboots.Count -eq 0) 'Matching local name was renamed or rebooted unnecessarily'
     foreach($scenario in @(@{RenameFailure=$true},@{RenameUnsuccessful=$true})){
         $renameDirectory=New-JoinCase
         $renameFailed=Invoke-JoinFixture $renameDirectory $scenario
@@ -133,6 +135,8 @@ try {
         Assert-Join ($case.result -eq 'failed' -and $case.native.Count -eq 0 -and $case.reboots.Count -eq 0) 'A protected case performed a domain join'
     }
     $collisionDirectory=New-JoinCase
+    $userCollision=Invoke-JoinFixture (New-JoinCase) @{UserCN='WFQ101755'}
+    Assert-Join ($userCollision.result -eq 'wait' -and $userCollision.native[0].name -eq 'WFQ101755A' -and $userCollision.reboots.Count -eq 0) 'User CN collision did not select a safe suffix without reboot'
     $collision=Invoke-JoinFixture $collisionDirectory @{Occupied=@('WFQ101755','WFQ101755A')}
     Assert-Join ($collision.result -eq 'wait' -and $collision.native.Count -eq 1) 'Collision prevented a safe suffixed join'
     Assert-Join ($collision.native[0].name -eq 'WFQ101755B') 'Existing base and A did not select B'
@@ -167,7 +171,7 @@ try {
     $lost=Invoke-JoinFixture $lostDirectory @{FailStatus='restarting'}
     Assert-Join ($lost.failure -and $lost.native.Count -eq 1 -and $lost.journal.phase -eq 'joined') 'Lost response did not preserve successful join'
     $resumed=Invoke-JoinFixture $lostDirectory
-    Assert-Join ($resumed.result -eq 'wait' -and $resumed.native.Count -eq 0 -and $resumed.reboots.Count -eq 1) 'Resume repeated join'
+    Assert-Join ($resumed.result -eq 'wait' -and $resumed.native.Count -eq 0 -and $resumed.reboots.Count -eq 0) 'Resume repeated join or reboot'
     $http=Invoke-JoinFixture (New-JoinCase) @{Http=$true}
     Assert-Join ($http.failure -and $http.calls.Count -eq 0 -and $http.native.Count -eq 0) 'HTTP leaked join credentials'
     foreach($case in @(@{Http=$true;GlobalHttp=$true},@{Http=$true;TaskHttp=$true},
@@ -177,7 +181,7 @@ try {
     }
     $httpDirectory=New-JoinCase
     $approvedHttp=Invoke-JoinFixture $httpDirectory @{Http=$true;GlobalHttp=$true;TaskHttp=$true}
-    Assert-Join ($approvedHttp.result -eq 'wait' -and $approvedHttp.native.Count -eq 1 -and $approvedHttp.reboots.Count -eq 1) 'Explicit HTTP opt-in did not complete native join once'
+    Assert-Join ($approvedHttp.result -eq 'wait' -and $approvedHttp.native.Count -eq 1 -and $approvedHttp.reboots.Count -eq 0) 'Explicit HTTP opt-in did not complete native join without reboot'
     $httpVerified=Invoke-JoinFixture $httpDirectory @{Http=$true;GlobalHttp=$true;TaskHttp=$true;NewBoot=$true;Member=$true;ExpectedName=$true}
     Assert-Join ($httpVerified.result -eq 'ready' -and $httpVerified.native.Count -eq 0) 'HTTP opt-in lost post-reboot trust verification'
     $manualDirectory=New-JoinCase
@@ -189,7 +193,7 @@ try {
     $unavailable=Invoke-JoinFixture $manualDirectory @{Manual=$true;ConfigFailure=$true}
     Assert-Join ($unavailable.result -eq 'wait' -and $unavailable.native.Count -eq 0 -and $unavailable.reboots.Count -eq 0) 'Unavailable release service caused a join or restart'
     $released=Invoke-JoinFixture $manualDirectory @{Manual=$true}
-    Assert-Join ($released.native.Count -eq 1 -and $released.reboots.Count -eq 1) 'Admin release did not perform exactly one join and reboot'
+    Assert-Join ($released.native.Count -eq 1 -and $released.reboots.Count -eq 0) 'Admin release did not perform exactly one join without reboot'
     $manualReboot=Invoke-JoinFixture $manualDirectory @{Manual=$true;NewBoot=$true;Member=$true;ExpectedName=$true}
     Assert-Join ($manualReboot.result -eq 'ready' -and $manualReboot.native.Count -eq 0) 'Manual mode attempted to fetch recycled credentials after reboot'
 
@@ -199,19 +203,19 @@ try {
     Assert-Join ($checkingOffline.journal.phase -eq 'waiting_network') 'Platform outage did not preserve a resumable diagnostic'
     Assert-Join ($checkingOffline.journal.detail.Contains('Stage: platform_status_checking') -and $checkingOffline.journal.detail.Contains('Target AD domain: corp.test')) 'Diagnostic confused the platform endpoint with the AD domain'
     $checkingRecovered=Invoke-JoinFixture $checkingDirectory
-    Assert-Join ($checkingRecovered.native.Count -eq 1 -and $checkingRecovered.reboots.Count -eq 1) 'Recovered checking connection did not perform the first join once'
+    Assert-Join ($checkingRecovered.native.Count -eq 1 -and $checkingRecovered.reboots.Count -eq 0) 'Recovered checking connection did not perform the first join without reboot'
     $joiningDirectory=New-JoinCase
     $joiningOffline=Invoke-JoinFixture $joiningDirectory @{FailStatus='joining'}
     Assert-Join ($joiningOffline.result -eq 'wait' -and $joiningOffline.native.Count -eq 0) 'Lost pre-join acknowledgement performed a native join'
     $joiningRecovered=Invoke-JoinFixture $joiningDirectory @{JoiningState=$true}
-    Assert-Join ($joiningRecovered.native.Count -eq 1 -and $joiningRecovered.reboots.Count -eq 1) 'Lost joining acknowledgement did not resume safely'
+    Assert-Join ($joiningRecovered.native.Count -eq 1 -and $joiningRecovered.reboots.Count -eq 0) 'Lost joining acknowledgement did not resume without reboot'
     Assert-Join (@($joiningRecovered.calls | Where-Object {$_.payload.stage -eq 'checking'}).Count -eq 0) 'Resume tried to regress a server joining state'
     $repeatDirectory=New-JoinCase
     $repeatFirst=Invoke-JoinFixture $repeatDirectory @{FailStatus='restarting'}
     $repeatOffline=Invoke-JoinFixture $repeatDirectory @{FailStatus='restarting'}
     Assert-Join ($repeatOffline.result -eq 'wait' -and $repeatOffline.journal.phase -eq 'joined' -and $repeatOffline.native.Count -eq 0) 'Repeated callback outage discarded a successful native join'
     $repeatRecovered=Invoke-JoinFixture $repeatDirectory
-    Assert-Join ($repeatRecovered.native.Count -eq 0 -and $repeatRecovered.reboots.Count -eq 1) 'Successful join was repeated after reconnect'
+    Assert-Join ($repeatRecovered.native.Count -eq 0 -and $repeatRecovered.reboots.Count -eq 0) 'Successful join or reboot was repeated after reconnect'
     $verifyDirectory=New-JoinCase
     $verifyFirst=Invoke-JoinFixture $verifyDirectory
     $verifyOffline=Invoke-JoinFixture $verifyDirectory @{NewBoot=$true;Member=$true;ExpectedName=$true;FailStatus='verified'}
