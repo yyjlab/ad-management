@@ -236,6 +236,34 @@ try {
     Assert-Join ($failureDelivered.result -eq 'failed' -and $failureDelivered.calls[0].payload.detail -ceq $failedReport.journal.detail) 'Recovered callback lost the original diagnosis'
     Assert-Join ($failureDelivered.native.Count -eq 0 -and $failureDelivered.reboots.Count -eq 0) 'Recovered failure callback changed machine state'
 
+    $pausedDirectory=New-JoinCase
+    [IO.File]::Copy((Join-Path $PSScriptRoot 'pc_deploy\agent\Finalize.ps1'),(Join-Path $pausedDirectory 'Finalize.ps1'))
+    [IO.File]::WriteAllText((Join-Path $pausedDirectory 'DomainJoin.ps1'),@'
+function Assert-JoinTransport { param($Config) }
+function Invoke-DeploymentDomainJoin {
+    param($Config,$Hardware)
+    [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'domain-join-state.json'),'{"phase":"restart_requested"}')
+    return 'wait'
+}
+'@)
+    [IO.File]::WriteAllText((Join-Path $pausedDirectory 'DeviceInfo.ps1'),'function Get-DeploymentDeviceInfo { param($Stage) return @{} }')
+    $pausedConfig=@{server_url='https://deploy.test/pc-deploy';job_id='paused';
+        hardware_uuid='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';token='fixture-only-token';domain_join=@{mode='automatic'}}
+    [IO.File]::WriteAllText((Join-Path $pausedDirectory 'config.json'),($pausedConfig|ConvertTo-Json))
+    [IO.File]::WriteAllText((Join-Path $pausedDirectory 'Run.ps1'),@'
+function Get-CimInstance { param($ClassName) [pscustomobject]@{UUID='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';Model='Fixture'} }
+function Get-ItemProperty { param($Path,$ErrorAction) [pscustomobject]@{ImageState='IMAGE_STATE_COMPLETE';SystemSetupInProgress=0;OOBEInProgress=0;CurrentBuildNumber=26100} }
+function Invoke-RestMethod { param($Uri,$Method,$Headers,$Body,$ContentType,$TimeoutSec,[switch]$UseBasicParsing) if($Uri -like '*/finish'){throw 'Premature verified completion'} }
+function Start-Sleep { param($Seconds) throw 'Finalizer kept polling instead of waiting for manual restart' }
+function Unregister-ScheduledTask { throw 'Verification task removed before restart' }
+& (Join-Path $PSScriptRoot 'Finalize.ps1')
+exit $LASTEXITCODE
+'@)
+    & (Join-Path $PSHOME 'pwsh.exe') -NoProfile -NonInteractive -File (Join-Path $pausedDirectory 'Run.ps1')
+    Assert-Join ($LASTEXITCODE -eq 0) 'Finalizer did not exit successfully while waiting for manual restart'
+    Assert-Join (Test-Path -LiteralPath (Join-Path $pausedDirectory 'config.json')) 'Manual restart lost the verification token'
+    Assert-Join (([IO.File]::ReadAllText((Join-Path $pausedDirectory 'finalize-state.json'))|ConvertFrom-Json).phase -ne 'timed_out') 'Waiting for manual restart was marked timed out'
+
     $timeoutDirectory=New-JoinCase
     foreach($name in @('Finalize.ps1','DeviceInfo.ps1')){
         [IO.File]::Copy((Join-Path $PSScriptRoot ('pc_deploy\agent\'+$name)),(Join-Path $timeoutDirectory $name))

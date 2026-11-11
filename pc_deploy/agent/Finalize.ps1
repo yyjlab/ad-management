@@ -69,7 +69,11 @@ while ([DateTime]::UtcNow -lt $deadline) {
                 image_state=$state; oobe_done=$true; device_info=$display}
             if ($cfg.domain_join) {
                 $join = Invoke-DeploymentDomainJoin $cfg $hardware
-                if ($join -eq 'wait') { Start-Sleep -Seconds 20; continue }
+                if ($join -eq 'wait') {
+                    $j = Get-Content "$PSScriptRoot\domain-join-state.json" -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
+                    if ($j.phase -eq 'restart_requested') { exit 0 }
+                    Start-Sleep -Seconds 20; continue
+                }
                 if ($join -eq 'failed') {
                     Unregister-ScheduledTask -TaskName ('PCDeploy-' + $cfg.job_id) -Confirm:$false
                     Remove-Item -LiteralPath "$PSScriptRoot\config.json"

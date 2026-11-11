@@ -342,7 +342,7 @@ class PlatformTests(unittest.TestCase):
         with self.store.connect() as c:
             events = [row['message'] for row in c.execute('SELECT message FROM events WHERE job_id=?', (job,))]
         self.assertEqual(sum('等待管理员统一加域' in message for message in events), 1)
-        self.assertEqual(sum('管理员已确认设置完成' in message for message in events), 1)
+        self.assertEqual(sum('管理员允许本机改名和加域；不会自动重启' in message for message in events), 1)
         self.assertNotIn('Test-only-domain-password', '\n'.join(events))
 
     def test_manual_join_release_is_atomic_authorized_and_expiry_bound(self):
@@ -776,6 +776,36 @@ class PlatformTests(unittest.TestCase):
         with self.store.connect() as c:
             encrypted = c.execute('SELECT secret FROM jobs WHERE id=?', (job,)).fetchone()['secret']
         self.assertNotIn(password, encrypted)
+
+    def test_domain_join_commands_complete_before_manual_reboot_without_claiming_trust(self):
+        inv, _, job, token, _ = self.join_fixtures(wim=True)
+        route = f'/pc-deploy/api/agent/jobs/{job}'
+        for stage in ('checking', 'joining', 'restarting'):
+            result = self.join_post(route+'/domain-join/status',
+                dict(hardware_uuid=inv['hardware_uuid'], stage=stage), token)
+            self.assertEqual(result.status_code, 200, result.json)
+        before = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
+        ended = before['domain_join']['commands_completed_at']
+        self.assertGreater(ended, 0)
+        self.assertEqual(before['domain_join']['state'], 'restarting')
+        self.assertEqual(before['timings']['finished_at'], ended)
+        self.assertEqual(before['timings']['join_finished_at'], ended)
+        repeated = self.join_post(route+'/domain-join/status',
+            dict(hardware_uuid=inv['hardware_uuid'], stage='restarting'), token)
+        self.assertEqual(repeated.status_code, 200)
+        after = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
+        self.assertEqual(after['domain_join']['commands_completed_at'], ended)
+        self.assertEqual(self.join_post(route+'/domain-join/config',
+            dict(hardware_uuid=inv['hardware_uuid']), token).status_code, 400)
+        self.assertEqual(self.join_post(route+'/finish', dict(hardware_uuid=inv['hardware_uuid'],
+            computer_name='WFQ101755', os_build=26100, image_state='IMAGE_STATE_COMPLETE',
+            oobe_done=True), token).status_code, 400)
+        verified = self.join_post(route+'/domain-join/status', dict(hardware_uuid=inv['hardware_uuid'],
+            stage='verified', domain='corp.test', computer_name='WFQ101755', secure_channel=True), token)
+        self.assertEqual(verified.status_code, 200, verified.json)
+        final = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
+        self.assertEqual(final['domain_join']['state'], 'verified')
+        self.assertEqual(final['timings']['finished_at'], ended)
 
     def test_domain_join_does_not_complete_until_trust_is_verified(self):
         inv, _, job, token, _ = self.join_fixtures()

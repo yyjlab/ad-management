@@ -296,7 +296,7 @@ async function run() {
     assert.ok((await autoCard.textContent()).includes('保留 D 盘及其他分区，不调整 C 盘容量'));checks++;
     assert.ok((await autoCard.textContent()).includes('join-service@corp.test'));checks++;
     assert.ok((await autoCard.textContent()).includes('OU=<img src=x onerror="window.profileInjected=true">'));checks++;
-    assert.ok((await autoCard.textContent()).includes('加域成功后额外重启一次并验证域信任'));checks++;
+    assert.ok((await autoCard.textContent()).includes('改名、加域完成后不会自动重启，请手动重启生效'));checks++;
     assert.ok((await autoCard.textContent()).includes('已保存，无需重复填写'));checks++;
     assert.ok((await manualCard.textContent()).includes('C 盘 320 GiB'));checks++;
     assert.ok((await manualCard.textContent()).includes('剩余空间创建 D 盘'));checks++;
@@ -1092,6 +1092,17 @@ async function run() {
     });
     assert.equal(identityCases.restarting.green,0);checks++;
     assert.ok(identityCases.restarting.text.includes('待重启核验')&&identityCases.restarting.text.includes('信任尚未核验'));checks++;
+    const commandCompletion=await page.evaluate(()=>{
+      const job={state:'awaiting_report',created:100,domain_join:{state:'restarting',commands_completed_at:200},
+        timings:{requested_at:100,restore_finished_at:120,windows_ready_at:150,join_enabled:true,
+          join_started_at:150,join_finished_at:200,finished_at:200}};
+      const root=document.createElement('div');root.innerHTML=jobBadge(job)+renderPhasedJobTiming(job);
+      return {text:root.textContent,good:root.querySelectorAll('.badge.good').length,
+        active:root.querySelectorAll('[data-active="true"]').length};
+    });
+    assert.ok(commandCompletion.text.includes('改名、加域已完成，待手动重启生效'));checks++;
+    assert.equal(commandCompletion.good,1);checks++;
+    assert.equal(commandCompletion.active,0);checks++;
     assert.ok(identityCases.plain.text.includes('实际电脑名LOCAL-PC')&&identityCases.plain.text.includes('未启用自动加域'));checks++;
     assert.equal(identityCases.plain.green,0);checks++;
     assert.equal(identityCases.legacyVerified.green,2);checks++;

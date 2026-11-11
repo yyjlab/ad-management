@@ -325,6 +325,10 @@ def register_pc_deploy(host_app, current_user, touch_session):
         finished = None if row['state'] in ACTIVE else timing.get('finished_at') or row['updated']
         ready = data.get('installed_at') or timing.get('windows_reported_at')
         joining = data.get('domain_join') or {}
+        operation_finished = joining.get('commands_completed_at') or (
+            joining.get('updated') if joining.get('state') == 'restarting' else None)
+        if operation_finished and joining.get('state') in ('restarting', 'verified'):
+            finished = operation_finished
         manual = (data['profile'].get('domain_join') or {}).get('mode') == 'manual'
         join_started = (joining.get('released_at') if manual else ready) if joining else None
         phases = dict(requested_at=row['created'], restore_finished_at=timing.get('deployment_finished_at'),
@@ -1147,7 +1151,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
                 or any(not isinstance(item, str) for item in identities)
                 or len(set(identities)) != len(identities)
                 or value.get('restart_confirmed') is not True):
-            raise Invalid('请选择待加域任务，并确认已保存设置、允许加域后重启')
+            raise Invalid('请选择待加域任务，并确认允许改名和加域；完成后自行重启')
         with store.connect(write=True) as c:
             selected = []
             for identity in identities:
@@ -1164,7 +1168,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
                 if not job['domain_join'].get('released_at'):
                     job['domain_join']['released_at'] = now
                     c.execute('UPDATE jobs SET data=?,updated=? WHERE id=?', (canonical(job), now, identity))
-                    event(c, 'domain_join', '管理员已确认设置完成，允许本机改名、加域并重启；等待客户端领取', identity)
+                    event(c, 'domain_join', '管理员允许本机改名和加域；不会自动重启，完成后请手动重启', identity)
         return jsonify(ok=True, count=len(selected))
 
     @app.post('/api/agent/jobs/<identity>/domain-join/config')
@@ -1235,7 +1239,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
         stage = value.get('stage')
         messages = dict(checking='Windows 已安装，正在检查域 DNS 与电脑名',
                         joining='Windows 已安装，正在加入 AD 域',
-                        restarting='改名和加域命令已成功，等待管理员手动重启后验证域信任',
+                        restarting='改名、加域已完成，待手动重启生效；重启后另行验证域信任',
                         verified='重启后域身份与安全通道验证通过',
                         failed='Windows 已安装，自动加域失败；不会重新装机或自动再次加域')
         if not isinstance(stage, str) or stage not in messages:
@@ -1268,6 +1272,8 @@ def register_pc_deploy(host_app, current_user, touch_session):
             completion_display(job, value)
             job.setdefault('installed_at', time.time())
             current.update(state=stage, detail=detail, updated=time.time(), os_installed=True)
+            if stage == 'restarting':
+                current.setdefault('commands_completed_at', time.time())
             state = 'failed' if stage == 'failed' else 'awaiting_report'
             if stage in ('restarting', 'verified', 'failed'):
                 secret.pop('domain_join_password', None)
