@@ -822,6 +822,65 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(final['timings']['finished_at'], ended)
         self.assertEqual(final['timings']['windows_ready_at'], started)
 
+    def test_validated_windows_ready_stops_startup_before_domain_work(self):
+        inv, _, job, token, _ = self.join_fixtures(wim=True)
+        route = f'/pc-deploy/api/agent/jobs/{job}/post-install/status'
+        ready = dict(hardware_uuid=inv['hardware_uuid'], phase='working', os_build=26100,
+                     image_state='IMAGE_STATE_COMPLETE', oobe_done=True)
+        for changes in (dict(os_build=22631), dict(os_build=True), dict(oobe_done=False),
+                        dict(image_state='IMAGE_STATE_UNDEPLOYABLE')):
+            self.assertEqual(self.join_post(route, dict(ready, **changes), token).status_code, 400)
+        self.assertEqual(self.join_post(route, ready, token).status_code, 200)
+        first = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
+        self.assertGreater(first['timings']['windows_ready_at'], 0)
+        self.assertEqual(first['domain_join']['state'], 'pending')
+        self.assertIsNone(first['timings']['finished_at'])
+        self.assertEqual(self.join_post(route, dict(ready, phase='waiting_retry', detail='DNS unavailable'), token).status_code, 200)
+        self.assertEqual(self.join_post(route, ready, token).status_code, 200)
+        latest = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
+        self.assertEqual(latest['timings']['windows_ready_at'], first['timings']['windows_ready_at'])
+        self.assertIsNone(latest['timings']['join_finished_at'])
+
+    def test_post_install_recovery_is_admin_scoped_and_preserves_job(self):
+        inv, reg, job, token, _ = self.join_fixtures(wim=True)
+        route = f'/pc-deploy/api/jobs/{job}/post-install/recovery'
+        payload = dict(windows_installed_confirmed=True)
+        self.assertEqual(self.join_post(route, payload).status_code, 400)  # Still restoring.
+        agent_route = f'/pc-deploy/api/agent/jobs/{job}/event'
+        for stage in ('boot_files', 'awaiting_report'):
+            self.assertEqual(self.join_post(agent_route, dict(stage=stage), reg['token']).status_code, 200)
+        self.assertEqual(self.join_post(route, {}).status_code, 400)
+        self.assertEqual(self.client.post(route, json=payload, base_url='https://localhost').status_code, 403)
+        before = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
+        response = self.join_post(route, payload)
+        self.assertEqual(response.status_code, 200, response.data[:100])
+        self.assertIn('no-store', response.headers['Cache-Control'])
+        script = response.data.decode('utf-8-sig')
+        self.assertIn(inv['hardware_uuid'], script)
+        self.assertIn('Wrong computer', script)
+        self.assertNotIn('Test-only-domain-password', script)
+        self.assertNotIn('Restart-Computer', script)
+        self.assertNotIn('Clear-Disk', script)
+        command = next(line[2:] for line in script.splitlines() if line.startswith('& powershell.exe'))
+        cfg = bootstrap_config(decoded_bootstrap(command))
+        self.assertEqual(cfg['job_id'], job)
+        self.assertEqual(cfg['token'], token)
+        after = self.client.get('/pc-deploy/api/dashboard').json['jobs'][0]
+        self.assertEqual(after['state'], before['state'])
+        self.assertEqual(after['domain_join'], before['domain_join'])
+        if os.name == 'nt':
+            with tempfile.TemporaryDirectory(prefix='pcdeploy-recovery-test-') as directory:
+                target = Path(directory)/'Recover.ps1'
+                target.write_bytes(response.data)
+                ps = Path(os.environ['SystemRoot'])/'System32'/'WindowsPowerShell'/'v1.0'/'powershell.exe'
+                parse = "$e=$null;$t=$null;[Management.Automation.Language.Parser]::ParseFile($args[0],[ref]$t,[ref]$e)|Out-Null;if($e.Count){throw $e[0]}"
+                check = subprocess.run([str(ps), '-NoProfile', '-NonInteractive', '-Command', '& {'+parse+'}', str(target)],
+                                       capture_output=True, text=True, timeout=30)
+                self.assertEqual(check.returncode, 0, check.stderr)
+        self.assertEqual(self.join_post(f'/pc-deploy/api/jobs/{job}/reconcile',
+            dict(confirmation='CHECKED', end_domain_join=True)).status_code, 200)
+        self.assertEqual(self.join_post(route, payload).status_code, 400)
+
     def test_domain_join_does_not_complete_until_trust_is_verified(self):
         inv, _, job, token, _ = self.join_fixtures()
         route = f'/pc-deploy/api/agent/jobs/{job}'
@@ -853,7 +912,7 @@ class PlatformTests(unittest.TestCase):
                    hardware_uuid=str(uuid.uuid4()), token='T'*54, ca_pem=ca,
                    domain_join=dict(domain='corp.example.test', computer_name='WFQ101755', employee_id='WFQ101755'))
         command = finalizer_command(cfg)
-        self.assertLess(len(command), 31500)
+        self.assertLess(len(command), 32000)
         bootstrap = decoded_bootstrap(command)
         files = bootstrap_files(bootstrap)
         scripts = {name: content for name, content in files.items() if name.endswith('.ps1')}
@@ -871,16 +930,19 @@ class PlatformTests(unittest.TestCase):
 function icacls.exe { $global:LASTEXITCODE=0 }
 function New-ScheduledTaskAction {}
 function New-ScheduledTaskTrigger {}
-function New-ScheduledTaskSettingsSet {}
+function New-ScheduledTaskSettingsSet {
+if($args -notcontains '-AllowStartIfOnBatteries' -or $args -notcontains '-DontStopIfGoingOnBatteries'){throw 'Laptop battery blocks finalizer'}
+}
 function Register-ScheduledTask {}
 function Start-ScheduledTask {}
 """
             with tempfile.TemporaryDirectory(prefix='pcdeploy-bootstrap-test-') as directory:
                 environment = dict(os.environ, ProgramData=directory)
                 launcher = base64.b64decode(command.rsplit(' ', 1)[1]).decode('utf-16le')
-                encoded = base64.b64encode((mock+launcher).encode('utf-16le')).decode()
+                runner = Path(directory)/'Extract.ps1'
+                runner.write_text(mock+launcher, encoding='utf-8-sig')
                 powershell = Path(os.environ['SystemRoot'])/'System32'/'WindowsPowerShell'/'v1.0'/'powershell.exe'
-                result = subprocess.run([str(powershell), '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
+                result = subprocess.run([str(powershell), '-NoProfile', '-NonInteractive', '-File', str(runner)],
                                         env=environment, capture_output=True, text=True, timeout=30)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 folder = Path(directory)/'PCDeploy'/cfg['job_id']
@@ -888,11 +950,20 @@ function Start-ScheduledTask {}
                 for name in scripts:
                     expected = (Path(__file__).parent/'pc_deploy'/'agent'/name).read_text(encoding='utf-8-sig')
                     self.assertEqual((folder/name).read_text(encoding='utf-8-sig'), expected)
+                # Multiple installation hooks must not reset a resolved computer name or its journal.
+                saved = dict(cfg, domain_join=dict(cfg['domain_join'], computer_name='WFQ101755A'))
+                (folder/'config.json').write_text(json.dumps(saved), encoding='utf-8')
+                (folder/'domain-join-state.json').write_text('{"phase":"joined"}', encoding='utf-8')
+                repeated = subprocess.run([str(powershell), '-NoProfile', '-NonInteractive', '-File', str(runner)],
+                                          env=environment, capture_output=True, text=True, timeout=30)
+                self.assertEqual(repeated.returncode, 0, repeated.stderr)
+                self.assertEqual(json.loads((folder/'config.json').read_text(encoding='utf-8')), saved)
+                self.assertEqual(json.loads((folder/'domain-join-state.json').read_text()), {'phase': 'joined'})
 
     def test_domain_join_wim_bootstrap_contains_no_join_password_and_stays_within_command_limit(self):
         inv, _, job, token, authorization = self.join_fixtures(wim=True)
         command = authorization['finalizer_command']
-        self.assertLess(len(command), 31500)
+        self.assertLess(len(command), 32000)
         bootstrap = decoded_bootstrap(command)
         self.assertIn('DomainJoin.ps1', bootstrap_files(bootstrap))
         self.assertIn('GZipStream', base64.b64decode(command.rsplit(' ', 1)[1]).decode('utf-16le'))

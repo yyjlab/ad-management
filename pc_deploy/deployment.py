@@ -478,11 +478,12 @@ function Trace-Bootstrap($message){{[IO.File]::WriteAllText((Join-Path $p 'boots
 try{{
 Trace-Bootstrap 'Registering SYSTEM task'
 foreach($file in $files.PSObject.Properties){{
+if($file.Name -eq 'config.json' -and (Test-Path -LiteralPath (Join-Path $p $file.Name))){{continue}}
 [IO.File]::WriteAllText((Join-Path $p $file.Name),[string]$file.Value,[Text.UTF8Encoding]::new($false))
 }}
 $a=New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -ExecutionPolicy Bypass -File "'+$p+'\\Finalize.ps1"')
 $t=@((New-ScheduledTaskTrigger -AtStartup),(New-ScheduledTaskTrigger -AtLogOn))
-$s=New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Days 4)
+$s=New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Days 4)
 Register-ScheduledTask $task -Action $a -Trigger $t -Settings $s -User 'SYSTEM' -RunLevel Highest -Force | Out-Null
 Start-ScheduledTask $task
 Trace-Bootstrap 'SYSTEM task started'
@@ -494,10 +495,10 @@ throw
     # Compress the bootstrap once: UTF-16/base64 expansion must
     # not exceed Windows' command-line limit when a full CA certificate is included.
     packed_bootstrap = base64.b64encode(gzip.compress(bootstrap.encode())).decode()
-    launcher = "$b='" + packed_bootstrap + """';$r=[IO.StreamReader]::new([IO.Compression.GZipStream]::new([IO.MemoryStream]::new([Convert]::FromBase64String($b)),[IO.Compression.CompressionMode]0));try{&([ScriptBlock]::Create($r.ReadToEnd()))}finally{$r.Dispose()}"""
+    launcher = "$b='" + packed_bootstrap + """';$r=[IO.StreamReader]::new([IO.Compression.GZipStream]::new([IO.MemoryStream]::new([Convert]::FromBase64String($b)),[IO.Compression.CompressionMode]0));try{iex $r.ReadToEnd()}finally{$r.Dispose()}"""
     command = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + base64.b64encode(launcher.encode('utf-16le')).decode()
-    # CreateProcessW allows 32767 characters; reserve over 1200 for path expansion and wrappers.
-    if len(command) > 31500:
+    # CreateProcessW allows 32767 characters; reserve over 700 for executable path/wrappers.
+    if len(command) > 32000:
         raise Invalid('安装回报配置过大，不能安全写入应答文件')
     return command
 

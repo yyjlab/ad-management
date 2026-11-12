@@ -427,9 +427,13 @@ function restoreJobProgress(root, previous) {
 }
 function renderWimPerformance(job) {
   const status=job.post_install;
-  const labels={started:'新系统脚本已启动',working:'正在执行安装后检查',waiting_setup:'等待 Windows 完成初始化',waiting_retry:'安装后处理未完成，等待重试',timed_out:'安装后检查超时，请查看本地诊断'};
+  const labels={started:'新系统脚本已启动',working:'正在执行安装后检查',waiting_setup:'等待 Windows 完成初始化',waiting_retry:'安装后处理未完成，等待重试',initialization_failed:'安装后脚本初始化失败，请查看本地诊断',timed_out:'安装后检查超时，请查看本地诊断'};
   const detail=String(status?.detail||'');
   let html=status?'<small class="post-install-status" title="'+h(detail)+'">'+h(labels[status.phase]||status.phase)+(detail?'：'+h(detail.slice(0,180))+(detail.length>180?'…':''):'')+'</small>':'';
+  if(job.kind==='wim'&&job.state==='awaiting_report'){
+    if(!status)html+='<small class="post-install-status">尚未收到新系统脚本回报；请核对后台任务、网络和电源条件</small>';
+    html+='<button class="small" data-action="recover-post-install" data-id="'+h(job.id)+'">恢复安装后处理</button>';
+  }
   const perf=job.performance;
   if(!perf)return html;
   const cache=perf.caching, apply=perf.applying;
@@ -859,6 +863,11 @@ document.addEventListener('click', async e=>{
     else if(a==='preview')await preview();
     else if(a==='view-jobs'){view='jobs';render();}
     else if(a==='bootstrap')await downloadBootstrap();
+    else if(a==='recover-post-install'){
+      if(!confirm('确认这台电脑已经进入 Windows？下载后仅在这台电脑右键脚本，选择“使用 PowerShell 运行”并确认管理员授权。只恢复本任务回报和未执行的改名加域；保留原加域日志，不会重装或自动重启。'))return;
+      await downloadPackage('/api/jobs/'+encodeURIComponent(id)+'/post-install/recovery','PCDeploy-Recover-'+id+'.ps1',{windows_installed_confirmed:true});
+      toast('恢复脚本已下载，请在对应电脑运行；包含本任务凭据，请勿公开转发');
+    }
     else if(a==='edit-enrollment'){
       const entry=data.enrollments.find(item=>item.id===id);
       const days=entry.expires_at===null?null:Math.max(1,Math.ceil((entry.expires_at-data.server_time)/86400));

@@ -5,10 +5,13 @@ function Save-FinalizerState {
     try {
         if($cfg.token){$Detail=$Detail.Replace([string]$cfg.token,'[REDACTED]')}
         if($Detail.Length -gt 1600){$Detail=$Detail.Substring(0,1600)}
-        $body=@{phase=$Phase;hardware_uuid=$hardware;detail=$Detail;updated=[DateTime]::UtcNow.ToString('o')}|ConvertTo-Json -Compress
+        $body=@{phase=$Phase;hardware_uuid=$hardware;detail=$Detail;updated=[DateTime]::UtcNow.ToString('o')}
+        if($Phase -eq 'working'){$body.os_build=$build;$body.image_state=$state;$body.oobe_done=$true}
+        $body=$body|ConvertTo-Json -Compress
         [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'finalize-state.json'),$body,[Text.UTF8Encoding]::new($false))
         if($hardware -and $hardware -ceq $cfg.hardware_uuid){
             Invoke-RestMethod -UseBasicParsing -Method Post -Uri ($cfg.server_url+'/api/agent/jobs/'+$cfg.job_id+'/post-install/status') -Headers @{Authorization=('Bearer '+$cfg.token)} -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($body)) -TimeoutSec 3|Out-Null
+            if($Phase -eq 'working'){$script:workingStarted=$true}
         }
     } catch { }
 }
@@ -34,7 +37,12 @@ if ($cfg.domain_join) {
     Assert-JoinTransport $cfg
 }
 . "$PSScriptRoot\DeviceInfo.ps1"
-} catch { Save-FinalizerState 'initialization_failed' $_.Exception.Message; throw }
+} catch {
+    $initialFailure=$_
+    try { $hardware=([guid](Get-CimInstance Win32_ComputerSystemProduct -OperationTimeoutSec 10).UUID).ToString().ToLowerInvariant() } catch { }
+    Save-FinalizerState 'initialization_failed' $initialFailure.Exception.Message
+    throw 'Post-install initialization failed; see finalize-state.json.'
+}
 $deadline = [DateTime]::UtcNow.AddHours(2)
 if ($cfg.domain_join.mode -eq 'manual') {
     $deadline = ([DateTime]'1970-01-01T00:00:00Z').ToUniversalTime().AddSeconds([double]$cfg.expires_at)
@@ -42,18 +50,17 @@ if ($cfg.domain_join.mode -eq 'manual') {
 Save-FinalizerState 'started'
 $reportedStartup=$false
 $workingStarted=$false
-$hardware=''
 while ([DateTime]::UtcNow -lt $deadline) {
     try {
-        $product = Get-CimInstance Win32_ComputerSystemProduct
+        $product = Get-CimInstance Win32_ComputerSystemProduct -OperationTimeoutSec 10
         $hardware = ([guid]$product.UUID).ToString().ToLowerInvariant()
         if ($hardware -cne $cfg.hardware_uuid) { throw 'Machine identity mismatch.' }
         if(-not $reportedStartup){Save-FinalizerState 'started';$reportedStartup=$true}
         $setup = Get-ItemProperty 'HKLM:\SYSTEM\Setup'
         $state = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State').ImageState
         if ($state -eq 'IMAGE_STATE_COMPLETE' -and $setup.SystemSetupInProgress -eq 0 -and $setup.OOBEInProgress -eq 0) {
-            if(-not $workingStarted){Save-FinalizerState 'working';$workingStarted=$true}
             $build = [int](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').CurrentBuildNumber
+            if(-not $workingStarted){Save-FinalizerState 'working'}
             $display = @{}
             try {
                 $computer = Get-CimInstance Win32_ComputerSystem

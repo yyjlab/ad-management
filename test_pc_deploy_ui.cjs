@@ -14,6 +14,7 @@ async function run() {
     let role='super_admin',expired=false,saves=0,extensions=0,policyPayload=null,validityPayload=null,mediaPayload=null,enrollmentExpires=1793433600,fixture=null,profilePayload=null,previewPayload=null;
     const jobLogEvents={};let releasePayload=null,profileDeletePayload=null,jobLogError=false,jobLogGate=null,dashboardGate=null,jobReviewPayload=null;
     let assetRegistrationPayload=null,assetRegistrationError=false,assetSyncSettingsPayload=null;
+    let recoveryPayload=null;
     const settings={public_url:'http://ad-menu.test/pc-deploy',enabled:false,concurrency:2,ca_pem:'',http_allowed:true};
     const media={builders:[{id:'test-builder',name:'测试制作电脑',online:true,template_name:'WinPE',driver_name:'ASIX'}],builds:[]};
     const adHtml=fs.readFileSync(path.join(__dirname,'admin_manage.html'),'utf8');
@@ -32,6 +33,11 @@ async function run() {
       if(url.pathname==='/api/admin/check') return route.fulfill({json:{logged_in:true,username:'test-admin',role,
         permissions:['view_user','view_dashboard','view_computers','view_logs','manage_admins','system_settings','password_policy']}});
       if(url.pathname==='/pc-deploy/api/session') return route.fulfill(expired ? {status:401,json:{error:'请先登录 AD 管理后台'}} : {json:{authenticated:true,username:'test-admin',csrf:'fixture-csrf',test_mode:true}});
+      if(/^\/pc-deploy\/api\/jobs\/[^/]+\/post-install\/recovery$/.test(url.pathname)){
+        assert.equal(request.headers()['x-csrf-token'],'fixture-csrf');
+        recoveryPayload=request.postDataJSON();
+        return route.fulfill({contentType:'application/octet-stream',body:'# Fixture only; never executed'});
+      }
       if(/^\/pc-deploy\/api\/profiles\/[^/]+$/.test(url.pathname) && request.method()==='DELETE'){
         assert.equal(request.headers()['x-csrf-token'],'fixture-csrf');
         profileDeletePayload=request.postDataJSON();
@@ -474,9 +480,18 @@ async function run() {
     assert.equal(await liveProgress.locator('progress').getAttribute('value'),'100');checks++;
     fixture.jobs[0].state='awaiting_report';
     fixture.jobs[0].progress.stage='awaiting_report';
+    delete fixture.jobs[0].post_install;
     await page.locator('#refresh').click();
     await page.waitForFunction(()=>document.querySelector('.job-progress')?.textContent.includes('等待新系统回报'));
     assert.ok((await liveProgress.textContent()).includes('最后回报'));checks++;
+    const recovery=page.locator('.job-row [data-action="recover-post-install"]');
+    await recovery.waitFor();
+    assert.ok((await liveProgress.textContent()).includes('尚未收到新系统脚本回报'));checks++;
+    page.once('dialog',dialog=>dialog.accept());
+    const recoveryDownload=page.waitForEvent('download');
+    await recovery.click();
+    assert.equal((await recoveryDownload).suggestedFilename(),'PCDeploy-Recover-progress-job.ps1');checks++;
+    assert.deepEqual(recoveryPayload,{windows_installed_confirmed:true});checks++;
     // Restoration time freezes at its own stage boundary, while Windows-report waiting has a separate clock.
     fixture.jobs[0].image_applied_at=1793347000;
     fixture.jobs[0].deployment_finished_at=1793347010;

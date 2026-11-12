@@ -947,6 +947,53 @@ def register_pc_deploy(host_app, current_user, touch_session):
             return jsonify(job=dict(id=row['id'], target=data['target'], source=data['source'],
                                     profile=data['profile'], source_password=secret['source_password']))
 
+    def installed_system_config(c, row, data):
+        secret = store.decrypt(row['secret'])
+        url = store.setting(c, 'public_url')
+        cfg = dict(server_url=url, job_id=row['id'], hardware_uuid=row['device_id'],
+                   token=secret['finish_token'], ca_pem=store.setting(c, 'ca_pem', ''),
+                   allow_http=http_allowed() and urlsplit(url).scheme == 'http')
+        if data.get('domain_join'):
+            domain_transport_required(c, data['profile']['domain_join'])
+            cfg['domain_join'] = dict(domain=data['domain_join']['domain'],
+                                     computer_name=data['target']['computer_name'],
+                                     employee_id=data['target']['employee_id'],
+                                     allow_http=data['profile']['domain_join'].get('allow_http', False))
+            if data['profile']['domain_join'].get('mode') == 'manual':
+                cfg['domain_join']['mode'] = 'manual'
+                cfg['expires_at'] = row['expires']
+        return cfg
+
+    @app.post('/api/jobs/<identity>/post-install/recovery')
+    @admin
+    def post_install_recovery(identity):
+        if body().get('windows_installed_confirmed') is not True:
+            raise Invalid('请确认这台电脑已进入 Windows；此脚本不会安装系统')
+        with store.connect(write=True) as c:
+            row, data = load(c, 'jobs', identity)
+            if (row['state'] != 'awaiting_report' or row['expires'] < time.time()
+                    or data['source'].get('kind') != 'wim'):
+                raise Invalid('仅允许恢复未过期、正在等待安装后回报的 WIM 任务；已结束任务不能再次加域')
+            cfg = installed_system_config(c, row, data)
+            command = finalizer_command(cfg)
+            event(c, 'post_install', '管理员下载本机安装后恢复脚本；未重新安装、重置加域记录或执行重启', identity)
+        script = f'''$ErrorActionPreference='Stop'
+$hardware=([guid](Get-CimInstance Win32_ComputerSystemProduct).UUID).ToString().ToLowerInvariant()
+if($hardware -cne '{row['device_id']}'){{throw 'Wrong computer: this recovery file is bound to another hardware UUID.'}}
+$principal=[Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+if(-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){{
+Start-Process -FilePath "$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Verb RunAs -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -File "'+$PSCommandPath+'"')
+exit
+}}
+& {command}
+if($LASTEXITCODE -ne 0){{throw 'Cannot start post-install recovery. See local bootstrap.log.'}}
+Write-Host 'Post-install task started. No disk changes or automatic reboot. Check the platform for results.'
+Read-Host 'Press Enter to close'
+'''
+        return Response(script.encode('utf-8-sig'), mimetype='application/octet-stream', headers={
+            'Content-Disposition': f'attachment; filename="PCDeploy-Recover-{identity}.ps1"',
+            'Cache-Control': 'no-store'})
+
     @app.post('/api/agent/jobs/<identity>/start')
     def start(identity):
         inv = inventory(body())
@@ -958,19 +1005,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
             if digest(inv) != data['target']['inventory_hash']:
                 raise Invalid('启动安装前硬件复核不一致')
             secret = store.decrypt(row['secret'])
-            finalizer = dict(server_url=store.setting(c, 'public_url'), job_id=identity,
-                             allow_http=http_allowed() and urlsplit(store.setting(c, 'public_url')).scheme == 'http',
-                             hardware_uuid=dev['id'], token=secret['finish_token'],
-                             ca_pem=store.setting(c, 'ca_pem', ''))
-            if data.get('domain_join'):
-                domain_transport_required(c, data['profile']['domain_join'])
-                finalizer['domain_join'] = dict(domain=data['domain_join']['domain'],
-                                               computer_name=data['target']['computer_name'],
-                                               employee_id=data['target']['employee_id'],
-                                               allow_http=data['profile']['domain_join'].get('allow_http', False))
-                if data['profile']['domain_join'].get('mode') == 'manual':
-                    finalizer['domain_join']['mode'] = 'manual'
-                    finalizer['expires_at'] = row['expires']
+            finalizer = installed_system_config(c, row, data)
             if data['source'].get('kind') == 'wim':
                 if inv.get('wim_apply_v1') is not True:
                     raise Invalid('客户端不支持封装 WIM 还原')
@@ -1098,7 +1133,7 @@ def register_pc_deploy(host_app, current_user, touch_session):
     @app.post('/api/agent/jobs/<identity>/post-install/status')
     def post_install_status(identity):
         value = body()
-        phases = {'started', 'working', 'waiting_setup', 'waiting_retry', 'timed_out'}
+        phases = {'started', 'working', 'waiting_setup', 'waiting_retry', 'timed_out', 'initialization_failed'}
         if not isinstance(value.get('phase'), str) or value['phase'] not in phases:
             raise Invalid('无效的安装后诊断阶段')
         with store.connect(write=True) as c:
@@ -1119,11 +1154,23 @@ def register_pc_deploy(host_app, current_user, touch_session):
             previous = job.get('post_install', {})
             now = time.time()
             phase = value['phase']
+            # A validated installed-system callback stops startup timing independently of AD/DNS.
+            # Old agents without OS proof remain diagnostic-only.
+            if phase == 'working' and 'os_build' in value:
+                build = integer(value['os_build'], '系统版本', 19041, 99999)
+                if (value.get('image_state') != 'IMAGE_STATE_COMPLETE' or value.get('oobe_done') is not True
+                        or (job['source']['family'] == 'windows11') != (build >= 22000)
+                        or (job['source'].get('kind') == 'wim' and build != next(
+                            image['build'] for image in job['source']['images']
+                            if image['index'] == job['profile']['image_index']))):
+                    raise Invalid('Windows 启动回报与任务系统版本或初始化状态不匹配')
+                job.setdefault('installed_at', now)
             job['post_install'] = dict(phase=phase, detail=detail, updated=now)
             c.execute('UPDATE jobs SET data=?,updated=? WHERE id=?', (canonical(job), now, identity))
             if phase != previous.get('phase'):
                 labels = dict(started='新 Windows 安装后脚本已启动', working='正在执行安装后检查',
                               waiting_setup='等待 Windows 完成初始化', waiting_retry='安装后处理未完成，等待重试',
+                              initialization_failed='安装后脚本初始化失败，请查看本地诊断',
                               timed_out='安装后检查超时，需查看客户端诊断')
                 event(c, 'post_install', labels[phase] + ('：' + detail if detail else ''), identity)
         return jsonify(ok=True)

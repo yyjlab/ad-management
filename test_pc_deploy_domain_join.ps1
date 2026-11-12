@@ -266,11 +266,11 @@ function Unregister-ScheduledTask { throw 'Verification task removed before rest
 & (Join-Path $PSScriptRoot 'Finalize.ps1')
 exit $LASTEXITCODE
 '@)
-    & (Join-Path $PSHOME 'pwsh.exe') -NoProfile -NonInteractive -File (Join-Path $pausedDirectory 'Run.ps1')
+    & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -File (Join-Path $pausedDirectory 'Run.ps1')
     Assert-Join ($LASTEXITCODE -eq 0) 'Finalizer did not exit successfully while waiting for manual restart'
     Assert-Join (Test-Path -LiteralPath (Join-Path $pausedDirectory 'config.json')) 'Manual restart lost the verification token'
     $readyReport=[IO.File]::ReadAllText((Join-Path $pausedDirectory 'windows-ready.json'))|ConvertFrom-Json
-    Assert-Join ($readyReport.phase -eq 'working' -and -not $readyReport.PSObject.Properties['os_build']) 'Legacy startup diagnostic format changed'
+    Assert-Join ($readyReport.phase -eq 'working' -and $readyReport.os_build -eq 26100 -and $readyReport.oobe_done) 'Windows ready proof missing before domain join'
     Assert-Join (([IO.File]::ReadAllText((Join-Path $pausedDirectory 'finalize-state.json'))|ConvertFrom-Json).phase -ne 'timed_out') 'Waiting for manual restart was marked timed out'
 
     $timeoutDirectory=New-JoinCase
@@ -298,10 +298,13 @@ exit $LASTEXITCODE
 
 
     # Exercise finalizer startup before Windows is ready, with all OS/network calls intercepted.
-    foreach($diagnosticCase in @('waiting','error','identity')){
+    foreach($diagnosticCase in @('waiting','error','identity','initialization')){
         $directory=New-JoinCase
         foreach($name in @('Finalize.ps1','DeviceInfo.ps1')){
             [IO.File]::Copy((Join-Path $PSScriptRoot ('pc_deploy\agent\'+$name)),(Join-Path $directory $name))
+        }
+        if($diagnosticCase -eq 'initialization'){
+            [IO.File]::WriteAllText((Join-Path $directory 'DeviceInfo.ps1'),"throw 'Fixture initialization failed fixture-only-token'")
         }
         $fixtureConfig=@{server_url='https://deploy.test/pc-deploy';job_id='diagnostic-fixture';
             hardware_uuid=[guid]::NewGuid().ToString();token='fixture-only-token';diagnostic_case=$diagnosticCase}
@@ -331,9 +334,10 @@ exit $LASTEXITCODE
 '@
         [IO.File]::WriteAllText((Join-Path $directory 'Startup.ps1'),$runner)
         & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -File (Join-Path $directory 'Startup.ps1')
-        Assert-Join ($LASTEXITCODE -eq 42) 'Finalizer did not wait for a safe ready state'
+        $expectedExit=if($diagnosticCase -eq 'initialization'){1}else{42}
+        Assert-Join ($LASTEXITCODE -eq $expectedExit) 'Finalizer did not wait or safely report initialization failure'
         $journal=[IO.File]::ReadAllText((Join-Path $directory 'finalize-state.json'))|ConvertFrom-Json
-        $expectedPhase=if($diagnosticCase -eq 'waiting'){'waiting_setup'}else{'waiting_retry'}
+        $expectedPhase=if($diagnosticCase -eq 'initialization'){'initialization_failed'}elseif($diagnosticCase -eq 'waiting'){'waiting_setup'}else{'waiting_retry'}
         Assert-Join ($journal.phase -eq $expectedPhase) 'Startup diagnosis did not identify the blocked phase'
         Assert-Join (-not $journal.detail.Contains('fixture-only-token')) 'Startup diagnosis leaked the completion token'
         Assert-Join (-not (Test-Path -LiteralPath (Join-Path $directory 'domain-join-state.json'))) 'Finalizer joined a domain before a validated Windows ready state'
