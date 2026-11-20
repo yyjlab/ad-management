@@ -433,7 +433,7 @@ def is_valid_chinese_field(value, min_len=1, max_len=5):
 def validate_password(password):
     """
     校验密码强度，返回 (是否通过, 错误信息)
-    AD要求：8位以上，含大小写字母+数字+特殊符号
+    平台要求：至少8位，包含大小写字母和数字，特殊符号可选
     """
     if len(password) < 8:
         return False, '密码至少8位'
@@ -443,8 +443,6 @@ def validate_password(password):
         return False, '密码需包含小写字母'
     if not re.search(r'\d', password):
         return False, '密码需包含数字'
-    if not re.search(r'[!@#$%^&*(),.?":{}|<>]', password):
-        return False, '密码需包含特殊字符，如 !@#$%'
     return True, ''
 
 

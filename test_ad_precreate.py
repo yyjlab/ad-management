@@ -236,6 +236,27 @@ class PrecreateApiTests(unittest.TestCase):
         for log in self.platform.AdminActionLog.query.all():
             self.assertNotIn(PASSWORD, log.message)
 
+    def test_password_without_symbols_can_create_a_batch_and_reach_ad(self):
+        password = 'SamplePassword123'
+        batch, _ = self.begin(self.custom_spec, password=password)
+        result = self.step(batch, password)
+        self.assertEqual(result['counts']['created'], 1)
+        self.assertEqual(self.directory.create.call_args.args[1], password)
+
+    def test_password_validation_preserves_length_and_character_requirements(self):
+        for password in ('Abc12345', 'Abc12345!'):
+            with self.subTest(password=password):
+                self.assertEqual(self.platform.validate_password(password), (True, ''))
+        for password, message in (
+            ('Abc1234', '密码至少8位'),
+            ('abc12345', '密码需包含大写字母'),
+            ('ABC12345', '密码需包含小写字母'),
+            ('Abcdefgh', '密码需包含数字'),
+            ('Abcdefg!', '密码需包含数字'),
+        ):
+            with self.subTest(password=password):
+                self.assertEqual(self.platform.validate_password(password), (False, message))
+
     def test_custom_batch_requires_original_password_for_create_resume_and_retry(self):
         batch, payload = self.begin(self.custom_spec, password=PASSWORD)
         path = 'batches/' + batch['id']
