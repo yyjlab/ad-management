@@ -5,12 +5,14 @@ import unittest
 import uuid
 from datetime import datetime, timedelta
 from html import escape
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from account_notifications import MAX_ATTACHMENT, PASSWORD_NOTICE, VPN_TEMPLATE_ID, seed_templates, suggested_account
 from itsdangerous import URLSafeTimedSerializer
 import test_domain_password_policy as policy_tests
+from vpn_router import RouterConfig
 
 
 class AccountNoticeTests(unittest.TestCase):
@@ -80,7 +82,7 @@ class AccountNoticeTests(unittest.TestCase):
 
     def test_vpn_unconfigured_stops_before_sending(self):
         self.assertEqual(self.template['id'], VPN_TEMPLATE_ID)
-        with patch.dict('os.environ', VPN_PROVISION_ENDPOINT='', VPN_PROVISION_TOKEN=''):
+        with patch.dict('os.environ', VPN_PROVISION_ENDPOINT='', VPN_PROVISION_TOKEN='', VPN_ROUTER_URL=''):
             self.assertFalse(self.client.get(self.url('/config')).json['vpn_provisioning_ready'])
             response = self.send(self.preview(password='MockPassword12').json, password='MockPassword12', provision_vpn=True)
         self.assertEqual(response.status_code, 503)
@@ -113,6 +115,25 @@ class AccountNoticeTests(unittest.TestCase):
             connection.request.assert_called_once()
         self.connection.send_message.assert_called_once()
         self.assertNotIn(password, self.Delivery.query.one().snapshot)
+
+    def test_native_vpn_connector_creates_before_sending(self):
+        target, password = 'https://router.example.test', 'MockPassword12'
+        router = RouterConfig(target, Path('/test-secret'), None)
+
+        def create(*args):
+            self.connection.send_message.assert_not_called()
+            self.assertEqual(args, (router, self.p.app.instance_path, 'wfq101755', password))
+            return 'created'
+
+        with patch.dict('os.environ', VPN_ROUTER_URL=target), \
+                patch.object(RouterConfig, 'from_env', return_value=router), \
+                patch('account_notifications.create_openvpn', side_effect=create) as provision:
+            self.assertTrue(self.client.get(self.url('/config')).json['vpn_provisioning_ready'])
+            response = self.send(self.preview(password=password).json, password=password, provision_vpn=True)
+            self.assertTrue(response.json['success'])
+            self.assertIn('VPN 账号 wfq101755 创建成功', response.json['message'])
+            provision.assert_called_once()
+        self.connection.send_message.assert_called_once()
 
     def test_vpn_duplicate_auth_failure_and_unknown_do_not_send(self):
         password = 'MockPassword12'

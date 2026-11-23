@@ -16,11 +16,12 @@ from http.client import HTTPSConnection, HTTPException
 from urllib.parse import urlsplit
 
 import ldap3
-from flask import Blueprint, jsonify, request, send_file, session
+from flask import Blueprint, current_app, jsonify, request, send_file, session
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from ldap3.utils.conv import escape_filter_chars
 from sqlalchemy.exc import IntegrityError
 from pypinyin import lazy_pinyin
+from vpn_router import RouterConfig, create_openvpn
 
 MAX_ATTACHMENT = 2 * 1024 * 1024
 MAX_TOTAL = 5 * 1024 * 1024
@@ -40,6 +41,8 @@ class NoticeError(ValueError):
 
 
 def vpn_connector():
+    if os.environ.get('VPN_ROUTER_URL'):
+        return RouterConfig.from_env()
     token = os.environ.get('VPN_PROVISION_TOKEN', '')
     try:
         target = urlsplit(os.environ.get('VPN_PROVISION_ENDPOINT', ''))
@@ -54,7 +57,9 @@ def vpn_connector():
 
 
 def provision_vpn(connector, username, password, request_id):
-    """Call an authenticated, create-only adapter; created requires router readback."""
+    """Use the device login or an external create-only adapter."""
+    if isinstance(connector, RouterConfig):
+        return create_openvpn(connector, current_app.instance_path, username, password)
     target, token = connector
     conn = HTTPSConnection(target.hostname, target.port, timeout=12, context=ssl.create_default_context())
     try:
@@ -545,6 +550,11 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
                     'exists': 'VPN 账号已存在，未覆盖密码，也未发送邮件。',
                     'rejected': '路由器拒绝开通，未发送邮件。',
                     'auth_failed': '路由器接入认证失败，请检查服务端配置。未发送邮件。',
+                    'router_busy': '路由器正在处理另一笔开通，请稍后重试。未发送邮件。',
+                    'router_unreachable': '无法安全连接路由器，请检查网络及证书。未发送邮件。',
+                    'router_unavailable': '路由器接入组件无法启动，请检查后端镜像和配置。未发送邮件。',
+                    'lookup_failed': '未能确认 VPN 账号是否存在，没有提交创建或发送邮件。',
+                    'router_form_failed': '无法完整填写路由器的 OpenVPN 表单，没有提交创建或发送邮件。',
                     'unknown': 'VPN 开通结果未确认，未发送邮件。请先核对路由器，不要重复提交。',
                 }
                 row.status = 'unknown' if vpn_status == 'unknown' else 'failed'
