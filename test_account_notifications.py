@@ -6,7 +6,8 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from account_notifications import MAX_ATTACHMENT, seed_templates
+from account_notifications import MAX_ATTACHMENT, seed_templates, suggested_account
+from itsdangerous import URLSafeTimedSerializer
 import test_domain_password_policy as policy_tests
 
 
@@ -93,7 +94,7 @@ class AccountNoticeTests(unittest.TestCase):
         for changes in ({'to_email': 'a@example.test\r\nBcc:b@example.test'},
                         {'login_url': 'javascript:alert(1)'}, {'account': ''}, {'version': True}):
             self.assertIn(self.preview(**changes).status_code, (400, 409))
-        self.assertEqual(self.preview(password='secret').status_code, 400)
+        self.assertEqual(self.preview(password='bad\nsecret').status_code, 400)
 
     def test_send_and_duplicate_use_same_mail(self):
         preview, key = self.preview().json, str(uuid.uuid4())
@@ -118,6 +119,65 @@ class AccountNoticeTests(unittest.TestCase):
         self.assertEqual(message['To'], 'admin@example.test')
         self.assertTrue(message['Subject'].startswith('【测试】'))
         self.assertIn('测试邮件', message.get_body(preferencelist=('plain',)).get_content())
+
+    def test_pinyin_account_suggestions(self):
+        for name, account in [('袁玉杰', 'yuanyujie'), ('张三', 'zhangsan'), ('吕伟', 'lvwei'), ('Alice Smith', 'alicesmith')]:
+            self.assertEqual(suggested_account(name), account)
+        config = self.client.get(self.url('/config')).json
+        self.assertEqual(config['default_cc_email'], 'yuanyujie@shunhs.cn')
+
+    def test_cc_and_password_delivery_without_plaintext_storage(self):
+        password, cc, key = 'MockPassword12!', 'yuanyujie@shunhs.cn', str(uuid.uuid4())
+        preview = self.preview(password=password, cc_email=cc).json
+        self.assertIn(password, preview['text'])
+        signer = URLSafeTimedSerializer(self.p.app.secret_key, salt='account-notification-preview-v1')
+        self.assertNotIn(password, str(signer.loads(preview['preview_token'])))
+        response = self.send(preview, key, password=password)
+        self.assertTrue(response.json['success'])
+        message = self.connection.send_message.call_args.args[0]
+        self.assertEqual(message['Cc'], cc)
+        self.assertEqual(self.connection.send_message.call_args.kwargs['to_addrs'], ['staff@example.test', cc])
+        self.assertIn(password, message.get_body(preferencelist=('plain',)).get_content())
+        row = self.Delivery.query.one()
+        self.assertNotIn(password, row.snapshot)
+        self.assertNotIn(password, str(self.client.get(self.url('/deliveries')).json))
+        self.assertEqual(response.json['delivery']['cc_email'], cc)
+        self.assertTrue(response.json['delivery']['snapshot']['password_included'])
+        self.assertTrue(self.send(preview, key, password=password).json['replayed'])
+        self.assertEqual(self.connection.send_message.call_count, 1)
+        changed = self.preview(password='Different12!', cc_email=cc).json
+        self.assertEqual(self.send(changed, key, password='Different12!').status_code, 409)
+
+    def test_password_changes_require_new_preview_and_escape_html(self):
+        password = ' Example<&12! '
+        preview = self.preview(password=password).json
+        self.assertIn('Example&lt;&amp;12!', preview['html'])
+        self.assertEqual(self.send(preview, password='changed').status_code, 409)
+        self.smtp.assert_not_called()
+        self.assertTrue(self.send(preview, password=password).json['success'])
+        self.assertIn(password, self.connection.send_message.call_args.args[0].get_body(preferencelist=('plain',)).get_content())
+        self.assertEqual(self.preview(cc_email='bad\r\nBcc:someone@example.test').status_code, 400)
+        self.assertEqual(self.preview(password='x' * 129).status_code, 400)
+
+    def test_test_email_never_uses_form_cc(self):
+        password = 'MockPassword12!'
+        preview = self.preview(password=password, cc_email='yuanyujie@shunhs.cn').json
+        response = self.send(preview, password=password, mode='test', test_email='admin@example.test')
+        self.assertTrue(response.json['success'])
+        message = self.connection.send_message.call_args.args[0]
+        self.assertIsNone(message['Cc'])
+        self.assertEqual(self.connection.send_message.call_args.kwargs['to_addrs'], ['admin@example.test'])
+        self.assertEqual(response.json['delivery']['cc_email'], '')
+
+    def test_partial_cc_refusal_does_not_retry_accepted_recipients(self):
+        cc, key = 'yuanyujie@shunhs.cn', str(uuid.uuid4())
+        preview = self.preview(cc_email=cc).json
+        self.connection.send_message.return_value = {cc: (550, b'unknown recipient')}
+        response = self.send(preview, key)
+        self.assertEqual(response.json['delivery']['status'], 'partial')
+        self.assertIn('抄送邮箱', response.json['delivery']['message'])
+        self.assertTrue(self.send(preview, key).json['replayed'])
+        self.assertEqual(self.connection.send_message.call_count, 1)
 
     def test_smtp_failure_and_uncertain_result_are_recorded(self):
         self.connection.login.side_effect = smtplib.SMTPAuthenticationError(535, b'rejected')
@@ -180,6 +240,7 @@ class AccountNoticeTests(unittest.TestCase):
             response = self.client.get(self.url('/recipients?q=ab%2A'))
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json['recipients'][0]['name'], '张三')
+        self.assertEqual(response.json['recipients'][0]['suggested_account'], 'zhangsan')
         self.assertIn(r'ab\2a', conn.search.call_args.args[1])
         conn.add.assert_not_called()
         conn.modify.assert_not_called()

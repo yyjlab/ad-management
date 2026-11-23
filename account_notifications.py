@@ -1,5 +1,6 @@
-"""Account notices only: no account provisioning and no password delivery."""
+"""Account notices only; plaintext passwords are never saved in delivery records."""
 import hashlib
+import hmac
 import html
 import io
 import json
@@ -17,12 +18,14 @@ from flask import Blueprint, jsonify, request, send_file, session
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from ldap3.utils.conv import escape_filter_chars
 from sqlalchemy.exc import IntegrityError
+from pypinyin import lazy_pinyin
 
 MAX_ATTACHMENT = 2 * 1024 * 1024
 MAX_TOTAL = 5 * 1024 * 1024
+DEFAULT_CC_EMAIL = 'yuanyujie@shunhs.cn'
 URL_FIELDS = ('login_url', 'tutorial_url', 'download_url')
 TEMPLATE_FIELDS = ('name', 'system_name', 'subject', 'intro', *URL_FIELDS, 'password_instruction')
-FORM_FIELDS = ('employee_id', 'recipient_name', 'to_email', 'account', 'notes',
+FORM_FIELDS = ('employee_id', 'recipient_name', 'to_email', 'cc_email', 'account', 'notes',
                *URL_FIELDS, 'password_instruction')
 
 
@@ -67,6 +70,16 @@ def web_url(value):
 
 def canonical(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+
+
+def suggested_account(name):
+    return re.sub(r'[^a-z0-9._-]', '', ''.join(lazy_pinyin(name)).lower())[:120]
+
+
+def notice_password(value):
+    if not isinstance(value, str) or len(value) > 128 or any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise NoticeError('密码最多 128 个字符，不能包含换行或控制字符')
+    return value
 
 
 def define_models(db):
@@ -123,11 +136,13 @@ def seed_templates(db, models):
                 password_instruction='密码由 IT 单独提供，或使用已约定的现有密码。'))
 
 
-def render_notice(snapshot, test=False):
+def render_notice(snapshot, test=False, password=''):
     esc = lambda value: html.escape(str(value), quote=True)
     lines = [f"您好，{snapshot['recipient_name']}：", snapshot['intro'],
-             f"系统：{snapshot['system_name']}", f"登录账号：{snapshot['account']}",
-             f"密码说明：{snapshot['password_instruction']}"]
+             f"系统：{snapshot['system_name']}", f"登录账号：{snapshot['account']}"]
+    if password:
+        lines.append(f'初始密码：{password}')
+    lines.append(f"密码说明：{snapshot['password_instruction']}")
     for key, label in zip(URL_FIELDS, ('登录地址', '使用教程', '客户端下载')):
         if snapshot[key]:
             lines.append(f'{label}：{snapshot[key]}')
@@ -151,6 +166,9 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
     Template, Attachment, Delivery = models
     bp = Blueprint('account_notifications', __name__, url_prefix='/api/admin/account-notifications')
     signer = URLSafeTimedSerializer(app.secret_key, salt='account-notification-preview-v1')
+
+    def password_digest(value):
+        return hmac.new(app.secret_key.encode(), value.encode(), hashlib.sha256).hexdigest() if value else ''
 
     @bp.before_request
     def authorize():
@@ -178,7 +196,7 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
     def data(allowed):
         value = request.get_json(silent=True)
         if not isinstance(value, dict) or set(value) - set(allowed):
-            raise NoticeError('请求字段不正确；本版不接受或发送明文密码')
+            raise NoticeError('请求字段不正确')
         return value
 
     def get_template(ident):
@@ -199,9 +217,11 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
         status, message = row.status, row.message
         if status == 'sending' and datetime.utcnow() - row.created_at > timedelta(minutes=5):
             status, message = 'unknown', '发送进程未确认结果，请核对邮箱后决定是否重新发送'
+        snapshot = json.loads(row.snapshot)
         return dict(id=row.id, operator=row.operator, mode=row.mode, to_email=row.to_email,
+            cc_email=snapshot.get('cc_email', '') if row.mode == 'employee' else '',
             subject=row.subject, status=status, message=message,
-            created_at=row.created_at.isoformat() + 'Z', snapshot=json.loads(row.snapshot))
+            created_at=row.created_at.isoformat() + 'Z', snapshot=snapshot)
 
     @bp.get('/config')
     def config():
@@ -209,7 +229,8 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
             session['account_notice_csrf'] = secrets.token_urlsafe(32)
         ready = all(app.config.get(key) for key in ('MAIL_SERVER', 'MAIL_PORT', 'MAIL_USERNAME', 'MAIL_PASSWORD'))
         return jsonify(success=True, csrf_token=session['account_notice_csrf'], mail_ready=ready,
-                       sender=app.config.get('MAIL_USERNAME', ''), operator=current_user().username)
+                       sender=app.config.get('MAIL_USERNAME', ''), operator=current_user().username,
+                       default_cc_email=DEFAULT_CC_EMAIL)
 
     @bp.route('/templates', methods=['GET', 'POST'])
     @bp.route('/templates/<ident>', methods=['POST'])
@@ -325,10 +346,11 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
                     email_status = 'invalid' if mail else 'missing'
                 matched_name = next((first(key) for key in ('description', 'displayName', 'cn')
                     if first(key).casefold() == query.casefold()), '') if exact else ''
-                result.append(dict(employee_id=first('sAMAccountName'),
-                    name=matched_name or first('description') or first('displayName') or first('cn') or first('sAMAccountName'),
+                name = matched_name or first('description') or first('displayName') or first('cn') or first('sAMAccountName')
+                result.append(dict(employee_id=first('sAMAccountName'), name=name, suggested_account=suggested_account(name),
                     email=mail, email_status=email_status, department=first('department')))
-            return jsonify(success=True, recipients=result, exact=exact, truncated=conn.result.get('result') == 4)
+            return jsonify(success=True, recipients=result, suggested_account=suggested_account(query),
+                           exact=exact, truncated=conn.result.get('result') == 4)
         except NoticeError:
             raise
         except Exception as exc:
@@ -343,7 +365,8 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
 
     @bp.post('/preview')
     def preview():
-        value = data(('template_id', 'version', *FORM_FIELDS))
+        value = data(('template_id', 'version', 'password', *FORM_FIELDS))
+        password = notice_password(value.get('password', ''))
         row = get_template(value.get('template_id'))
         if not row.active or type(value.get('version')) is not int or row.version != value.get('version'):
             raise NoticeError('模板已停用或变更，请重新选择模板', 409)
@@ -351,18 +374,23 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
                         subject=row.subject, intro=row.intro)
         for key in FORM_FIELDS:
             raw = value.get(key, '')
+            if key == 'cc_email':
+                snapshot[key] = email_address(raw) if raw else ''
+                continue
             snapshot[key] = (email_address(raw) if key == 'to_email' else web_url(raw) if key in URL_FIELDS else
                 text(raw, 1000 if key == 'notes' else 500 if key == 'password_instruction' else 64 if key == 'employee_id' else 120,
                      required=key in ('recipient_name', 'account', 'password_instruction'), multiline=key == 'notes'))
         snapshot['attachments'] = [dict(id=f.id, filename=f.filename, digest=hashlib.sha256(f.content).hexdigest()) for f in files(row)]
-        plain, body = render_notice(snapshot)
-        token = signer.dumps(dict(operator=current_user().username, snapshot=snapshot))
+        snapshot['password_included'] = bool(password)
+        plain, body = render_notice(snapshot, password=password)
+        token = signer.dumps(dict(operator=current_user().username, snapshot=snapshot, password_digest=password_digest(password)))
         return jsonify(success=True, preview_token=token, subject=row.subject, html=body,
-                       text=plain, recipient=snapshot['to_email'])
+                       text=plain, recipient=snapshot['to_email'], cc_email=snapshot['cc_email'])
 
     @bp.post('/send')
     def send():
-        value = data(('preview_token', 'request_key', 'mode', 'test_email', 'confirm_text'))
+        value = data(('preview_token', 'request_key', 'mode', 'test_email', 'confirm_text', 'password'))
+        password = notice_password(value.get('password', ''))
         if value.get('confirm_text') != 'SEND':
             raise NoticeError('请先预览并确认收件人后发送')
         try:
@@ -373,12 +401,15 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
         operator = current_user().username
         if signed.get('operator') != operator:
             raise NoticeError('预览不属于当前操作人', 403)
+        if not hmac.compare_digest(signed.get('password_digest', ''), password_digest(password)):
+            raise NoticeError('密码已修改，请重新预览后发送', 409)
         snapshot = signed['snapshot']
         mode = value.get('mode', 'employee')
         if mode not in ('employee', 'test'):
             raise NoticeError('发送方式不正确')
         to = email_address(value.get('test_email', '')) if mode == 'test' else snapshot['to_email']
-        fingerprint = hashlib.sha256(canonical(dict(snapshot=snapshot, mode=mode, to=to)).encode()).hexdigest()
+        cc = snapshot.get('cc_email', '') if mode == 'employee' else ''
+        fingerprint = hashlib.sha256(canonical(dict(snapshot=snapshot, mode=mode, to=to, password_digest=password_digest(password))).encode()).hexdigest()
         def replay(row):
             if row.fingerprint != fingerprint:
                 raise NoticeError('同一发送标识不能携带不同内容', 409)
@@ -422,9 +453,11 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
             row.status, row.message = 'failed', '审计记录保存失败，未发送邮件'
             db.session.commit()
             return jsonify(success=False, delivery=public_delivery(row), message=row.message), 500
-        plain, body = render_notice(snapshot, mode == 'test')
+        plain, body = render_notice(snapshot, mode == 'test', password=password)
         message = EmailMessage()
         message['From'], message['To'], message['Subject'] = sender, to, row.subject
+        if cc:
+            message['Cc'] = cc
         message['Message-ID'] = f'<account-notice-{row.id}@{app.config["MAIL_USERNAME"].split("@")[-1]}>'
         message.set_content(plain)
         message.add_alternative(body, subtype='html')
@@ -435,10 +468,12 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
             with smtplib.SMTP_SSL(app.config['MAIL_SERVER'], port,
                                   timeout=15, context=ssl.create_default_context()) as smtp:
                 smtp.login(app.config['MAIL_USERNAME'], app.config['MAIL_PASSWORD'])
-                refused = smtp.send_message(message)
-                if refused:
-                    raise smtplib.SMTPRecipientsRefused(refused)
-            row.status, row.message = 'submitted', '邮件服务器已接受；不代表收件人已收到或阅读'
+                refused = smtp.send_message(message, to_addrs=list(dict.fromkeys([to] + ([cc] if cc else []))))
+            if refused:
+                rejected = '、'.join(label for address, label in ((to, '收件邮箱'), (cc, '抄送邮箱')) if address in refused)
+                row.status, row.message = 'partial', f'邮件服务器拒绝了{rejected or "部分收件人"}，其余已接受；请核对邮箱，不要直接重复发送'
+            else:
+                row.status, row.message = 'submitted', '邮件服务器已接受；不代表收件人已收到或阅读'
         except (smtplib.SMTPRecipientsRefused, smtplib.SMTPAuthenticationError, smtplib.SMTPDataError,
                 smtplib.SMTPSenderRefused, smtplib.SMTPNotSupportedError):
             row.status, row.message = 'failed', '邮件服务器拒绝提交，请核对配置或收件邮箱'
