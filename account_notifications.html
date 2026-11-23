@@ -6,6 +6,7 @@
 <title>账号通知</title>
 <style>
 :root{font-family:"Microsoft YaHei",system-ui,sans-serif;color:#263449;background:#f0f2f5;font-size:14px;color-scheme:light}*{box-sizing:border-box}body{margin:0}button,input,select,textarea{font:inherit}button{cursor:pointer;border:1px solid #d5dfeb;background:white;color:#34465e;padding:9px 16px;border-radius:6px;white-space:nowrap}button:hover{border-color:#1677ff;color:#1269df}button:disabled{opacity:.55;cursor:not-allowed}.primary{background:#1677ff;color:white;border-color:#1677ff}.primary:hover{color:white;background:#0967df}.danger{color:#c43d4c}.quiet{background:transparent}h1{font-size:24px;margin:0 0 7px}h2{font-size:17px;margin:0}p{margin:0;line-height:1.6}.muted,small{color:#718198}.header{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:22px}.sender{font-size:12px;text-align:right}.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#1caa82;margin-right:6px}.dot.off{background:#e19a24}.tabs{display:flex;gap:24px;border-bottom:1px solid #dce4ee;margin-bottom:22px}.tab{border:0;border-radius:0;background:none;padding:11px 2px;color:#718198;border-bottom:3px solid transparent}.tab[aria-selected=true]{color:#1677ff;border-bottom-color:#1677ff;font-weight:700}.pane[hidden],[hidden]{display:none!important}.notice{padding:12px 15px;border-radius:6px;background:#eaf3ff;color:#245b9b;margin-bottom:18px;overflow-wrap:anywhere}.notice.error{background:#fff0f0;color:#b72e3f}.notice.good{background:#e9f8f2;color:#167957}.form-layout{display:grid;grid-template-columns:minmax(0,1fr) 280px;gap:24px}.surface{background:white;border:1px solid #e0e7f0;border-radius:8px;padding:22px}.section-title{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:19px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:17px 20px}.full{grid-column:1/-1}label.field{display:flex;flex-direction:column;gap:7px;min-width:0}input:not([type=checkbox]),select,textarea{width:100%;min-width:0;border:1px solid #ccd7e4;background:white;color:#263449;border-radius:6px;padding:10px 11px;outline:none}input:focus,select:focus,textarea:focus{border-color:#1677ff;box-shadow:0 0 0 3px #1677ff16}textarea{resize:vertical;min-height:86px;line-height:1.55}input[type=checkbox]{width:16px;height:16px;accent-color:#1677ff;flex:0 0 auto}.inline{display:flex;gap:10px;align-items:center}.actions{display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;margin-top:22px}.divider{height:1px;background:#e8edf4;margin:22px 0}.aside-step{display:flex;gap:12px;margin:20px 0}.step{width:25px;height:25px;flex:0 0 auto;border:1px solid #c9dcfa;background:#edf4ff;color:#1768dd;text-align:center;line-height:23px;border-radius:6px}.aside-step strong{display:block;margin-bottom:5px}.aside-step p{color:#718198;font-size:12px}.results{border:1px solid #dce5ef;border-radius:6px;margin-top:9px;max-height:220px;overflow:auto}.result{display:block;width:100%;border:0;border-bottom:1px solid #edf1f6;border-radius:0;text-align:left;white-space:normal;padding:11px 13px}.result:last-child{border-bottom:0}.result small{display:block;margin-top:4px;overflow-wrap:anywhere}.template-layout{display:grid;grid-template-columns:230px minmax(0,1fr);gap:22px}.template-list button{display:block;width:100%;text-align:left;margin-bottom:8px;white-space:normal}.template-list button.selected{border-color:#1677ff;background:#edf4ff;color:#1269df}.template-list small{display:block;margin-top:5px}.pill{display:inline-block;padding:3px 8px;border-radius:4px;background:#eaf3ff;color:#2465ba;font-size:12px}.pill.submitted{background:#e5f7ef;color:#147d55}.pill.failed{background:#fff0f0;color:#bd3447}.pill.unknown,.pill.sending{background:#fff6df;color:#926313}.file-row{display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:1px solid #edf1f6;padding:12px 0}.file-row a{color:#1768dd;text-decoration:none;overflow-wrap:anywhere}.file-row small{display:block;margin-top:5px}.upload{margin-top:14px;flex-wrap:wrap}.upload input{flex:1}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;white-space:nowrap}th{text-align:left;font-size:12px;color:#718198;background:#f7f9fc}th,td{padding:14px 12px;border-bottom:1px solid #e8edf4}td small{display:block;margin-top:5px}.empty{text-align:center;padding:48px 15px;color:#718198}.pagination{justify-content:flex-end;margin-top:18px}.checkbox{display:flex;align-items:flex-start;gap:8px;line-height:1.6}.checkbox input{margin:3px 0 0}dialog{width:min(820px,calc(100% - 28px));max-height:calc(100dvh - 40px);border:1px solid #dbe4ef;padding:0;border-radius:8px;color:#263449}dialog::backdrop{background:#172b4655}.modal-head{padding:18px 22px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #e6ecf4}.close{font-size:23px;line-height:1;padding:4px 8px;border:0}.modal-body{padding:22px}.modal-footer{padding:17px 22px;border-top:1px solid #e6ecf4;display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap}.preview-frame{width:100%;height:360px;border:1px solid #e0e7f0;border-radius:6px;background:#fff;margin:15px 0}.detail{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;line-height:1.9}.link-button{border:0;background:none;color:#1677ff;padding:4px 7px}.hint{font-size:12px;line-height:1.6;color:#718198;margin-top:8px}#testEmail{max-width:280px}#globalMessage:empty{display:none}@media(max-width:960px){.form-layout{grid-template-columns:1fr}.send-aside{display:none}.template-layout{grid-template-columns:180px minmax(0,1fr)}}@media(max-width:600px){.header{align-items:flex-start}.sender{max-width:160px;overflow-wrap:anywhere}.grid,.template-layout{grid-template-columns:1fr}.surface{padding:16px}.template-list{display:flex;gap:8px;overflow:auto}.template-list button{min-width:150px;margin:0}.tabs{gap:20px}.inline.search{flex-wrap:wrap}.inline.search input{flex:1;min-width:150px}.preview-frame{height:300px}.modal-body{padding:16px}.actions button{flex:1}.header p{font-size:12px}}
+.lookup-status[data-tone="error"]{color:#b72e3f}.lookup-status[data-tone="good"]{color:#167957}
 </style>
 </head>
 <body>
@@ -17,8 +18,8 @@
 <div class="section-title"><h2>填写通知</h2><span class="pill">人工确认发送</span></div>
 <div class="grid">
 <label class="field full">通知模板<select id="composeTemplate" required><option value="">正在加载…</option></select></label>
-<div class="full"><label for="employeeSearch">查找同事</label><div class="inline search" style="margin-top:7px"><input id="employeeSearch" placeholder="姓名或工号，至少 2 个字符" maxlength="80"><button type="button" id="searchEmployee">查询 AD</button></div><div id="employeeResults" class="results" hidden></div></div>
-<label class="field">使用人姓名<input id="recipient_name" maxlength="120" required autocomplete="off"></label>
+<div class="full"><label for="employeeSearch">查找同事</label><div class="inline search" style="margin-top:7px"><input id="employeeSearch" placeholder="输入完整姓名或工号，自动识别域账号" maxlength="80" autocomplete="off"><button type="button" id="searchEmployee">查询 AD</button></div><div id="employeeResults" class="results" hidden></div><p id="recipientHint" class="hint lookup-status" role="status" aria-live="polite"></p></div>
+<label class="field">使用人姓名<input id="recipient_name" maxlength="120" required autocomplete="off" placeholder="输入姓名，自动填写邮箱"></label>
 <label class="field">收件邮箱<input id="to_email" type="email" maxlength="254" required autocomplete="off"></label>
 <label class="field">登录账号<input id="account" maxlength="120" required autocomplete="off"></label>
 <label class="field">员工工号（可选）<input id="employee_id" maxlength="64" autocomplete="off"></label>
@@ -65,7 +66,7 @@ function element(tag,text,cls){const el=document.createElement(tag);if(text!==un
 function uuid(){const a=crypto.getRandomValues(new Uint8Array(16));a[6]=(a[6]&15)|64;a[8]=(a[8]&63)|128;const h=[...a].map(n=>n.toString(16).padStart(2,'0')).join('');return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;}
 function template(){return state.templates.find(t=>t.id===$('composeTemplate').value);}
 function invalidate(){state.preview=null;state.keys={};$('confirmOpened').checked=false;$('confirmSend').disabled=true;}
-function tab(name){document.querySelectorAll('[data-tab]').forEach(b=>b.setAttribute('aria-selected',String(b.dataset.tab===name)));document.querySelectorAll('.pane').forEach(p=>p.hidden=p.id!=='pane-'+name);history.replaceState(null,'','#'+name);show('');if(name==='history')loadHistory();}
+function tab(name){if(name!=='send'){cancelRecipientLookup();recipientHint('');$('employeeResults').hidden=true;}document.querySelectorAll('[data-tab]').forEach(b=>b.setAttribute('aria-selected',String(b.dataset.tab===name)));document.querySelectorAll('.pane').forEach(p=>p.hidden=p.id!=='pane-'+name);history.replaceState(null,'','#'+name);show('');if(name==='history')loadHistory();}
 document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>tab(b.dataset.tab));
 document.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>$(b.dataset.close).close());
 function summary(){const t=template();$('summarySystem').textContent=t?.system_name||'—';$('summarySubject').textContent=t?.subject||'—';$('summaryAttachments').textContent=t?.attachments.map(f=>f.filename).join('、')||'无';}
@@ -89,18 +90,52 @@ function renderAttachments(){
 async function refreshEdited(){const id=state.edit?.id;await loadTemplates();editTemplate(state.templates.find(t=>t.id===id));invalidate();}
 $('composeTemplate').onchange=applyTemplate;
 $('sendForm').addEventListener('input',invalidate);
-$('searchEmployee').onclick=async()=>{
-    const query=$('employeeSearch').value.trim();if(query.length<2){show('请输入至少 2 个字或字符','error');return;}
-    const b=$('searchEmployee');b.disabled=true;$('employeeResults').hidden=true;
-    try{const data=await api('/recipients?q='+encodeURIComponent(query));$('employeeResults').replaceChildren();
-        if(!data.recipients.length)$('employeeResults').append(element('div','未找到，可直接手动填写。','empty'));
-        for(const p of data.recipients){const item=element('button',`${p.name} · ${p.employee_id}`,'result');item.type='button';item.append(element('small',[p.department,p.email||'未填写邮箱'].filter(Boolean).join(' · ')));item.onclick=()=>{invalidate();$('recipient_name').value=p.name;$('employee_id').value=p.employee_id;$('account').value=p.employee_id;$('to_email').value=p.email;$('employeeResults').hidden=true;};$('employeeResults').append(item);}
-        $('employeeResults').hidden=false;show('');
-    }catch(e){show(e.message,'error');}finally{b.disabled=false;}
-};
+let recipientTimer, recipientRequest;
+function recipientHint(message,tone=''){const el=$('recipientHint');el.textContent=message;el.dataset.tone=tone;}
+function cancelRecipientLookup(){clearTimeout(recipientTimer);recipientRequest?.abort();recipientRequest=null;$('searchEmployee').disabled=false;}
+function selectRecipient(person){
+    cancelRecipientLookup();invalidate();$('employeeSearch').value=person.name;$('recipient_name').value=person.name;$('employee_id').value=person.employee_id;$('account').value=person.employee_id;
+    $('to_email').value=person.email_status==='valid'?person.email:'';$('employeeResults').hidden=true;
+    if(person.email_status==='valid')recipientHint(`已识别域账号 ${person.employee_id}，邮箱已自动填写，请核对。`,'good');
+    else if(person.email_status==='invalid')recipientHint(`域账号 ${person.employee_id} 的邮箱格式不正确，请修正 AD 邮箱或手动填写有效邮箱。`,'error');
+    else recipientHint(`域账号 ${person.employee_id} 尚未填写邮箱，请补充 AD 邮箱或手动填写收件邮箱。`,'error');
+}
+async function lookupRecipient(query,automatic){
+    cancelRecipientLookup();if(query.length<2){recipientHint('请输入至少 2 个字或字符。');return;}
+    const controller=new AbortController();recipientRequest=controller;$('searchEmployee').disabled=true;$('employeeResults').hidden=true;recipientHint('正在查询域账号…');
+    try{
+        const data=await api('/recipients?q='+encodeURIComponent(query)+(automatic?'&exact=1':''),{signal:controller.signal});
+        if(controller.signal.aborted)return;
+        $('employeeResults').replaceChildren();
+        if(!data.recipients.length){recipientHint('未找到匹配的域账号，请核对姓名或使用工号查询；也可手动填写收件信息。','error');return;}
+        if(automatic&&data.exact&&data.recipients.length===1&&!data.truncated){selectRecipient(data.recipients[0]);return;}
+        for(const person of data.recipients){
+            const item=element('button',`${person.name} · ${person.employee_id}`,'result');item.type='button';
+            const mail=person.email_status==='valid'?person.email:person.email_status==='invalid'?'邮箱格式不正确':'未填写邮箱';
+            item.append(element('small',[person.department,mail].filter(Boolean).join(' · ')));item.onclick=()=>selectRecipient(person);$('employeeResults').append(item);
+        }
+        $('employeeResults').hidden=false;recipientHint(automatic&&data.recipients.length>1?'找到多个同名域账号，请按工号选择。':'请选择对应的域账号。');
+    }catch(e){if(!controller.signal.aborted)recipientHint(e.message,'error');}
+    finally{if(recipientRequest===controller){recipientRequest=null;$('searchEmployee').disabled=false;}}
+}
+function scheduleRecipientLookup(event){
+    cancelRecipientLookup();$('employeeResults').hidden=true;recipientHint('');
+    for(const key of ['to_email','employee_id','account'])$(key).value='';
+    if(event.target.id==='employeeSearch')$('recipient_name').value='';
+    else $('employeeSearch').value=event.target.value;
+    const query=event.target.value.trim();
+    if(event.isComposing||query.length<2)return;
+    recipientTimer=setTimeout(()=>lookupRecipient(query,true),500);
+}
+for(const id of ['employeeSearch','recipient_name']){
+    $(id).addEventListener('input',scheduleRecipientLookup);
+    $(id).addEventListener('compositionend',scheduleRecipientLookup);
+}
+for(const id of ['to_email','employee_id','account'])$(id).addEventListener('input',()=>{cancelRecipientLookup();recipientHint('');$('employeeResults').hidden=true;});
+$('searchEmployee').onclick=()=>lookupRecipient($('employeeSearch').value.trim(),false);
 $('employeeSearch').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();$('searchEmployee').click();}};
 $('sendForm').onsubmit=async e=>{
-    e.preventDefault();const t=template();if(!t)return;const b=$('previewButton');b.disabled=true;$('sendTest').disabled=false;
+    e.preventDefault();cancelRecipientLookup();const t=template();if(!t)return;const b=$('previewButton');b.disabled=true;$('sendTest').disabled=false;
     try{const data=await api('/preview',{method:'POST',body:{template_id:t.id,version:t.version,...Object.fromEntries(fields.map(k=>[k,$(k).value.trim()]))}});state.preview=data;state.keys={};$('previewRecipient').textContent='收件人：'+$('recipient_name').value+' <'+data.recipient+'>';$('previewSubject').textContent='主题：'+data.subject;$('emailPreview').srcdoc=data.html;$('sendResult').textContent='';$('confirmOpened').checked=false;$('confirmSend').disabled=true;$('previewDialog').showModal();show('');}catch(err){show(err.message,'error');}finally{b.disabled=false;}
 };
 $('confirmOpened').onchange=()=>$('confirmSend').disabled=!$('confirmOpened').checked||state.sending||!state.preview;

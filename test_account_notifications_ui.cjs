@@ -31,7 +31,16 @@ async function run() {
                     else template={...template,...req.postDataJSON(),version:template.version+1};
                     result={success:true,template};
                 }
-                if(endpoint==='/recipients')result={success:true,recipients:[{name:'张三',employee_id:'wfq101755',email:'staff@example.test',department:'研发部'}]};
+                if(endpoint==='/recipients'){
+                    const people={
+                        '张三':[{name:'张三',employee_id:'wfq101755',email:'staff@example.test',email_status:'valid',department:'研发部'}],
+                        '李四':[{name:'李四',employee_id:'wfq000001',email:'',email_status:'missing',department:'行政部'}],
+                        '王五':[{name:'王五',employee_id:'wfq000002',email:'bad@@example.test',email_status:'invalid',department:''}],
+                        '赵六':[{name:'赵六',employee_id:'wfq000003',email:'a@example.test',email_status:'valid',department:'研发部'},
+                               {name:'赵六',employee_id:'wfq000004',email:'b@example.test',email_status:'valid',department:'行政部'}]
+                    };
+                    result={success:true,exact:url.searchParams.get('exact')==='1',truncated:false,recipients:people[url.searchParams.get('q')]||[]};
+                }
                 if(endpoint==='/preview'){
                     const body=req.postDataJSON();seen.push(body);
                     result={success:true,preview_token:'preview-token',subject:template.subject,recipient:body.to_email,html:'<html><body><h2>公司 VPN</h2><p>账号开通通知</p></body></html>'};
@@ -53,10 +62,34 @@ async function run() {
         const frame=page.frameLocator('#accountNoticeFrame');
         await frame.locator('#composeTemplate option[value="template-1"]').waitFor({state:'attached'});
         await frame.locator('#employeeSearch').fill('张三');
+        await frame.locator('#recipientHint').filter({hasText:'邮箱已自动填写'}).waitFor();
+        assert.equal(await frame.locator('#to_email').inputValue(),'staff@example.test');
         await frame.locator('#searchEmployee').click();
         await frame.locator('.result').click();
         assert.equal(await frame.locator('#to_email').inputValue(),'staff@example.test');
         assert.equal(await frame.locator('#account').inputValue(),'wfq101755');
+        await frame.locator('#recipient_name').fill('李四');
+        assert.equal(await frame.locator('#to_email').inputValue(),'');
+        await frame.locator('#recipientHint').filter({hasText:'尚未填写邮箱'}).waitFor();
+        assert.equal(await frame.locator('#employee_id').inputValue(),'wfq000001');
+        await frame.locator('#recipient_name').fill('王五');
+        await frame.locator('#recipientHint').filter({hasText:'邮箱格式不正确'}).waitFor();
+        assert.equal(await frame.locator('#to_email').inputValue(),'');
+        await frame.locator('#to_email').fill('corrected@example.test');
+        assert.equal(await frame.locator('#to_email').inputValue(),'corrected@example.test');
+        await frame.locator('#recipient_name').fill('不存在');
+        await frame.locator('#recipientHint').filter({hasText:'未找到匹配的域账号'}).waitFor();
+        assert.equal(await frame.locator('#employee_id').inputValue(),'');
+        assert.equal(await frame.locator('#account').inputValue(),'');
+        await frame.locator('#recipient_name').fill('赵六');
+        await frame.locator('#recipientHint').filter({hasText:'多个同名域账号'}).waitFor();
+        assert.equal(await frame.locator('#to_email').inputValue(),'');
+        assert.equal(await frame.locator('.result').count(),2);
+        await frame.locator('.result').nth(1).click();
+        assert.equal(await frame.locator('#employee_id').inputValue(),'wfq000004');
+        assert.equal(await frame.locator('#to_email').inputValue(),'b@example.test');
+        await frame.locator('#recipient_name').fill('张三');
+        await frame.locator('#recipientHint').filter({hasText:'邮箱已自动填写'}).waitFor();
         await frame.locator('#previewButton').click();
         await frame.locator('#previewDialog').waitFor({state:'visible'});
         assert(await frame.locator('#confirmSend').isDisabled());
@@ -101,7 +134,7 @@ async function run() {
         await page.waitForFunction(()=>document.getElementById('loginUser').textContent.includes('admin'));
         assert(await page.locator('#accountNoticeMenu').isHidden());
         assert.deepEqual(errors,[]);
-        console.log('PASS account notice: bottom menu, permissions, preview, test/send, template attachments, records, refresh and mobile layout');
+        console.log('PASS account notice: automatic AD lookup, missing/invalid email, duplicate names, manual correction, preview, delivery and mobile layout');
     } finally {await browser.close();}
 }
 run().catch(e=>{console.error(e);process.exitCode=1;});

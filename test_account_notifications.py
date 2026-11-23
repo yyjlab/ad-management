@@ -198,6 +198,49 @@ class AccountNoticeTests(unittest.TestCase):
         response = self.client.get(self.url('/deliveries'))
         self.assertEqual(response.json['deliveries'][0]['status'], 'unknown')
 
+    def test_exact_recipient_lookup_and_email_status(self):
+        conn = MagicMock()
+        conn.result = {'result': 0}
+        conn.entries = [SimpleNamespace(entry_attributes_as_dict={
+            'sAMAccountName': [f'wfq00000{index}'], 'description': ['其他说明'],
+            'displayName': ['张三'], 'mail': [mail]}) for index, mail in enumerate(
+                [' staff@example.test ', '', 'not-an-email'])]
+        with patch.object(self.p, 'get_ad_connection', return_value=conn):
+            response = self.client.get(self.url('/recipients?q=张三&exact=1'))
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json['exact'])
+        self.assertFalse(response.json['truncated'])
+        self.assertEqual([p['email_status'] for p in response.json['recipients']], ['valid', 'missing', 'invalid'])
+        self.assertEqual(response.json['recipients'][0]['email'], 'staff@example.test')
+        self.assertEqual(response.json['recipients'][0]['name'], '张三')
+        self.assertIn('(displayName=张三)', conn.search.call_args.args[1])
+        self.assertNotIn('*', conn.search.call_args.args[1])
+        conn.modify.assert_not_called()
+
+    def test_exact_lookup_escapes_wildcards_and_keeps_duplicate_names(self):
+        conn = MagicMock()
+        conn.result = {'result': 4}
+        conn.entries = [SimpleNamespace(entry_attributes_as_dict={
+            'sAMAccountName': [ident], 'cn': ['ab*'], 'mail': []}) for ident in ['person1', 'person2']]
+        with patch.object(self.p, 'get_ad_connection', return_value=conn):
+            response = self.client.get(self.url('/recipients?q=ab%2A&exact=1'))
+        self.assertTrue(response.json['truncated'])
+        self.assertEqual(len(response.json['recipients']), 2)
+        self.assertIn(r'(cn=ab\2a)', conn.search.call_args.args[1])
+        self.assertEqual(response.json['recipients'][0]['name'], 'ab*')
+
+    def test_no_recipient_is_distinct_from_directory_failure(self):
+        conn = MagicMock()
+        conn.result, conn.entries = {'result': 0}, []
+        with patch.object(self.p, 'get_ad_connection', return_value=conn):
+            response = self.client.get(self.url('/recipients?q=不存在&exact=1'))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json['recipients'], [])
+        with patch.object(self.p, 'get_ad_connection', side_effect=OSError('directory offline')):
+            response = self.client.get(self.url('/recipients?q=不存在&exact=1'))
+        self.assertEqual(response.status_code, 503)
+        self.assertIn('无法查询 AD', response.json['message'])
+
 
 if __name__ == '__main__':
     unittest.main()

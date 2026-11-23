@@ -298,14 +298,16 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
         query = text(request.args.get('q', ''), 80, True)
         if len(query) < 2:
             raise NoticeError('请输入至少 2 个字或字符')
+        exact = request.args.get('exact') == '1'
         conn = None
         try:
             conn = get_ad_connection()
             needle = escape_filter_chars(query)
+            match = needle if exact else f'*{needle}*'
             conn.search(app.config['AD_BASE_DN'],
                 '(&(objectCategory=person)(objectClass=user)(|' +
-                ''.join(f'({field}=*{needle}*)' for field in ('sAMAccountName', 'displayName', 'description')) + '))',
-                ldap3.SUBTREE, attributes=['sAMAccountName', 'displayName', 'description', 'mail', 'department'],
+                ''.join(f'({field}={match})' for field in ('sAMAccountName', 'displayName', 'description', 'cn')) + '))',
+                ldap3.SUBTREE, attributes=['sAMAccountName', 'displayName', 'description', 'cn', 'mail', 'department'],
                 size_limit=12, time_limit=5)
             if conn.result.get('result') not in (0, 4):
                 raise NoticeError('AD 查询失败，请稍后重试', 503)
@@ -315,10 +317,18 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
                 def first(key):
                     values = attrs.get(key, [])
                     return str(values[0]) if values and values[0] is not None else ''
+                mail = first('mail').strip()
+                try:
+                    email_address(mail)
+                    email_status = 'valid'
+                except NoticeError:
+                    email_status = 'invalid' if mail else 'missing'
+                matched_name = next((first(key) for key in ('description', 'displayName', 'cn')
+                    if first(key).casefold() == query.casefold()), '') if exact else ''
                 result.append(dict(employee_id=first('sAMAccountName'),
-                    name=first('description') or first('displayName') or first('sAMAccountName'),
-                    email=first('mail'), department=first('department')))
-            return jsonify(success=True, recipients=result)
+                    name=matched_name or first('description') or first('displayName') or first('cn') or first('sAMAccountName'),
+                    email=mail, email_status=email_status, department=first('department')))
+            return jsonify(success=True, recipients=result, exact=exact, truncated=conn.result.get('result') == 4)
         except NoticeError:
             raise
         except Exception as exc:
