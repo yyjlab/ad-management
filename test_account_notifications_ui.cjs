@@ -5,6 +5,7 @@ const path = require('node:path');
 const {chromium} = require('playwright');
 
 async function run() {
+    const passwordNotice='请妥善保管此密码，请勿向他人透露或转发。';
     const browser = await chromium.launch({channel:'msedge',headless:true});
     try {
         const page = await browser.newPage({viewport:{width:1440,height:1000}});
@@ -25,7 +26,7 @@ async function run() {
                 apiRequests++;
                 assert.equal(role,'super_admin');
                 if(req.method()!=='GET')assert.equal(req.headers()['x-csrf-token'],'test-csrf');
-                if(endpoint==='/config')result={success:true,csrf_token:'test-csrf',mail_ready:true,sender:'it@example.test',default_cc_email:'yuanyujie@shunhs.cn'};
+                if(endpoint==='/config')result={success:true,csrf_token:'test-csrf',mail_ready:true,sender:'it@example.test',default_cc_email:'yuanyujie@shunhs.cn',password_notice:passwordNotice};
                 if(endpoint==='/templates'&&req.method()==='GET')result={success:true,templates:[template]};
                 if(endpoint.startsWith('/templates/')&&req.method()==='POST'){
                     if(endpoint.endsWith('/attachments'))template={...template,version:template.version+1,attachments:[{id:'file-1',filename:'company.ovpn',size:35,private_key:false}]};
@@ -48,7 +49,7 @@ async function run() {
                     const {password,...body}=req.postDataJSON();previewPassword=password;seen.push(body);
                     assert.equal(typeof password,'string');
                     assert(!('temporaryPassword' in body));
-                    result={success:true,preview_token:'preview-token',subject:template.subject,recipient:body.to_email,cc_email:body.cc_email,html:'<html><body><h2>公司 VPN</h2><p>账号开通通知</p></body></html>'};
+                    result={success:true,preview_token:'preview-token',subject:template.subject,recipient:body.to_email,cc_email:body.cc_email,text:`您好，${body.recipient_name}：\n\n${template.intro}\n\n登录账号：${body.account}\n\n初始密码：${password}\n\n密码说明：${passwordNotice}\n\n${body.notes}`,html:''};
                 }
                 if(endpoint==='/send'){
                     const body=req.postDataJSON();assert.equal(body.confirm_text,'SEND');assert.match(body.request_key,/^[a-f0-9-]{36}$/);
@@ -141,8 +142,19 @@ async function run() {
         assert.equal(await frame.locator('#to_email').inputValue(),'b@example.test');
         await frame.locator('#recipient_name').fill('张三');
         await frame.locator('#recipientHint').filter({hasText:'邮箱已自动填写'}).waitFor();
+        const notes='新增员工，请先安装客户端。\n<img src=x onerror="window.previewInjected=true">';
+        await frame.locator('#notes').fill(notes);
+        assert.equal(await frame.locator('#password_instruction').inputValue(),passwordNotice);
+        assert(await frame.locator('#password_instruction').getAttribute('readonly')!==null);
         await frame.locator('#previewButton').click();
         await frame.locator('#previewDialog').waitFor({state:'visible'});
+        assert((await frame.locator('#previewMailBody').innerText()).includes(notes));
+        assert((await frame.locator('#previewMailBody').innerText()).includes('CustomTestPassword2!'));
+        assert((await frame.locator('#previewMailBody').innerText()).includes(passwordNotice));
+        assert.equal(await frame.locator('#emailPreview iframe, #emailPreview img').count(),0);
+        assert(await frame.locator('#previewMailBody').evaluate(()=>window.previewInjected===undefined));
+        const bounds=await frame.locator('#emailPreview').boundingBox();
+        assert(bounds.width>300&&bounds.height>200);
         assert((await frame.locator('#previewRecipient').textContent()).includes('yuanyujie@shunhs.cn'));
         assert.equal(previewPassword,'CustomTestPassword2!');
         assert(await frame.locator('#confirmSend').isDisabled());
@@ -193,7 +205,7 @@ async function run() {
         await page.waitForFunction(()=>document.getElementById('loginUser').textContent.includes('admin'));
         assert(await page.locator('#accountNoticeMenu').isHidden());
         assert.deepEqual(errors,[]);
-        console.log('PASS account notice: frontend 12-character passwords, pinyin accounts, CC, no plaintext history, HTTP copy, AD lookup, delivery and mobile layout');
+        console.log('PASS account notice: visible notes preview without iframe loading, uniform password notice, password generation, pinyin, CC, delivery and mobile layout');
     } finally {await browser.close();}
 }
 run().catch(e=>{console.error(e);process.exitCode=1;});

@@ -23,6 +23,7 @@ from pypinyin import lazy_pinyin
 MAX_ATTACHMENT = 2 * 1024 * 1024
 MAX_TOTAL = 5 * 1024 * 1024
 DEFAULT_CC_EMAIL = 'yuanyujie@shunhs.cn'
+PASSWORD_NOTICE = '请妥善保管此密码，请勿向他人透露或转发。'
 URL_FIELDS = ('login_url', 'tutorial_url', 'download_url')
 TEMPLATE_FIELDS = ('name', 'system_name', 'subject', 'intro', *URL_FIELDS, 'password_instruction')
 FORM_FIELDS = ('employee_id', 'recipient_name', 'to_email', 'cc_email', 'account', 'notes',
@@ -133,7 +134,7 @@ def seed_templates(db, models):
         if not db.session.get(Template, ident):
             db.session.add(Template(id=ident, name=name, system_name=system,
                 subject=f'【账号开通】{system}', intro='您的账号已开通，请按以下信息使用。',
-                password_instruction='密码由 IT 单独提供，或使用已约定的现有密码。'))
+                password_instruction=PASSWORD_NOTICE))
 
 
 def render_notice(snapshot, test=False, password=''):
@@ -210,7 +211,7 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
 
     def public_template(row):
         return dict(id=row.id, active=row.active, version=row.version,
-            **{key: getattr(row, key) for key in TEMPLATE_FIELDS},
+            **{key: PASSWORD_NOTICE if key == 'password_instruction' else getattr(row, key) for key in TEMPLATE_FIELDS},
             attachments=[dict(id=f.id, filename=f.filename, size=len(f.content), private_key=f.private_key) for f in files(row)])
 
     def public_delivery(row):
@@ -230,7 +231,7 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
         ready = all(app.config.get(key) for key in ('MAIL_SERVER', 'MAIL_PORT', 'MAIL_USERNAME', 'MAIL_PASSWORD'))
         return jsonify(success=True, csrf_token=session['account_notice_csrf'], mail_ready=ready,
                        sender=app.config.get('MAIL_USERNAME', ''), operator=current_user().username,
-                       default_cc_email=DEFAULT_CC_EMAIL)
+                       default_cc_email=DEFAULT_CC_EMAIL, password_notice=PASSWORD_NOTICE)
 
     @bp.route('/templates', methods=['GET', 'POST'])
     @bp.route('/templates/<ident>', methods=['POST'])
@@ -240,6 +241,9 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
         value = data((*TEMPLATE_FIELDS, 'active', 'version'))
         cleaned = {}
         for key in TEMPLATE_FIELDS:
+            if key == 'password_instruction':
+                cleaned[key] = PASSWORD_NOTICE
+                continue
             limit = 4000 if key == 'intro' else 500 if key == 'password_instruction' else 200 if key == 'subject' else 120
             cleaned[key] = web_url(value.get(key, '')) if key in URL_FIELDS else text(
                 value.get(key, ''), 80 if key == 'name' else limit,
@@ -373,6 +377,9 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
         snapshot = dict(template_id=row.id, version=row.version, system_name=row.system_name,
                         subject=row.subject, intro=row.intro)
         for key in FORM_FIELDS:
+            if key == 'password_instruction':
+                snapshot[key] = PASSWORD_NOTICE
+                continue
             raw = value.get(key, '')
             if key == 'cc_email':
                 snapshot[key] = email_address(raw) if raw else ''

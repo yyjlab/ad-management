@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from account_notifications import MAX_ATTACHMENT, seed_templates, suggested_account
+from account_notifications import MAX_ATTACHMENT, PASSWORD_NOTICE, seed_templates, suggested_account
 from itsdangerous import URLSafeTimedSerializer
 import test_domain_password_policy as policy_tests
 
@@ -85,6 +85,28 @@ class AccountNoticeTests(unittest.TestCase):
         self.assertEqual(self.post('/templates/' + self.template['id'], value).status_code, 409)
         value['password'] = 'not-accepted'
         self.assertEqual(self.post('/templates', value).status_code, 400)
+
+    def test_notes_preview_and_mail_share_text_and_uniform_password_notice(self):
+        notes = '请先阅读教程。\n补充说明：<script>alert(1)</script>'
+        preview = self.preview(notes=notes, password_instruction='旧的密码说明').json
+        self.assertIn(notes, preview['text'])
+        self.assertIn('&lt;script&gt;', preview['html'])
+        self.assertNotIn('<script>', preview['html'])
+        self.assertIn(PASSWORD_NOTICE, preview['text'])
+        self.assertNotIn('旧的密码说明', preview['text'])
+        response = self.send(preview)
+        self.assertTrue(response.json['success'])
+        message = self.connection.send_message.call_args.args[0]
+        self.assertIn(notes, message.get_body(preferencelist=('plain',)).get_content())
+        self.assertEqual(response.json['delivery']['snapshot']['password_instruction'], PASSWORD_NOTICE)
+
+    def test_existing_templates_show_uniform_notice_without_rewriting_history(self):
+        row = self.p.db.session.get(self.Template, self.template['id'])
+        row.password_instruction = '旧的密码说明'
+        self.p.db.session.commit()
+        templates = self.client.get(self.url('/templates')).json['templates']
+        self.assertTrue(all(t['password_instruction'] == PASSWORD_NOTICE for t in templates))
+        self.assertEqual(self.client.get(self.url('/config')).json['password_notice'], PASSWORD_NOTICE)
 
     def test_preview_escapes_text_and_validates_fields(self):
         result = self.preview(recipient_name='<script>alert(1)</script>')
