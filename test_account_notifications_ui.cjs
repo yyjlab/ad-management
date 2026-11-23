@@ -14,7 +14,7 @@ async function run() {
         let role = 'super_admin', records = [], seen = [], template, apiRequests=0, previewPassword='';
         const initial = () => ({id:'template-1',version:1,name:'VPN 开通',system_name:'公司 VPN',
             subject:'VPN 开通通知',intro:'您的账号已开通',active:true,login_url:'http://vpn.example.test',
-            tutorial_url:'',download_url:'',password_instruction:'使用现有密码',attachments:[]});
+            tutorial_url:'',download_url:'',password_instruction:passwordNotice,attachments:[]});
         template = initial();
         let domainPassword='TestDefault12', domain={...initial(),id:'domain-1',name:'域账号开通',
             domain_account:true,password_instruction:'此密码为初始密码。',login_url:''};
@@ -59,7 +59,7 @@ async function run() {
                     assert.equal(typeof password,'string');
                     assert(!('temporaryPassword' in body));
                     const current=body.template_id===domain.id?domain:template;
-                    result={success:true,preview_token:'preview-token',subject:current.subject,recipient:body.to_email,cc_email:body.cc_email,text:`您好，${body.recipient_name}：\n\n${current.intro}\n\n登录账号：${body.account}\n\n初始密码：${password}\n\n密码说明：${current.domain_account?current.password_instruction:passwordNotice}\n\n${body.notes}`,html:''};
+                    result={success:true,preview_token:'preview-token',subject:current.subject,recipient:body.to_email,cc_email:body.cc_email,text:`您好，${body.recipient_name}：\n\n${current.intro}\n\n登录账号：${body.account}\n\n初始密码：${password}\n\n密码说明：${current.password_instruction}\n\n${body.notes}`,html:''};
                     result.rows=[{text:result.text},{text:'使用教程：',href:body.tutorial_url,link_text:'查看配置教程'}];
                 }
                 if(endpoint==='/send'){
@@ -203,10 +203,14 @@ async function run() {
         assert((await frame.locator('#deliveryDetail').textContent()).includes('不保存明文'));
         await frame.locator('[data-close="detailDialog"]').first().click();
         await frame.locator('[data-tab="templates"]').click();
+        const vpnHint='请妥善保管 VPN 密码，仅限本人使用。';
+        await frame.locator('#templateForm [name=password_instruction]').fill(vpnHint);
         await frame.locator('#templateForm [name=name]').fill('公司 VPN 通知');
         await frame.locator('#templateForm [type=submit]').click();
         await frame.locator('#globalMessage').filter({hasText:'模板已保存'}).waitFor();
         assert.equal(template.name,'公司 VPN 通知');
+        assert.equal(template.password_instruction,vpnHint);
+        assert.equal(await frame.locator('#password_instruction').inputValue(),vpnHint);
         await frame.locator('#attachmentFile').setInputFiles({name:'company.ovpn',mimeType:'application/octet-stream',buffer:Buffer.from('client')});
         await frame.locator('#uploadFile').click();
         await frame.locator('#attachmentList a').waitFor();
@@ -240,6 +244,9 @@ async function run() {
         assert.equal(await frame.locator('#account').inputValue(),'vpn.manual');
         assert.equal(await frame.locator('#temporaryPassword').inputValue(),'CustomTestPassword2!');
         assert(await frame.locator('#generatePassword').isVisible());
+        await frame.locator('#previewButton').click();
+        await frame.locator('#previewMailBody').filter({hasText:vpnHint}).waitFor();
+        await frame.locator('[data-close="previewDialog"]').first().click();
         const png=await page.screenshot();assert(png.length>10000);
         await page.reload();
         await frame.locator('#composeTemplate').waitFor();

@@ -297,6 +297,8 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
         if domain_template(row):
             return (row.password_instruction if row.password_instruction not in ('', PASSWORD_NOTICE, OLD_DOMAIN_PASSWORD_NOTICE)
                     else DOMAIN_PASSWORD_NOTICE)
+        if row.id == VPN_TEMPLATE_ID:
+            return row.password_instruction or PASSWORD_NOTICE
         return PASSWORD_NOTICE
 
     def public_template(row):
@@ -343,8 +345,11 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
         cleaned = {}
         for key in TEMPLATE_FIELDS:
             if key == 'password_instruction':
-                hint = text(value.get(key, ''), 500) if is_domain else ''
-                cleaned[key] = (hint or DOMAIN_PASSWORD_NOTICE) if is_domain else PASSWORD_NOTICE
+                if is_domain or ident == VPN_TEMPLATE_ID:
+                    hint = text(value.get(key, row.password_instruction if row else ''), 500)
+                    cleaned[key] = hint or (DOMAIN_PASSWORD_NOTICE if is_domain else PASSWORD_NOTICE)
+                else:
+                    cleaned[key] = PASSWORD_NOTICE
                 continue
             if is_domain and key in URL_FIELDS:
                 cleaned[key] = getattr(row, key) if row else ''

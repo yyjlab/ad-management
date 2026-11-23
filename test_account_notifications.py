@@ -185,13 +185,35 @@ class AccountNoticeTests(unittest.TestCase):
         self.assertIn(notes, message.get_body(preferencelist=('plain',)).get_content())
         self.assertEqual(response.json['delivery']['snapshot']['password_instruction'], PASSWORD_NOTICE)
 
-    def test_existing_templates_show_uniform_notice_without_rewriting_history(self):
-        row = self.p.db.session.get(self.Template, self.template['id'])
+    def test_generic_templates_still_show_uniform_notice(self):
+        row = self.Template.query.filter(self.Template.id != VPN_TEMPLATE_ID).one()
         row.password_instruction = '旧的密码说明'
         self.p.db.session.commit()
         templates = self.client.get(self.url('/templates')).json['templates']
         self.assertTrue(all(t['password_instruction'] == PASSWORD_NOTICE for t in templates))
         self.assertEqual(self.client.get(self.url('/config')).json['password_notice'], PASSWORD_NOTICE)
+
+    def test_vpn_password_notice_is_editable_and_shared_with_email(self):
+        value = {k: v for k, v in self.template.items() if k not in ('id', 'attachments')}
+        hint = '仅限 <本人使用>，请勿转发。'
+        endpoint = '/templates/' + VPN_TEMPLATE_ID
+        self.assertEqual(self.post(endpoint, dict(value, password_instruction='x' * 501)).status_code, 400)
+        saved = self.post(endpoint, dict(value, password_instruction=hint))
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(saved.json['template']['password_instruction'], hint)
+        version = saved.json['template']['version']
+        preview = self.preview(version=version, password_instruction='不采用此提示').json
+        self.assertIn(hint, preview['text'])
+        self.assertIn(escape(hint), preview['html'])
+        self.assertNotIn('不采用此提示', preview['text'])
+        sent = self.send(preview).json
+        self.assertTrue(sent['success'])
+        self.assertEqual(sent['delivery']['snapshot']['password_instruction'], hint)
+        mail = self.connection.send_message.call_args.args[0]
+        self.assertIn(hint, mail.get_body(preferencelist=('plain',)).get_content())
+
+        reset = self.post(endpoint, dict(value, version=version, password_instruction=''))
+        self.assertEqual(reset.json['template']['password_instruction'], PASSWORD_NOTICE)
 
     def test_domain_template_reuses_ad_account_and_sends_without_vpn_fields(self):
         row = next(t for t in self.Template.query.all() if t.id != VPN_TEMPLATE_ID)
