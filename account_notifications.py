@@ -187,23 +187,37 @@ def render_notice(snapshot, test=False, password=''):
     if password:
         lines.append(f'初始密码：{password}')
     lines.append(f"密码说明：{snapshot['password_instruction']}")
-    for key, label in zip(URL_FIELDS, ('登录地址', '使用教程', '客户端下载')):
-        if snapshot[key]:
-            lines.append(f'{label}：{snapshot[key]}')
-    if snapshot['notes']:
-        lines.append(snapshot['notes'])
     if test:
         lines.insert(0, '测试邮件：本次未向员工发送。')
-    rows = ''.join(f'<p style="margin:10px 0;white-space:pre-wrap">{esc(line)}</p>' for line in lines)
+    rows = [dict(text=line) for line in lines]
+    for key, label, link_text in (
+        ('login_url', '登录地址', '打开登录页面'),
+        ('tutorial_url', '使用教程', '查看配置教程'),
+        ('download_url', '客户端下载', '下载客户端'),
+    ):
+        if snapshot[key]:
+            rows.append(dict(text=f'{label}：', href=snapshot[key], link_text=link_text))
+    if snapshot['notes']:
+        rows.append(dict(text=snapshot['notes']))
+
+    def html_row(row):
+        content = esc(row['text'])
+        if 'href' in row:
+            url = esc(row['href'])
+            content += (f'<a href="{url}" title="{url}" target="_blank" rel="noopener noreferrer" '
+                        f'style="color:#1768dd;text-decoration:underline">{esc(row["link_text"])}</a>')
+        return f'<p style="margin:10px 0;white-space:pre-wrap">{content}</p>'
+
+    html_rows = ''.join(map(html_row, rows))
     body = ('<!doctype html><html lang="zh-CN"><meta charset="utf-8"><body style="margin:0;'
             'padding:24px;background:#f4f7fb;font-family:Arial,Microsoft YaHei,sans-serif;color:#263449">'
             '<div style="max-width:620px;margin:auto;background:white;border:1px solid #dce5ef;'
             'border-radius:8px;overflow:hidden"><div style="padding:20px 24px;background:#1768dd;'
             f'color:white;font-size:20px;font-weight:bold">{esc(snapshot["system_name"])} · 账号开通通知</div>'
-            f'<div style="padding:20px 24px;line-height:1.7;overflow-wrap:anywhere">{rows}</div>'
+            f'<div style="padding:20px 24px;line-height:1.7;overflow-wrap:anywhere">{html_rows}</div>'
             '<div style="padding:14px 24px;border-top:1px solid #e5ebf3;color:#697a91;font-size:12px">'
             'IT 账号通知 · 请勿向无关人员转发账号资料。</div></div></body></html>')
-    return '\n\n'.join(lines), body
+    return '\n\n'.join(row['text'] + row.get('href', '') for row in rows), body, rows
 
 
 def register_notifications(app, db, models, current_user, touch_session, get_ad_connection, audit):
@@ -437,10 +451,10 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
                      required=key in ('recipient_name', 'account', 'password_instruction'), multiline=key == 'notes'))
         snapshot['attachments'] = [dict(id=f.id, filename=f.filename, digest=hashlib.sha256(f.content).hexdigest()) for f in files(row)]
         snapshot['password_included'] = bool(password)
-        plain, body = render_notice(snapshot, password=password)
+        plain, body, rows = render_notice(snapshot, password=password)
         token = signer.dumps(dict(operator=current_user().username, snapshot=snapshot, password_digest=password_digest(password)))
         return jsonify(success=True, preview_token=token, subject=row.subject, html=body,
-                       text=plain, recipient=snapshot['to_email'], cc_email=snapshot['cc_email'])
+                       text=plain, rows=rows, recipient=snapshot['to_email'], cc_email=snapshot['cc_email'])
 
     @bp.post('/send')
     def send():
@@ -539,7 +553,7 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
                 return jsonify(success=False, delivery=public_delivery(row), message=row.message)
             row.message = '正在提交邮件服务器'
             db.session.commit()
-        plain, body = render_notice(snapshot, mode == 'test', password=password)
+        plain, body, _ = render_notice(snapshot, mode == 'test', password=password)
         message = EmailMessage()
         message['From'], message['To'], message['Subject'] = sender, to, row.subject
         if cc:

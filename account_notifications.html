@@ -9,6 +9,7 @@
 .lookup-status[data-tone="error"]{color:#b72e3f}.lookup-status[data-tone="good"]{color:#167957}
 .pill.partial{background:#fff6df;color:#926313}#previewRecipient{overflow-wrap:anywhere}
 .preview-frame{overflow:auto}.mail-preview-title{padding:16px 20px;background:#1768dd;color:white;font-size:18px;font-weight:700}.mail-preview-body{padding:18px 20px;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.8}.mail-preview-footer{padding:12px 20px;border-top:1px solid #e5ebf3;font-size:12px;color:#718198}input[readonly]{background:#f7f9fc}
+.mail-preview-body p+p{margin-top:14px}.mail-preview-body a{color:#1768dd;text-decoration:underline;text-underline-offset:3px}
 .notice-side{display:grid;gap:18px;align-content:start}.password-length{display:grid;grid-template-columns:minmax(0,1fr) 66px;gap:12px;align-items:center;margin:8px 0 15px}.password-length input[type=range]{padding:0;border:0;box-shadow:none;accent-color:#1677ff}.password-options{display:flex;gap:18px;flex-wrap:wrap;margin-bottom:15px}.password-output{display:flex;gap:6px;align-items:center;margin-top:8px}.password-output input{flex:1;font-family:Consolas,monospace;font-size:16px}.icon-button{display:inline-flex;align-items:center;justify-content:center;width:34px;height:40px;padding:0;flex:0 0 auto}.icon-button svg{width:18px;height:18px}.password-tool .primary{width:100%;margin-top:14px}.copy-buffer{position:fixed;left:-9999px;top:0}@media(max-width:960px){.notice-side{order:-1}}
 </style>
 </head>
@@ -170,6 +171,19 @@ for(const id of ['passwordDigits','passwordSymbols'])$(id).onchange=()=>{if($('t
 $('temporaryPassword').oninput=()=>{invalidate();passwordStatus('');};
 $('includePassword').onchange=invalidate;
 function emailPassword(){return $('includePassword').checked?$('temporaryPassword').value:'';}
+function renderPreviewBody(data){
+    const body=$('previewMailBody');
+    if(!Array.isArray(data.rows)||!data.rows.length){body.textContent=data.text;return;}
+    body.replaceChildren(...data.rows.map(row=>{
+        const line=element('p',row.text);
+        if(typeof row.href==='string'&&/^https?:\/\//i.test(row.href)){
+            const link=element('a',row.link_text);
+            link.setAttribute('href',row.href);link.title=row.href;link.target='_blank';link.rel='noopener noreferrer';
+            line.append(link);
+        }
+        return line;
+    }));
+}
 function updateVpnButton(){
     const button=$('provisionVpn');button.hidden=!state.vpnTemplate||template()?.id!==state.vpnTemplate;
     button.disabled=!state.vpnReady||state.sending||!state.preview||!emailPassword();
@@ -187,7 +201,7 @@ $('copyTemporaryPassword').onclick=async()=>{
 $('sendForm').onsubmit=async e=>{
     e.preventDefault();cancelRecipientLookup();const t=template();if(!t)return;const b=$('previewButton');b.disabled=true;$('sendTest').disabled=false;
     if($('includePassword').checked&&!emailPassword()){passwordStatus('请填写或生成密码。','error');$('temporaryPassword').focus();b.disabled=false;return;}
-    try{const data=await api('/preview',{method:'POST',body:{template_id:t.id,version:t.version,password:emailPassword(),...Object.fromEntries(fields.map(k=>[k,$(k).value.trim()]))}});if(typeof data.text!=='string'||!data.text.trim())throw new Error('服务未返回预览正文，请刷新后重试。');state.preview=data;state.keys={};$('previewRecipient').textContent='收件人：'+$('recipient_name').value+' <'+data.recipient+'>'+(data.cc_email?'；抄送：'+data.cc_email:'');$('previewSubject').textContent='主题：'+data.subject;$('previewMailTitle').textContent=t.system_name+' · 账号开通通知';$('previewMailBody').textContent=data.text;$('sendResult').textContent='';$('sendResult').dataset.tone='';$('confirmOpened').checked=false;$('confirmSend').disabled=true;updateVpnButton();$('previewDialog').showModal();show('');}catch(err){show(err.message,'error');}finally{b.disabled=false;}
+    try{const data=await api('/preview',{method:'POST',body:{template_id:t.id,version:t.version,password:emailPassword(),...Object.fromEntries(fields.map(k=>[k,$(k).value.trim()]))}});if(typeof data.text!=='string'||!data.text.trim())throw new Error('服务未返回预览正文，请刷新后重试。');state.preview=data;state.keys={};$('previewRecipient').textContent='收件人：'+$('recipient_name').value+' <'+data.recipient+'>'+(data.cc_email?'；抄送：'+data.cc_email:'');$('previewSubject').textContent='主题：'+data.subject;$('previewMailTitle').textContent=t.system_name+' · 账号开通通知';renderPreviewBody(data);$('sendResult').textContent='';$('sendResult').dataset.tone='';$('confirmOpened').checked=false;$('confirmSend').disabled=true;updateVpnButton();$('previewDialog').showModal();show('');}catch(err){show(err.message,'error');}finally{b.disabled=false;}
 };
 $('confirmOpened').onchange=()=>$('confirmSend').disabled=!$('confirmOpened').checked||state.sending||!state.preview;
 async function send(mode,provisionVpn=false){

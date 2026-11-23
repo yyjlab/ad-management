@@ -50,6 +50,7 @@ async function run() {
                     assert.equal(typeof password,'string');
                     assert(!('temporaryPassword' in body));
                     result={success:true,preview_token:'preview-token',subject:template.subject,recipient:body.to_email,cc_email:body.cc_email,text:`您好，${body.recipient_name}：\n\n${template.intro}\n\n登录账号：${body.account}\n\n初始密码：${password}\n\n密码说明：${passwordNotice}\n\n${body.notes}`,html:''};
+                    result.rows=[{text:result.text},{text:'使用教程：',href:body.tutorial_url,link_text:'查看配置教程'}];
                 }
                 if(endpoint==='/send'){
                     const body=req.postDataJSON();assert.equal(body.confirm_text,'SEND');assert.match(body.request_key,/^[a-f0-9-]{36}$/);
@@ -144,6 +145,8 @@ async function run() {
         await frame.locator('#recipient_name').fill('张三');
         await frame.locator('#recipientHint').filter({hasText:'邮箱已自动填写'}).waitFor();
         const notes='新增员工，请先安装客户端。\n<img src=x onerror="window.previewInjected=true">';
+        const tutorialUrl='https://docs.example.test/vpn?space=123&file=456';
+        await frame.locator('#tutorial_url').fill(tutorialUrl);
         await frame.locator('#notes').fill(notes);
         assert.equal(await frame.locator('#password_instruction').inputValue(),passwordNotice);
         assert(await frame.locator('#password_instruction').getAttribute('readonly')!==null);
@@ -152,6 +155,10 @@ async function run() {
         assert((await frame.locator('#previewMailBody').innerText()).includes(notes));
         assert((await frame.locator('#previewMailBody').innerText()).includes('CustomTestPassword2!'));
         assert((await frame.locator('#previewMailBody').innerText()).includes(passwordNotice));
+        const tutorial=frame.locator('#previewMailBody').getByRole('link',{name:'查看配置教程'});
+        assert.equal(await tutorial.getAttribute('href'),tutorialUrl);
+        assert.equal(await tutorial.getAttribute('title'),tutorialUrl);
+        assert(!(await frame.locator('#previewMailBody').innerText()).includes(tutorialUrl));
         assert.equal(await frame.locator('#emailPreview iframe, #emailPreview img').count(),0);
         assert(await frame.locator('#previewMailBody').evaluate(()=>window.previewInjected===undefined));
         const bounds=await frame.locator('#emailPreview').boundingBox();

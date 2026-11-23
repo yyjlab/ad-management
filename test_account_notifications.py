@@ -4,6 +4,7 @@ import smtplib
 import unittest
 import uuid
 from datetime import datetime, timedelta
+from html import escape
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -169,6 +170,19 @@ class AccountNoticeTests(unittest.TestCase):
         templates = self.client.get(self.url('/templates')).json['templates']
         self.assertTrue(all(t['password_instruction'] == PASSWORD_NOTICE for t in templates))
         self.assertEqual(self.client.get(self.url('/config')).json['password_notice'], PASSWORD_NOTICE)
+
+    def test_preview_and_html_mail_display_links_with_original_addresses(self):
+        url = 'https://docs.example.test/vpn?space=123&file=456'
+        preview = self.preview(login_url='', tutorial_url=url).json
+        self.assertEqual([row for row in preview['rows'] if 'href' in row],
+                         [dict(text='使用教程：', href=url, link_text='查看配置教程')])
+        self.assertIn('使用教程：' + url, preview['text'])
+        self.assertTrue(self.send(preview).json['success'])
+        mail = self.connection.send_message.call_args.args[0]
+        for body in (preview['html'], mail.get_body(preferencelist=('html',)).get_content()):
+            self.assertIn(f'href="{escape(url)}" title="{escape(url)}"', body)
+            self.assertIn('>查看配置教程</a>', body)
+        self.assertIn(url, mail.get_body(preferencelist=('plain',)).get_content())
 
     def test_preview_escapes_text_and_validates_fields(self):
         result = self.preview(recipient_name='<script>alert(1)</script>')
