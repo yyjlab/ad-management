@@ -30,7 +30,11 @@ MAX_TOTAL = 5 * 1024 * 1024
 DEFAULT_CC_EMAIL = 'yuanyujie@shunhs.cn'
 PASSWORD_NOTICE = '请妥善保管此密码，请勿向他人透露或转发。'
 DOMAIN_TEMPLATE_NAME = '域账号开通'
-DOMAIN_PASSWORD_NOTICE = '此密码为初始密码。登录 Windows 后，请按 Ctrl + Alt + Delete，选择「更改密码」，并尽快设置自己的密码。'
+OLD_DOMAIN_PASSWORD_NOTICE = '此密码为初始密码。登录 Windows 后，请按 Ctrl + Alt + Delete，选择「更改密码」，并尽快设置自己的密码。'
+DOMAIN_PASSWORD_NOTICE = (
+    '这是您的初始密码。首次登录 Windows 后，请按 Ctrl + Alt + Delete，选择「更改密码」，并尽快设置自己的密码。'
+    '如公司策略允许，可在「设置 → 账户 → 登录选项」中设置 PIN；电脑支持时，也可启用人脸或指纹登录。'
+)
 VPN_TEMPLATE_ID = '8a92f00a-dcb8-4c27-8638-000000000001'
 URL_FIELDS = ('login_url', 'tutorial_url', 'download_url')
 TEMPLATE_FIELDS = ('name', 'system_name', 'subject', 'intro', *URL_FIELDS, 'password_instruction')
@@ -291,7 +295,7 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
 
     def password_instruction(row):
         if domain_template(row):
-            return (row.password_instruction if row.password_instruction not in ('', PASSWORD_NOTICE)
+            return (row.password_instruction if row.password_instruction not in ('', PASSWORD_NOTICE, OLD_DOMAIN_PASSWORD_NOTICE)
                     else DOMAIN_PASSWORD_NOTICE)
         return PASSWORD_NOTICE
 

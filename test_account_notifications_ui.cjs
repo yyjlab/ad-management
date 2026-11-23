@@ -227,10 +227,12 @@ async function run() {
         assert.equal(await frame.locator('#account').inputValue(),'wfq101755');
         assert(await frame.locator('#generatePassword').isHidden());
         assert(await frame.locator('#login_url').isHidden());
-        assert.equal(await frame.locator('#cc_email').inputValue(),'');
+        assert.equal(await frame.locator('#cc_email').inputValue(),'yuanyujie@shunhs.cn');
+        await frame.locator('#cc_email').clear();
         await frame.locator('#temporaryPassword').fill('OneTimeTest12');
         await frame.locator('#previewButton').click();
         await frame.locator('#previewMailBody').filter({hasText:'OneTimeTest12'}).waitFor();
+        assert.equal(seen.at(-1).cc_email,'');
         assert((await frame.locator('#previewMailBody').innerText()).includes('Ctrl + Alt + Delete'));
         assert(await frame.locator('#provisionVpn').isHidden());
         await frame.locator('[data-close="previewDialog"]').first().click();

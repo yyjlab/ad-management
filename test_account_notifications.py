@@ -9,8 +9,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from account_notifications import (DOMAIN_PASSWORD_NOTICE, DOMAIN_TEMPLATE_NAME, MAX_ATTACHMENT, PASSWORD_NOTICE,
-                                   VPN_TEMPLATE_ID, seed_templates, suggested_account)
+from account_notifications import (DOMAIN_PASSWORD_NOTICE, DOMAIN_TEMPLATE_NAME, MAX_ATTACHMENT, OLD_DOMAIN_PASSWORD_NOTICE,
+                                   PASSWORD_NOTICE, VPN_TEMPLATE_ID, seed_templates, suggested_account)
 from itsdangerous import URLSafeTimedSerializer
 import test_domain_password_policy as policy_tests
 from vpn_router import RouterConfig
@@ -196,6 +196,7 @@ class AccountNoticeTests(unittest.TestCase):
     def test_domain_template_reuses_ad_account_and_sends_without_vpn_fields(self):
         row = next(t for t in self.Template.query.all() if t.id != VPN_TEMPLATE_ID)
         row.name = DOMAIN_TEMPLATE_NAME
+        row.password_instruction = OLD_DOMAIN_PASSWORD_NOTICE
         row.tutorial_url = 'https://example.test/legacy'
         self.p.db.session.add(self.Attachment(id=str(uuid.uuid4()), template_id=row.id,
             filename='legacy.ovpn', content=b'client'))
@@ -203,6 +204,9 @@ class AccountNoticeTests(unittest.TestCase):
         template = next(t for t in self.client.get(self.url('/templates')).json['templates'] if t['id'] == row.id)
         self.assertTrue(template['domain_account'])
         self.assertEqual(template['password_instruction'], DOMAIN_PASSWORD_NOTICE)
+        default_preview = self.preview(template_id=row.id, version=template['version']).json
+        self.assertIn('PIN', default_preview['text'])
+        self.assertIn('人脸或指纹登录', default_preview['text'])
         self.assertEqual(template['attachments'], [])
         update = {k: v for k, v in template.items() if k not in ('id', 'attachments', 'domain_account')}
         hint, default = 'Windows 登录后请及时修改密码。', 'TestDefault12'
