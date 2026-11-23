@@ -1,11 +1,9 @@
 import io
-import json
 import smtplib
 import unittest
 import uuid
 from datetime import datetime, timedelta
 from html import escape
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -13,7 +11,6 @@ from account_notifications import (DOMAIN_PASSWORD_NOTICE, DOMAIN_TEMPLATE_NAME,
                                    PASSWORD_NOTICE, VPN_TEMPLATE_ID, seed_templates, suggested_account)
 from itsdangerous import URLSafeTimedSerializer
 import test_domain_password_policy as policy_tests
-from vpn_router import RouterConfig
 
 
 class AccountNoticeTests(unittest.TestCase):
@@ -81,84 +78,18 @@ class AccountNoticeTests(unittest.TestCase):
         self.assertEqual(self.client.get(self.url('/templates')).status_code, 403)
         self.smtp.assert_not_called()
 
-    def test_vpn_unconfigured_stops_before_sending(self):
+    def test_old_vpn_provision_request_is_rejected_without_email(self):
         self.assertEqual(self.template['id'], VPN_TEMPLATE_ID)
-        with patch.dict('os.environ', VPN_PROVISION_ENDPOINT='', VPN_PROVISION_TOKEN='', VPN_ROUTER_URL=''):
-            self.assertFalse(self.client.get(self.url('/config')).json['vpn_provisioning_ready'])
-            response = self.send(self.preview(password='MockPassword12').json, password='MockPassword12', provision_vpn=True)
-        self.assertEqual(response.status_code, 503)
-        self.assertIn('尚未配置', response.json['message'])
-        self.smtp.assert_not_called()
-        self.assertEqual(self.Delivery.query.count(), 0)
-
-    def test_vpn_success_and_retry_create_once_then_send_mail(self):
         password, key = 'MockPassword12', str(uuid.uuid4())
         preview = self.preview(password=password).json
-        with patch.dict('os.environ', VPN_PROVISION_ENDPOINT='https://vpn-adapter.example.test/create',
-                        VPN_PROVISION_TOKEN='mock-token'), patch('account_notifications.HTTPSConnection') as https:
-            connection = https.return_value
-
-            def result():
-                self.connection.send_message.assert_not_called()
-                method, path, body, headers = connection.request.call_args.args
-                payload = json.loads(body)
-                self.assertEqual((method, path), ('POST', '/create'))
-                self.assertEqual(headers['Authorization'], 'Bearer mock-token')
-                self.assertEqual(payload['password'], password)
-                return SimpleNamespace(status=201, read=lambda limit: json.dumps(dict(
-                    request_id=payload['request_id'], username=payload['username'], status='created', verified=True)).encode())
-
-            connection.getresponse.side_effect = result
-            response = self.send(preview, key, password=password, provision_vpn=True)
-            self.assertTrue(response.json['success'])
-            self.assertIn('VPN 账号 wfq101755 创建成功', response.json['message'])
-            self.assertTrue(self.send(preview, key, password=password, provision_vpn=True).json['replayed'])
-            connection.request.assert_called_once()
-        self.connection.send_message.assert_called_once()
-        self.assertNotIn(password, self.Delivery.query.one().snapshot)
-
-    def test_native_vpn_connector_creates_before_sending(self):
-        target, password = 'https://router.example.test', 'MockPassword12'
-        router = RouterConfig(target, Path('/test-secret'), None)
-
-        def create(*args):
-            self.connection.send_message.assert_not_called()
-            self.assertEqual(args, (router, self.p.app.instance_path, 'wfq101755', password))
-            return 'created'
-
-        with patch.dict('os.environ', VPN_ROUTER_URL=target), \
-                patch.object(RouterConfig, 'from_env', return_value=router), \
-                patch('account_notifications.create_openvpn', side_effect=create) as provision:
-            self.assertTrue(self.client.get(self.url('/config')).json['vpn_provisioning_ready'])
-            response = self.send(self.preview(password=password).json, password=password, provision_vpn=True)
-            self.assertTrue(response.json['success'])
-            self.assertIn('VPN 账号 wfq101755 创建成功', response.json['message'])
-            provision.assert_called_once()
-        self.connection.send_message.assert_called_once()
-
-    def test_vpn_duplicate_auth_failure_and_unknown_do_not_send(self):
-        password = 'MockPassword12'
-        with patch.dict('os.environ', VPN_PROVISION_ENDPOINT='https://vpn-adapter.example.test/create',
-                        VPN_PROVISION_TOKEN='mock-token'), patch('account_notifications.provision_vpn') as provision:
-            for result, message in [('exists', '已存在'), ('auth_failed', '认证失败'), ('unknown', '未确认')]:
-                provision.return_value = result
-                response = self.send(self.preview(password=password).json, password=password, provision_vpn=True)
-                self.assertFalse(response.json['success'])
-                self.assertIn(message, response.json['message'])
+        response = self.send(preview, key, password=password, provision_vpn=True)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('VPN 自动开通已停用', response.json['message'])
         self.smtp.assert_not_called()
-
-    def test_vpn_success_mail_rejected_can_send_manually_without_creating_again(self):
-        password = 'MockPassword12'
-        preview = self.preview(password=password).json
-        self.connection.login.side_effect = smtplib.SMTPAuthenticationError(535, b'test')
-        with patch.dict('os.environ', VPN_PROVISION_ENDPOINT='https://vpn-adapter.example.test/create',
-                        VPN_PROVISION_TOKEN='mock-token'), patch('account_notifications.provision_vpn', return_value='created') as provision:
-            response = self.send(preview, password=password, provision_vpn=True)
-            self.assertEqual(response.json['delivery']['status'], 'failed')
-            self.assertIn('创建成功', response.json['message'])
-            self.connection.login.side_effect = None
-            self.assertTrue(self.send(preview, password=password).json['success'])
-            provision.assert_called_once()
+        self.assertEqual(self.Delivery.query.count(), 0)
+        sent = self.send(preview, key, password=password).json
+        self.assertTrue(sent['success'])
+        self.assertNotIn('vpn_status', sent['delivery']['snapshot'])
         self.connection.send_message.assert_called_once()
 
     def test_template_edit_and_stale_version(self):

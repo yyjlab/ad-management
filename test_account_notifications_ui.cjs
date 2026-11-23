@@ -9,6 +9,13 @@ async function run() {
     const browser = await chromium.launch({channel:'msedge',headless:true});
     try {
         const page = await browser.newPage({viewport:{width:1440,height:1000}});
+        const routerUrl='https://192.168.110.1/cgi-bin/luci/';
+        await page.context().route('https://192.168.110.1/**', route=>{
+            if(route.request().url()!==routerUrl)return route.abort();
+            assert.equal(route.request().method(),'GET');
+            assert.equal(route.request().postData(),null);
+            return route.fulfill({contentType:'text/html',body:'<title>Mock router login</title>'});
+        });
         const errors = [];
         page.on('pageerror', e => errors.push(e.message));
         let role = 'super_admin', records = [], seen = [], template, apiRequests=0, previewPassword='';
@@ -28,7 +35,7 @@ async function run() {
                 apiRequests++;
                 assert.equal(role,'super_admin');
                 if(req.method()!=='GET')assert.equal(req.headers()['x-csrf-token'],'test-csrf');
-                if(endpoint==='/config')result={success:true,csrf_token:'test-csrf',mail_ready:true,sender:'it@example.test',default_cc_email:'yuanyujie@shunhs.cn',password_notice:passwordNotice,vpn_template_id:'template-1',vpn_provisioning_ready:true};
+                if(endpoint==='/config')result={success:true,csrf_token:'test-csrf',mail_ready:true,sender:'it@example.test',default_cc_email:'yuanyujie@shunhs.cn',password_notice:passwordNotice,vpn_template_id:'template-1'};
                 if(endpoint==='/templates'&&req.method()==='GET')result={success:true,templates:[template,domain]};
                 if(endpoint.startsWith('/templates/')&&req.method()==='POST'){
                     if(endpoint==='/templates/domain-1/initial-password')result={success:true,password:domainPassword};
@@ -64,10 +71,10 @@ async function run() {
                 }
                 if(endpoint==='/send'){
                     const body=req.postDataJSON();assert.equal(body.confirm_text,'SEND');assert.match(body.request_key,/^[a-f0-9-]{36}$/);
+                    assert(!('provision_vpn' in body));
                     assert.equal(body.password,previewPassword);
                     const record={id:String(records.length+1),mode:body.mode,to_email:body.mode==='test'?body.test_email:seen.at(-1).to_email,
                         cc_email:body.mode==='test'?'':seen.at(-1).cc_email,operator:'admin',subject:template.subject,status:'submitted',message:'邮件服务器已接受；不代表收件人已收到或阅读',created_at:'2026-11-23T02:00:00Z',snapshot:{...template,...seen.at(-1),template_id:template.id,password_included:!!previewPassword}};
-                    if(body.provision_vpn){assert.equal(body.mode,'employee');record.message='VPN 账号 zhangsan 创建成功。'+record.message;record.snapshot.vpn_status='created';}
                     records.unshift(record);result={success:true,delivery:record};
                 }
                 if(endpoint==='/deliveries')result={success:true,page:1,total:records.length,deliveries:records};
@@ -176,6 +183,18 @@ async function run() {
         assert((await frame.locator('#previewRecipient').textContent()).includes('yuanyujie@shunhs.cn'));
         assert.equal(previewPassword,'CustomTestPassword2!');
         assert(await frame.locator('#confirmSend').isDisabled());
+        const routerLink=frame.getByRole('link',{name:'去路由器开通 VPN'});
+        assert.equal(await routerLink.getAttribute('href'),routerUrl);
+        assert.equal(await routerLink.getAttribute('rel'),'noopener noreferrer');
+        const requestsBeforeJump=apiRequests;
+        const [routerTab]=await Promise.all([page.context().waitForEvent('page'),routerLink.click()]);
+        await routerTab.waitForURL(routerUrl);
+        assert.equal(await routerTab.title(),'Mock router login');
+        await routerTab.close();
+        assert.equal(apiRequests,requestsBeforeJump);
+        assert.equal(records.length,0);
+        assert(await frame.locator('#previewDialog').isVisible());
+        assert(await frame.locator('#confirmSend').isDisabled());
         await frame.locator('#testEmail').fill('it@example.test');
         await frame.locator('#sendTest').click();
         await frame.locator('#sendResult').filter({hasText:'测试邮件'}).waitFor();
@@ -188,16 +207,9 @@ async function run() {
         assert.equal(records[1].cc_email,'');
         assert(!JSON.stringify(records).includes('CustomTestPassword2!'));
         await frame.locator('[data-close="previewDialog"]').first().click();
-        await frame.locator('#previewButton').click();
-        assert(await frame.locator('#confirmSend').isDisabled());
-        page.once('dialog', dialog=>dialog.accept());
-        await frame.locator('#provisionVpn').click();
-        await frame.locator('#sendResult').filter({hasText:'VPN 账号 zhangsan 创建成功'}).waitFor();
-        assert.equal(records[0].snapshot.vpn_status,'created');
-        await frame.locator('[data-close="previewDialog"]').first().click();
         await frame.locator('[data-tab="history"]').click();
-        await frame.locator('#historyBody tr').nth(2).waitFor();
-        assert.equal(await frame.locator('#historyBody tr').count(),3);
+        await frame.locator('#historyBody tr').nth(1).waitFor();
+        assert.equal(await frame.locator('#historyBody tr').count(),2);
         await frame.locator('#historyBody .link-button').first().click();
         assert((await frame.locator('#deliveryDetail').textContent()).includes('zhangsan'));
         assert((await frame.locator('#deliveryDetail').textContent()).includes('不保存明文'));
@@ -238,7 +250,7 @@ async function run() {
         await frame.locator('#previewMailBody').filter({hasText:'OneTimeTest12'}).waitFor();
         assert.equal(seen.at(-1).cc_email,'');
         assert((await frame.locator('#previewMailBody').innerText()).includes('Ctrl + Alt + Delete'));
-        assert(await frame.locator('#provisionVpn').isHidden());
+        assert(await frame.locator('#openVpnRouter').isHidden());
         await frame.locator('[data-close="previewDialog"]').first().click();
         await frame.locator('#composeTemplate').selectOption('template-1');
         assert.equal(await frame.locator('#account').inputValue(),'vpn.manual');
@@ -265,7 +277,7 @@ async function run() {
         await page.waitForFunction(()=>document.getElementById('loginUser').textContent.includes('admin'));
         assert(await page.locator('#accountNoticeMenu').isHidden());
         assert.deepEqual(errors,[]);
-        console.log('PASS account notice: AD template defaults/editing, VPN behavior, preview, delivery and mobile layout');
+        console.log('PASS account notice: AD template, VPN link without side effects, preview, mail and mobile layout');
     } finally {await browser.close();}
 }
 run().catch(e=>{console.error(e);process.exitCode=1;});
