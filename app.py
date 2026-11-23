@@ -5307,7 +5307,7 @@ limiter.exempt(pc_deploy_blueprint)
 
 account_notice_blueprint = register_notifications(
     app, db, account_notice_models, current_admin_user, touch_admin_session,
-    lambda: get_ad_connection(), write_admin_action)
+    lambda: get_ad_connection(), write_admin_action, get_setting, set_setting)
 limiter.exempt(account_notice_blueprint)
 
 

@@ -9,7 +9,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from account_notifications import MAX_ATTACHMENT, PASSWORD_NOTICE, VPN_TEMPLATE_ID, seed_templates, suggested_account
+from account_notifications import (DOMAIN_PASSWORD_NOTICE, DOMAIN_TEMPLATE_NAME, MAX_ATTACHMENT, PASSWORD_NOTICE,
+                                   VPN_TEMPLATE_ID, seed_templates, suggested_account)
 from itsdangerous import URLSafeTimedSerializer
 import test_domain_password_policy as policy_tests
 from vpn_router import RouterConfig
@@ -191,6 +192,53 @@ class AccountNoticeTests(unittest.TestCase):
         templates = self.client.get(self.url('/templates')).json['templates']
         self.assertTrue(all(t['password_instruction'] == PASSWORD_NOTICE for t in templates))
         self.assertEqual(self.client.get(self.url('/config')).json['password_notice'], PASSWORD_NOTICE)
+
+    def test_domain_template_reuses_ad_account_and_sends_without_vpn_fields(self):
+        row = next(t for t in self.Template.query.all() if t.id != VPN_TEMPLATE_ID)
+        row.name = DOMAIN_TEMPLATE_NAME
+        row.tutorial_url = 'https://example.test/legacy'
+        self.p.db.session.add(self.Attachment(id=str(uuid.uuid4()), template_id=row.id,
+            filename='legacy.ovpn', content=b'client'))
+        self.p.db.session.commit()
+        template = next(t for t in self.client.get(self.url('/templates')).json['templates'] if t['id'] == row.id)
+        self.assertTrue(template['domain_account'])
+        self.assertEqual(template['password_instruction'], DOMAIN_PASSWORD_NOTICE)
+        self.assertEqual(template['attachments'], [])
+        update = {k: v for k, v in template.items() if k not in ('id', 'attachments', 'domain_account')}
+        hint, default = 'Windows 登录后请及时修改密码。', 'TestDefault12'
+        update.update(password_instruction=hint, initial_password=default, tutorial_url='')
+        saved = self.post('/templates/' + row.id, update)
+        self.assertEqual(saved.status_code, 200)
+        self.assertNotIn(default, saved.get_data(as_text=True))
+        self.assertEqual(self.p.db.session.get(self.Template, row.id).tutorial_url, 'https://example.test/legacy')
+        setting = self.p.SystemSetting.query.filter_by(key=f'account_notice_initial_password:{row.id}').one()
+        self.assertNotIn(default, setting.value)
+        endpoint = '/templates/' + row.id + '/initial-password'
+        self.assertEqual(self.client.post(self.url(endpoint), json={}).status_code, 403)
+        secret = self.post(endpoint, {})
+        self.assertEqual(secret.json['password'], default)
+        self.assertEqual(secret.headers['Cache-Control'], 'no-store')
+        self.assertEqual(self.post('/templates/' + VPN_TEMPLATE_ID + '/initial-password', {}).status_code, 404)
+        update.update(version=saved.json['template']['version'], initial_password='')
+        saved = self.post('/templates/' + row.id, update)
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(self.post(endpoint, {}).json['password'], default)
+
+        override = 'TestOverride12'
+        preview = self.preview(template_id=row.id, version=saved.json['template']['version'],
+            account='zhangsan', employee_id='wfq123456', password=override,
+            tutorial_url='https://example.test/ignored', password_instruction='不采用此提示').json
+        self.assertIn('登录账号：wfq123456', preview['text'])
+        self.assertIn(hint, preview['text'])
+        self.assertIn(override, preview['text'])
+        self.assertNotIn('example.test', preview['text'])
+        self.assertNotIn(default, preview['text'])
+        sent = self.send(preview, password=override)
+        self.assertTrue(sent.json['success'])
+        message = self.connection.send_message.call_args.args[0]
+        self.assertIn(override, message.get_body(preferencelist=('plain',)).get_content())
+        self.assertFalse(list(message.iter_attachments()))
+        self.assertNotIn(override, self.Delivery.query.one().snapshot)
 
     def test_preview_and_html_mail_display_links_with_original_addresses(self):
         url = 'https://docs.example.test/vpn?space=123&file=456'

@@ -25,10 +25,10 @@
 <div class="full"><label for="employeeSearch">查找同事</label><div class="inline search" style="margin-top:7px"><input id="employeeSearch" placeholder="输入完整姓名或工号，自动识别域账号" maxlength="80" autocomplete="off"><button type="button" id="searchEmployee">查询 AD</button></div><div id="employeeResults" class="results" hidden></div><p id="recipientHint" class="hint lookup-status" role="status" aria-live="polite"></p></div>
 <label class="field">使用人姓名<input id="recipient_name" maxlength="120" required autocomplete="off" placeholder="输入姓名，自动填写邮箱"></label>
 <label class="field">收件邮箱<input id="to_email" type="email" maxlength="254" required autocomplete="off"></label>
-<label class="field">登录账号<input id="account" maxlength="120" required autocomplete="off"></label>
+<label class="field"><span id="accountLabel">登录账号</span><input id="account" maxlength="120" required autocomplete="off"></label>
 <label class="field">员工工号（可选）<input id="employee_id" maxlength="64" autocomplete="off"></label>
 <label class="field full">抄送邮箱（可选）<input id="cc_email" type="email" maxlength="254" autocomplete="off"></label>
-<label class="field full">密码保密提示<input id="password_instruction" maxlength="500" readonly></label>
+<label class="field full"><span id="composePasswordHintLabel">密码保密提示</span><input id="password_instruction" maxlength="500" readonly></label>
 <label class="field full">登录地址（可选）<input id="login_url" type="url" maxlength="1000" placeholder="https://"></label>
 <label class="field">使用教程（可选）<input id="tutorial_url" type="url" maxlength="1000" placeholder="https://"></label>
 <label class="field">客户端下载（可选）<input id="download_url" type="url" maxlength="1000" placeholder="https://"></label>
@@ -36,9 +36,9 @@
 </div><div class="hint" id="composeFiles"></div><div class="actions"><button class="primary" id="previewButton" type="submit">预览通知</button></div>
 </form><div class="notice-side"><aside class="surface send-aside"><div class="section-title"><h2>通知摘要</h2><button class="link-button" onclick="tab('templates')">编辑模板</button></div><p class="hint">系统</p><p id="summarySystem">—</p><div class="divider"></div><p class="hint">邮件主题</p><p id="summarySubject">—</p><div class="divider"></div><p class="hint">附件</p><p id="summaryAttachments" style="overflow-wrap:anywhere">无</p><div class="divider"></div><p class="hint">仅发送通知，不会创建账号或修改密码。</p></aside>
 <aside class="surface password-tool" id="passwordTool" aria-label="账号密码工具"><div class="section-title"><h2>账号密码</h2><span class="pill">可自定义</span></div>
-<label for="passwordLength">生成长度</label><div class="password-length"><input id="passwordLengthRange" type="range" min="8" max="64" value="12" aria-label="密码长度滑块"><input id="passwordLength" type="number" min="8" max="64" step="1" value="12" required aria-label="密码字符数"></div>
-<div class="password-options"><label class="checkbox"><input id="passwordDigits" type="checkbox" checked>数字</label><label class="checkbox"><input id="passwordSymbols" type="checkbox">符号</label></div>
-<label for="temporaryPassword">密码（可手动修改）</label><div class="password-output"><input id="temporaryPassword" type="password" maxlength="128" autocomplete="new-password" spellcheck="false" autocapitalize="none" aria-describedby="passwordLocalHint">
+<div id="passwordGeneratorOptions"><label for="passwordLength">生成长度</label><div class="password-length"><input id="passwordLengthRange" type="range" min="8" max="64" value="12" aria-label="密码长度滑块"><input id="passwordLength" type="number" min="8" max="64" step="1" value="12" required aria-label="密码字符数"></div>
+<div class="password-options"><label class="checkbox"><input id="passwordDigits" type="checkbox" checked>数字</label><label class="checkbox"><input id="passwordSymbols" type="checkbox">符号</label></div></div>
+<label for="temporaryPassword" id="temporaryPasswordLabel">密码（可手动修改）</label><div class="password-output"><input id="temporaryPassword" type="password" maxlength="128" autocomplete="new-password" spellcheck="false" autocapitalize="none" aria-describedby="passwordLocalHint">
 <button type="button" class="icon-button" id="toggleTemporaryPassword" title="显示密码" aria-label="显示密码" aria-pressed="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg></button>
 <button type="button" class="icon-button" id="copyTemporaryPassword" title="复制密码" aria-label="复制密码"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button></div>
 <button type="button" class="primary" id="generatePassword">生成 / 换一个</button><label class="checkbox" style="margin-top:14px"><input id="includePassword" type="checkbox" checked>随邮件发送密码</label><p class="hint lookup-status" id="passwordToolStatus" role="status"></p><p class="hint" id="passwordLocalHint">请先在对应系统设置相同密码。发送记录不保存明文密码。</p></aside></div></div>
@@ -47,10 +47,11 @@
 <div class="section-title"><h2>通知模板</h2><button id="newTemplate">＋ 新建模板</button></div><div class="template-layout"><div class="template-list" id="templateList"></div><div class="surface"><form id="templateForm"><div class="grid">
 <label class="field">模板名称<input name="name" maxlength="80" required></label><label class="field">系统名称<input name="system_name" maxlength="120" required></label>
 <label class="field full">邮件主题<input name="subject" maxlength="200" required></label><label class="field full">开通说明<textarea name="intro" maxlength="4000" required rows="3"></textarea></label>
-<label class="field full">密码保密提示<input name="password_instruction" maxlength="500" readonly></label>
+<label class="field full"><span id="templatePasswordHintLabel">密码保密提示</span><input name="password_instruction" maxlength="500" readonly></label>
+<label class="field full" id="initialPasswordSetting" hidden>默认初始密码<input name="initial_password" type="password" maxlength="128" autocomplete="new-password" placeholder="填写后保存，留空保留原值"></label>
 <label class="field full">登录地址<input name="login_url" type="url" maxlength="1000"></label><label class="field">使用教程<input name="tutorial_url" type="url" maxlength="1000"></label><label class="field">客户端下载<input name="download_url" type="url" maxlength="1000"></label>
 <label class="checkbox full"><input name="active" type="checkbox" checked>启用此模板</label></div><div class="actions"><button type="submit" class="primary">保存模板</button></div></form>
-<div class="divider"></div><h2>随邮件发送的附件</h2><p class="hint">支持共用 .ovpn 配置或 PDF 教程。最多 3 个，单个 2 MiB，总计 5 MiB。</p><div id="attachmentList"></div><div class="inline upload"><input type="file" id="attachmentFile" accept=".ovpn,.pdf" aria-label="选择邮件附件"><button id="uploadFile">上传附件</button></div><p class="hint">OVPN 如含私钥，只应发给被授权使用该配置的人员。</p></div></div>
+<div id="templateAttachments"><div class="divider"></div><h2>随邮件发送的附件</h2><p class="hint">支持共用 .ovpn 配置或 PDF 教程。最多 3 个，单个 2 MiB，总计 5 MiB。</p><div id="attachmentList"></div><div class="inline upload"><input type="file" id="attachmentFile" accept=".ovpn,.pdf" aria-label="选择邮件附件"><button id="uploadFile">上传附件</button></div><p class="hint">OVPN 如含私钥，只应发给被授权使用该配置的人员。</p></div></div></div>
 </section>
 <section class="pane surface" id="pane-history" hidden><div class="section-title"><h2>发送记录</h2><button id="refreshHistory">刷新记录</button></div><div class="table-wrap"><table><thead><tr><th>发送时间</th><th>同事 / 收件邮箱</th><th>系统 / 账号</th><th>结果</th><th>操作人</th><th>操作</th></tr></thead><tbody id="historyBody"><tr><td colspan="6" class="empty">正在加载…</td></tr></tbody></table></div><div class="inline pagination"><span class="muted" id="historyPage"></span><button id="prevPage">上一页</button><button id="nextPage">下一页</button></div></section>
 <dialog id="previewDialog"><div class="modal-head"><h2>确认账号通知</h2><button class="close" data-close="previewDialog" aria-label="关闭预览">×</button></div><div class="modal-body"><p id="previewRecipient"></p><p class="hint" id="previewSubject"></p><div class="preview-frame" id="emailPreview" role="document" aria-label="邮件内容预览"><div class="mail-preview-title" id="previewMailTitle"></div><div class="mail-preview-body" id="previewMailBody"></div><div class="mail-preview-footer">IT 账号通知 · 请勿向无关人员转发账号资料。</div></div><div class="inline"><input id="testEmail" type="email" maxlength="254" placeholder="测试收件邮箱" aria-label="测试收件邮箱"><button id="sendTest">发送测试</button></div><p class="hint lookup-status" id="sendResult" role="status"></p><div class="divider"></div><label class="checkbox"><input type="checkbox" id="confirmOpened">我已在对应系统配置好账号及密码，并核对收件、抄送邮箱和附件。</label></div><div class="modal-footer"><button data-close="previewDialog">返回修改</button><button id="confirmSend" class="primary" disabled>确认发送给同事</button><button id="provisionVpn" type="button" class="primary" hidden disabled>开通 VPN 并发送</button></div></dialog>
@@ -59,9 +60,11 @@
 'use strict';
 const $ = id => document.getElementById(id);
 const base = '/api/admin/account-notifications';
+const urlFields = ['login_url','tutorial_url','download_url'];
 const fields = ['employee_id','recipient_name','to_email','cc_email','account','notes','login_url','tutorial_url','download_url','password_instruction'];
 const templateFields = ['name','system_name','subject','intro','login_url','tutorial_url','download_url','password_instruction'];
 const state = {csrf:'',templates:[],edit:null,preview:null,keys:{},page:1,total:0,rows:[],sending:false,ready:false,vpnTemplate:'',vpnReady:false,passwordNotice:'请妥善保管此密码，请勿向他人透露或转发。'};
+let selectedRecipient, generalDraft, domainTemplateId='', defaultPasswordRequest=0;
 const labels = {submitted:'已提交邮件服务器',partial:'部分收件人被拒绝',failed:'发送失败',unknown:'结果待确认',sending:'发送中'};
 function show(message,kind=''){const el=$('globalMessage');el.textContent=message;el.className='notice '+kind;}
 async function api(path,options={}) {
@@ -82,7 +85,44 @@ function tab(name){if(name!=='send'){cancelRecipientLookup();recipientHint('');$
 document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>tab(b.dataset.tab));
 document.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>$(b.dataset.close).close());
 function summary(){const t=template();$('summarySystem').textContent=t?.system_name||'—';$('summarySubject').textContent=t?.subject||'—';$('summaryAttachments').textContent=t?.attachments.map(f=>f.filename).join('、')||'无';}
-function applyTemplate(){invalidate();summary();const t=template();if(!t)return;['login_url','tutorial_url','download_url'].forEach(k=>$(k).value=t[k]);$('password_instruction').value=state.passwordNotice;$('composeFiles').textContent=t.attachments.length?'随附：'+t.attachments.map(f=>f.filename).join('、'):'此模板暂无附件';}
+async function fillInitialPassword(t){
+    const requestId=++defaultPasswordRequest;
+    try{
+        const data=await api('/templates/'+t.id+'/initial-password',{method:'POST'});
+        if(requestId!==defaultPasswordRequest)return;
+        $('temporaryPassword').value=data.password||'';
+    }catch(e){if(requestId===defaultPasswordRequest)passwordStatus(e.message,'error');}
+}
+function applyTemplate(reloadPassword=false){
+    invalidate();summary();const t=template(),domain=t?.domain_account===true,nextId=domain?t.id:'';
+    if(nextId!==domainTemplateId||domain&&reloadPassword){
+        defaultPasswordRequest++;
+        if(!domainTemplateId&&domain)generalDraft={password:$('temporaryPassword').value,include:$('includePassword').checked,
+            cc:$('cc_email').value,account:$('account').value,employeeId:$('employee_id').value,recipient:selectedRecipient};
+        $('temporaryPassword').value=domain?'':generalDraft?.password||'';
+        $('includePassword').checked=domain||!!generalDraft?.include;
+        if(!domain||!domainTemplateId)$('cc_email').value=domain?'':generalDraft?.cc||'';
+        passwordStatus('');
+        if(domain)fillInitialPassword(t);
+        if(!domain&&generalDraft?.recipient===selectedRecipient&&generalDraft){
+            $('account').value=generalDraft.account;$('employee_id').value=generalDraft.employeeId;
+        }else if(nextId!==domainTemplateId){
+            $('employee_id').value=selectedRecipient?.employee_id||$('employee_id').value;
+            $('account').value=selectedRecipient?(domain?selectedRecipient.employee_id:selectedRecipient.suggested_account||selectedRecipient.employee_id):'';
+        }
+        domainTemplateId=nextId;
+    }
+    $('account').readOnly=domain&&!!selectedRecipient;
+    $('accountLabel').textContent=domain?'域登录账号':'登录账号';
+    $('composePasswordHintLabel').textContent=domain?'初始密码说明':'密码保密提示';
+    $('temporaryPasswordLabel').textContent=domain?'初始密码（可手动修改）':'密码（可手动修改）';
+    $('passwordLocalHint').textContent=domain?'请核对是否与开户时设置的密码一致。':'请先在对应系统设置相同密码。发送记录不保存明文密码。';
+    for(const id of ['passwordGeneratorOptions','generatePassword','composeFiles'])$(id).hidden=domain;
+    $('employee_id').closest('label').hidden=domain;
+    for(const key of urlFields){$(key).closest('label').hidden=domain;$(key).value=domain?'':t?.[key]||'';}
+    $('password_instruction').value=t?.password_instruction&&domain?t.password_instruction:state.passwordNotice;
+    $('composeFiles').textContent=t?.attachments.length?'随附：'+t.attachments.map(f=>f.filename).join('、'):'此模板暂无附件';
+}
 function renderTemplates(keep=true){
     const selected=$('composeTemplate').value;$('composeTemplate').replaceChildren();
     for(const t of state.templates.filter(t=>t.active)){const o=element('option',t.name);o.value=t.id;$('composeTemplate').append(o);}
@@ -93,20 +133,31 @@ function renderTemplates(keep=true){
     $('previewButton').disabled=!template();summary();
 }
 async function loadTemplates(){state.templates=(await api('/templates')).templates;renderTemplates();}
-function editTemplate(t){state.edit=t||null;const form=$('templateForm');form.reset();for(const k of templateFields)form.elements[k].value=k==='password_instruction'?state.passwordNotice:t?.[k]||'';form.elements.active.checked=t?.active!==false;renderTemplates();renderAttachments();}
+function editTemplate(t){
+    state.edit=t||null;const form=$('templateForm'),domain=t?.domain_account===true;form.reset();
+    for(const k of templateFields)form.elements[k].value=k==='password_instruction'&&!domain?state.passwordNotice:t?.[k]||'';
+    form.elements.name.readOnly=domain;form.elements.password_instruction.readOnly=!domain;form.elements.active.checked=t?.active!==false;
+    $('templatePasswordHintLabel').textContent=domain?'初始密码说明':'密码保密提示';
+    $('initialPasswordSetting').hidden=!domain;$('templateAttachments').hidden=domain;
+    for(const key of urlFields)form.elements[key].closest('label').hidden=domain;
+    renderTemplates();renderAttachments();
+}
 function renderAttachments(){
     $('attachmentList').replaceChildren();$('uploadFile').disabled=!state.edit;$('attachmentFile').disabled=!state.edit;
     if(!state.edit){$('attachmentList').append(element('p','先保存模板，再上传附件。','hint'));return;}
     for(const f of state.edit.attachments){const row=element('div',undefined,'file-row');const info=element('div');const a=element('a',f.filename);a.href=base+'/attachments/'+f.id;info.append(a,element('small',`${(f.size/1024).toFixed(1)} KiB`+(f.private_key?' · 含私钥，请核对授权范围':'')));const b=element('button','移除','danger');b.onclick=async()=>{if(!confirm('从模板移除此附件？已发送的邮件不会撤回。'))return;b.disabled=true;try{await api('/attachments/'+f.id,{method:'DELETE'});await refreshEdited();show('附件已移除','good');}catch(e){show(e.message,'error');}finally{b.disabled=false;}};row.append(info,b);$('attachmentList').append(row);}
 }
 async function refreshEdited(){const id=state.edit?.id;await loadTemplates();editTemplate(state.templates.find(t=>t.id===id));invalidate();}
-$('composeTemplate').onchange=applyTemplate;
+$('composeTemplate').onchange=()=>applyTemplate();
 $('sendForm').addEventListener('input',invalidate);
 let recipientTimer, recipientRequest;
 function recipientHint(message,tone=''){const el=$('recipientHint');el.textContent=message;el.dataset.tone=tone;}
 function cancelRecipientLookup(){clearTimeout(recipientTimer);recipientRequest?.abort();recipientRequest=null;$('searchEmployee').disabled=false;}
 function selectRecipient(person){
-    cancelRecipientLookup();invalidate();$('employeeSearch').value=person.name;$('recipient_name').value=person.name;$('employee_id').value=person.employee_id;$('account').value=person.suggested_account||person.employee_id;
+    cancelRecipientLookup();invalidate();selectedRecipient=person;
+    const domain=template()?.domain_account===true;
+    $('employeeSearch').value=person.name;$('recipient_name').value=person.name;$('employee_id').value=person.employee_id;
+    $('account').value=domain?person.employee_id:person.suggested_account||person.employee_id;$('account').readOnly=domain;
     $('to_email').value=person.email_status==='valid'?person.email:'';$('employeeResults').hidden=true;
     if(person.email_status==='valid')recipientHint(`已识别域账号 ${person.employee_id}，邮箱已自动填写，请核对。`,'good');
     else if(person.email_status==='invalid')recipientHint(`域账号 ${person.employee_id} 的邮箱格式不正确，请修正 AD 邮箱或手动填写有效邮箱。`,'error');
@@ -118,7 +169,7 @@ async function lookupRecipient(query,automatic){
     try{
         const data=await api('/recipients?q='+encodeURIComponent(query)+(automatic?'&exact=1':''),{signal:controller.signal});
         if(controller.signal.aborted)return;
-        if(automatic&&data.suggested_account)$('account').value=data.suggested_account;
+        if(automatic&&!template()?.domain_account&&data.suggested_account)$('account').value=data.suggested_account;
         $('employeeResults').replaceChildren();
         if(!data.recipients.length){recipientHint('未找到匹配的域账号，请核对姓名或使用工号查询；也可手动填写收件信息。','error');return;}
         if(automatic&&data.exact&&data.recipients.length===1&&!data.truncated){selectRecipient(data.recipients[0]);return;}
@@ -133,6 +184,7 @@ async function lookupRecipient(query,automatic){
 }
 function scheduleRecipientLookup(event){
     cancelRecipientLookup();$('employeeResults').hidden=true;recipientHint('');
+    selectedRecipient=null;$('account').readOnly=false;
     for(const key of ['to_email','employee_id','account'])$(key).value='';
     if(event.target.id==='employeeSearch')$('recipient_name').value='';
     else $('employeeSearch').value=event.target.value;
@@ -168,7 +220,7 @@ $('generatePassword').onclick=generateTemporaryPassword;
 $('passwordLengthRange').oninput=()=>{$('passwordLength').value=$('passwordLengthRange').value;if($('temporaryPassword').value)generateTemporaryPassword();};
 $('passwordLength').onchange=()=>{if($('passwordLength').checkValidity())$('passwordLengthRange').value=$('passwordLength').value;if($('temporaryPassword').value)generateTemporaryPassword();};
 for(const id of ['passwordDigits','passwordSymbols'])$(id).onchange=()=>{if($('temporaryPassword').value)generateTemporaryPassword();};
-$('temporaryPassword').oninput=()=>{invalidate();passwordStatus('');};
+$('temporaryPassword').oninput=()=>{defaultPasswordRequest++;invalidate();passwordStatus('');};
 $('includePassword').onchange=invalidate;
 function emailPassword(){return $('includePassword').checked?$('temporaryPassword').value:'';}
 function renderPreviewBody(data){
@@ -220,11 +272,11 @@ async function send(mode,provisionVpn=false){
 }
 $('sendTest').onclick=()=>send('test');$('confirmSend').onclick=()=>send('employee');$('provisionVpn').onclick=()=>send('employee',true);
 $('newTemplate').onclick=()=>editTemplate(null);
-$('templateForm').onsubmit=async e=>{e.preventDefault();const form=e.currentTarget,b=form.querySelector('[type=submit]');b.disabled=true;try{const body={...Object.fromEntries(templateFields.map(k=>[k,form.elements[k].value.trim()])),active:form.elements.active.checked};if(state.edit)body.version=state.edit.version;const result=await api('/templates'+(state.edit?'/'+state.edit.id:''),{method:'POST',body});await loadTemplates();editTemplate(result.template);invalidate();show('模板已保存','good');}catch(err){show(err.message,'error');}finally{b.disabled=false;}};
+$('templateForm').onsubmit=async e=>{e.preventDefault();const form=e.currentTarget,b=form.querySelector('[type=submit]');b.disabled=true;try{const body={...Object.fromEntries(templateFields.map(k=>[k,form.elements[k].value.trim()])),active:form.elements.active.checked};if(state.edit)body.version=state.edit.version;if(state.edit?.domain_account)body.initial_password=form.elements.initial_password.value;const result=await api('/templates'+(state.edit?'/'+state.edit.id:''),{method:'POST',body});await loadTemplates();editTemplate(result.template);if(result.template.domain_account||domainTemplateId)applyTemplate(template()?.id===result.template.id);else invalidate();show('模板已保存','good');}catch(err){show(err.message,'error');}finally{b.disabled=false;}};
 $('uploadFile').onclick=async()=>{const f=$('attachmentFile').files[0];if(!f||!state.edit){show('请选择要上传的附件','error');return;}if(f.size>2097152){show('单个附件不能超过 2 MiB','error');return;}const b=$('uploadFile');b.disabled=true;try{const form=new FormData();form.append('file',f);await api('/templates/'+state.edit.id+'/attachments',{method:'POST',body:form});$('attachmentFile').value='';await refreshEdited();show('附件已保存','good');}catch(e){show(e.message,'error');}finally{b.disabled=!state.edit;}};
 function time(value){return new Date(value).toLocaleString('zh-CN',{hour12:false});}
 function detail(row){const s=row.snapshot;$('deliveryDetail').textContent=[`结果：${labels[row.status]||row.status}`,row.message,`时间：${time(row.created_at)}`,`操作人：${row.operator}`,`发送方式：${row.mode==='test'?'测试':'正式通知'}`,`收件邮箱：${row.to_email}`,`抄送邮箱：${row.cc_email||'无'}`,`使用人：${s.recipient_name}`,`系统：${s.system_name}`,`账号：${s.account}`,`主题：${row.subject}`,`说明：${s.intro}`,`密码：${s.password_included?'已随邮件发送，不保存明文':'未随邮件发送'}`,`密码说明：${s.password_instruction}`,`登录地址：${s.login_url||'无'}`,`教程：${s.tutorial_url||'无'}`,`下载：${s.download_url||'无'}`,`附件：${s.attachments.map(f=>f.filename).join('、')||'无'}`,`补充说明：${s.notes||'无'}`,`记录编号：${row.id}`].join('\n');$('detailDialog').showModal();}
-function reedit(row){if(!confirm('将这条记录带回编辑。再次发送会产生一封新邮件，请先核对原邮件是否收到。'))return;const t=state.templates.find(t=>t.id===row.snapshot.template_id&&t.active);if(!t){show('原模板已停用，请启用模板后再编辑','error');return;}tab('send');$('composeTemplate').value=t.id;applyTemplate();for(const k of fields)$(k).value=row.snapshot[k]||'';$('password_instruction').value=state.passwordNotice;$('temporaryPassword').value='';$('includePassword').checked=!!row.snapshot.password_included;show('已带回编辑；原密码未保存，请按需重新填写，再预览。');}
+function reedit(row){if(!confirm('将这条记录带回编辑。再次发送会产生一封新邮件，请先核对原邮件是否收到。'))return;const t=state.templates.find(t=>t.id===row.snapshot.template_id&&t.active);if(!t){show('原模板已停用，请启用模板后再编辑','error');return;}tab('send');selectedRecipient=null;$('composeTemplate').value=t.id;applyTemplate();for(const k of fields)if(!t.domain_account||!urlFields.includes(k))$(k).value=row.snapshot[k]||'';if(t.domain_account&&row.snapshot.employee_id){$('account').value=row.snapshot.employee_id;$('account').readOnly=true;}$('password_instruction').value=t.domain_account?t.password_instruction:state.passwordNotice;defaultPasswordRequest++;$('temporaryPassword').value='';$('includePassword').checked=!!row.snapshot.password_included;show('已带回编辑；原密码未保存，请按需重新填写，再预览。');}
 async function loadHistory(){const b=$('refreshHistory');b.disabled=true;try{const data=await api('/deliveries?page='+state.page);state.rows=data.deliveries;state.total=data.total;$('historyBody').replaceChildren();if(!data.deliveries.length){const tr=element('tr'),td=element('td','暂无发送记录','empty');td.colSpan=6;tr.append(td);$('historyBody').append(tr);}for(const r of data.deliveries){const tr=element('tr');tr.append(element('td',time(r.created_at)));const recipient=element('td',r.snapshot.recipient_name);recipient.append(element('small',r.to_email));const account=element('td',r.snapshot.system_name);account.append(element('small',r.snapshot.account));const status=element('td');status.append(element('span',labels[r.status]||r.status,'pill '+r.status));if(r.mode==='test')status.append(element('small','测试'));const ops=element('td'),view=element('button','详情','link-button'),edit=element('button','重新编辑','link-button');view.onclick=()=>detail(r);edit.onclick=()=>reedit(r);ops.append(view,edit);tr.append(recipient,account,status,element('td',r.operator),ops);$('historyBody').append(tr);}$('historyPage').textContent=`共 ${data.total} 条 · 第 ${state.page} 页`;$('prevPage').disabled=state.page<=1;$('nextPage').disabled=state.page*20>=data.total;}catch(e){show(e.message,'error');}finally{b.disabled=false;}}
 $('refreshHistory').onclick=loadHistory;$('prevPage').onclick=()=>{if(state.page>1){state.page--;loadHistory();}};$('nextPage').onclick=()=>{if(state.page*20<state.total){state.page++;loadHistory();}};
 async function init(){try{const config=await api('/config');state.csrf=config.csrf_token;state.ready=true;state.vpnTemplate=config.vpn_template_id||'';state.vpnReady=config.vpn_provisioning_ready===true;state.passwordNotice=config.password_notice||state.passwordNotice;$('cc_email').value=config.default_cc_email||'';$('mailStatus').replaceChildren(element('span',undefined,'dot'+(config.mail_ready?'':' off')),document.createTextNode(config.mail_ready?'SMTP 已配置':'SMTP 未配置'),element('p',config.sender||'复用系统邮件配置','hint'));await loadTemplates();applyTemplate();editTemplate(state.templates[0]);const name=location.hash.slice(1);if(['templates','history'].includes(name))tab(name);if(!config.mail_ready)show('现有 SMTP 尚未配置完整，暂不能发送邮件。','error');}catch(e){show(e.message,'error');$('previewButton').disabled=true;}}

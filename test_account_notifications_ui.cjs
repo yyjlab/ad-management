@@ -16,6 +16,8 @@ async function run() {
             subject:'VPN 开通通知',intro:'您的账号已开通',active:true,login_url:'http://vpn.example.test',
             tutorial_url:'',download_url:'',password_instruction:'使用现有密码',attachments:[]});
         template = initial();
+        let domainPassword='TestDefault12', domain={...initial(),id:'domain-1',name:'域账号开通',
+            domain_account:true,password_instruction:'此密码为初始密码。',login_url:''};
         await page.route('**/*', async route => {
             const req=route.request(), url=new URL(req.url()), endpoint=url.pathname.replace('/api/admin/account-notifications','');
             if(url.pathname==='/admin/manage'||url.pathname==='/admin.html') return route.fulfill({contentType:'text/html',body:fs.readFileSync(path.join(__dirname,url.pathname==='/admin.html'?'admin.html':'admin_manage.html'),'utf8')});
@@ -27,11 +29,18 @@ async function run() {
                 assert.equal(role,'super_admin');
                 if(req.method()!=='GET')assert.equal(req.headers()['x-csrf-token'],'test-csrf');
                 if(endpoint==='/config')result={success:true,csrf_token:'test-csrf',mail_ready:true,sender:'it@example.test',default_cc_email:'yuanyujie@shunhs.cn',password_notice:passwordNotice,vpn_template_id:'template-1',vpn_provisioning_ready:true};
-                if(endpoint==='/templates'&&req.method()==='GET')result={success:true,templates:[template]};
+                if(endpoint==='/templates'&&req.method()==='GET')result={success:true,templates:[template,domain]};
                 if(endpoint.startsWith('/templates/')&&req.method()==='POST'){
-                    if(endpoint.endsWith('/attachments'))template={...template,version:template.version+1,attachments:[{id:'file-1',filename:'company.ovpn',size:35,private_key:false}]};
-                    else template={...template,...req.postDataJSON(),version:template.version+1};
-                    result={success:true,template};
+                    if(endpoint==='/templates/domain-1/initial-password')result={success:true,password:domainPassword};
+                    else if(endpoint==='/templates/domain-1'){
+                        const {initial_password,...body}=req.postDataJSON();
+                        if(initial_password)domainPassword=initial_password;
+                        domain={...domain,...body,version:domain.version+1};result={success:true,template:domain};
+                    }else{
+                        if(endpoint.endsWith('/attachments'))template={...template,version:template.version+1,attachments:[{id:'file-1',filename:'company.ovpn',size:35,private_key:false}]};
+                        else template={...template,...req.postDataJSON(),version:template.version+1};
+                        result={success:true,template};
+                    }
                 }
                 if(endpoint==='/recipients'){
                     const people={
@@ -49,7 +58,8 @@ async function run() {
                     const {password,...body}=req.postDataJSON();previewPassword=password;seen.push(body);
                     assert.equal(typeof password,'string');
                     assert(!('temporaryPassword' in body));
-                    result={success:true,preview_token:'preview-token',subject:template.subject,recipient:body.to_email,cc_email:body.cc_email,text:`您好，${body.recipient_name}：\n\n${template.intro}\n\n登录账号：${body.account}\n\n初始密码：${password}\n\n密码说明：${passwordNotice}\n\n${body.notes}`,html:''};
+                    const current=body.template_id===domain.id?domain:template;
+                    result={success:true,preview_token:'preview-token',subject:current.subject,recipient:body.to_email,cc_email:body.cc_email,text:`您好，${body.recipient_name}：\n\n${current.intro}\n\n登录账号：${body.account}\n\n初始密码：${password}\n\n密码说明：${current.domain_account?current.password_instruction:passwordNotice}\n\n${body.notes}`,html:''};
                     result.rows=[{text:result.text},{text:'使用教程：',href:body.tutorial_url,link_text:'查看配置教程'}];
                 }
                 if(endpoint==='/send'){
@@ -201,7 +211,33 @@ async function run() {
         await frame.locator('#uploadFile').click();
         await frame.locator('#attachmentList a').waitFor();
         assert.equal(await frame.locator('#attachmentList a').textContent(),'company.ovpn');
+        await frame.locator('#templateList').getByRole('button',{name:/域账号开通/}).click();
+        assert(await frame.locator('#templateAttachments').isHidden());
+        await frame.locator('#templateForm [name=password_instruction]').fill('登录 Windows 后按 Ctrl + Alt + Delete 更改密码。');
+        await frame.locator('#templateForm [name=initial_password]').fill('NewTestDefault12');
+        await frame.locator('#templateForm [type=submit]').click();
+        await page.waitForFunction(()=>document.querySelector('#accountNoticeFrame').contentDocument
+            .querySelector('#globalMessage').textContent.includes('模板已保存'));
         await frame.locator('[data-tab="send"]').click();
+        await frame.locator('#account').fill('vpn.manual');
+        await frame.locator('#composeTemplate').selectOption('domain-1');
+        await frame.locator('#temporaryPassword').filter({visible:true}).waitFor();
+        await page.waitForFunction(()=>document.querySelector('#accountNoticeFrame').contentDocument
+            .querySelector('#temporaryPassword').value==='NewTestDefault12');
+        assert.equal(await frame.locator('#account').inputValue(),'wfq101755');
+        assert(await frame.locator('#generatePassword').isHidden());
+        assert(await frame.locator('#login_url').isHidden());
+        assert.equal(await frame.locator('#cc_email').inputValue(),'');
+        await frame.locator('#temporaryPassword').fill('OneTimeTest12');
+        await frame.locator('#previewButton').click();
+        await frame.locator('#previewMailBody').filter({hasText:'OneTimeTest12'}).waitFor();
+        assert((await frame.locator('#previewMailBody').innerText()).includes('Ctrl + Alt + Delete'));
+        assert(await frame.locator('#provisionVpn').isHidden());
+        await frame.locator('[data-close="previewDialog"]').first().click();
+        await frame.locator('#composeTemplate').selectOption('template-1');
+        assert.equal(await frame.locator('#account').inputValue(),'vpn.manual');
+        assert.equal(await frame.locator('#temporaryPassword').inputValue(),'CustomTestPassword2!');
+        assert(await frame.locator('#generatePassword').isVisible());
         const png=await page.screenshot();assert(png.length>10000);
         await page.reload();
         await frame.locator('#composeTemplate').waitFor();
@@ -220,7 +256,7 @@ async function run() {
         await page.waitForFunction(()=>document.getElementById('loginUser').textContent.includes('admin'));
         assert(await page.locator('#accountNoticeMenu').isHidden());
         assert.deepEqual(errors,[]);
-        console.log('PASS account notice: visible notes preview without iframe loading, uniform password notice, password generation, pinyin, CC, delivery and mobile layout');
+        console.log('PASS account notice: AD template defaults/editing, VPN behavior, preview, delivery and mobile layout');
     } finally {await browser.close();}
 }
 run().catch(e=>{console.error(e);process.exitCode=1;});

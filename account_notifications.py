@@ -1,4 +1,5 @@
 """Account notices; plaintext passwords are never saved in delivery records."""
+import base64
 import hashlib
 import hmac
 import html
@@ -16,6 +17,7 @@ from http.client import HTTPSConnection, HTTPException
 from urllib.parse import urlsplit
 
 import ldap3
+from cryptography.fernet import Fernet, InvalidToken
 from flask import Blueprint, current_app, jsonify, request, send_file, session
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from ldap3.utils.conv import escape_filter_chars
@@ -27,6 +29,8 @@ MAX_ATTACHMENT = 2 * 1024 * 1024
 MAX_TOTAL = 5 * 1024 * 1024
 DEFAULT_CC_EMAIL = 'yuanyujie@shunhs.cn'
 PASSWORD_NOTICE = '请妥善保管此密码，请勿向他人透露或转发。'
+DOMAIN_TEMPLATE_NAME = '域账号开通'
+DOMAIN_PASSWORD_NOTICE = '此密码为初始密码。登录 Windows 后，请按 Ctrl + Alt + Delete，选择「更改密码」，并尽快设置自己的密码。'
 VPN_TEMPLATE_ID = '8a92f00a-dcb8-4c27-8638-000000000001'
 URL_FIELDS = ('login_url', 'tutorial_url', 'download_url')
 TEMPLATE_FIELDS = ('name', 'system_name', 'subject', 'intro', *URL_FIELDS, 'password_instruction')
@@ -131,6 +135,10 @@ def notice_password(value):
     return value
 
 
+def domain_template(row):
+    return row is not None and row.id != VPN_TEMPLATE_ID and row.name == DOMAIN_TEMPLATE_NAME
+
+
 def define_models(db):
     class NoticeTemplate(db.Model):
         __tablename__ = 'account_notice_template'
@@ -225,10 +233,18 @@ def render_notice(snapshot, test=False, password=''):
     return '\n\n'.join(row['text'] + row.get('href', '') for row in rows), body, rows
 
 
-def register_notifications(app, db, models, current_user, touch_session, get_ad_connection, audit):
+def register_notifications(app, db, models, current_user, touch_session, get_ad_connection, audit,
+                           get_setting, set_setting):
     Template, Attachment, Delivery = models
     bp = Blueprint('account_notifications', __name__, url_prefix='/api/admin/account-notifications')
     signer = URLSafeTimedSerializer(app.secret_key, salt='account-notification-preview-v1')
+
+    def initial_password_key(row):
+        return f'account_notice_initial_password:{row.id}'
+
+    def initial_password_cipher(row):
+        key = hmac.digest(app.secret_key.encode(), initial_password_key(row).encode(), 'sha256')
+        return Fernet(base64.urlsafe_b64encode(key))
 
     def password_digest(value):
         return hmac.new(app.secret_key.encode(), value.encode(), hashlib.sha256).hexdigest() if value else ''
@@ -269,11 +285,20 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
         return row
 
     def files(row):
+        if domain_template(row):
+            return []
         return Attachment.query.filter_by(template_id=row.id).order_by(Attachment.id).all()
+
+    def password_instruction(row):
+        if domain_template(row):
+            return (row.password_instruction if row.password_instruction not in ('', PASSWORD_NOTICE)
+                    else DOMAIN_PASSWORD_NOTICE)
+        return PASSWORD_NOTICE
 
     def public_template(row):
         return dict(id=row.id, active=row.active, version=row.version,
-            **{key: PASSWORD_NOTICE if key == 'password_instruction' else getattr(row, key) for key in TEMPLATE_FIELDS},
+            **({'domain_account': True} if domain_template(row) else {}),
+            **{key: password_instruction(row) if key == 'password_instruction' else getattr(row, key) for key in TEMPLATE_FIELDS},
             attachments=[dict(id=f.id, filename=f.filename, size=len(f.content), private_key=f.private_key) for f in files(row)])
 
     def public_delivery(row):
@@ -305,21 +330,31 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
     def templates(ident=None):
         if request.method == 'GET':
             return jsonify(success=True, templates=[public_template(row) for row in Template.query.order_by(Template.name).all()])
-        value = data((*TEMPLATE_FIELDS, 'active', 'version'))
+        value = data((*TEMPLATE_FIELDS, 'active', 'version', 'initial_password'))
+        row = get_template(ident) if ident else None
+        is_domain = domain_template(row) or (ident != VPN_TEMPLATE_ID and value.get('name') == DOMAIN_TEMPLATE_NAME)
+        initial_password = notice_password(value.get('initial_password', ''))
+        if initial_password and (not is_domain or len(initial_password.encode()) > 256):
+            raise NoticeError('默认初始密码只适用于域账号开通模板，最多 128 个字符且不超过 256 字节')
         cleaned = {}
         for key in TEMPLATE_FIELDS:
             if key == 'password_instruction':
-                cleaned[key] = PASSWORD_NOTICE
+                hint = text(value.get(key, ''), 500) if is_domain else ''
+                cleaned[key] = (hint or DOMAIN_PASSWORD_NOTICE) if is_domain else PASSWORD_NOTICE
                 continue
-            limit = 4000 if key == 'intro' else 500 if key == 'password_instruction' else 200 if key == 'subject' else 120
+            if is_domain and key in URL_FIELDS:
+                cleaned[key] = getattr(row, key) if row else ''
+                continue
+            limit = 4000 if key == 'intro' else 200 if key == 'subject' else 120
             cleaned[key] = web_url(value.get(key, '')) if key in URL_FIELDS else text(
                 value.get(key, ''), 80 if key == 'name' else limit,
                 required=key in ('name', 'system_name', 'subject', 'intro'), multiline=key == 'intro')
+        if is_domain:
+            cleaned['name'] = DOMAIN_TEMPLATE_NAME
         active = value.get('active', True)
         if not isinstance(active, bool):
             raise NoticeError('模板启用状态不正确')
         if ident:
-            row = get_template(ident)
             if type(value.get('version')) is not int or value['version'] < 1:
                 raise NoticeError('模板版本不正确，请刷新后重试')
             count = Template.query.filter_by(id=ident, version=value.get('version')).update(
@@ -330,14 +365,34 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
         else:
             row = Template(id=str(uuid.uuid4()), active=active, **cleaned)
             db.session.add(row)
+        if initial_password:
+            encrypted = initial_password_cipher(row).encrypt(initial_password.encode()).decode('ascii')
+            set_setting(initial_password_key(row), encrypted)
         db.session.commit()
         db.session.expire_all()
         audit('保存账号通知模板', 'SYSTEM', f'模板:{row.id}', request.remote_addr)
         return jsonify(success=True, template=public_template(get_template(row.id)))
 
+    @bp.post('/templates/<ident>/initial-password')
+    def load_initial_password(ident):
+        row = get_template(ident)
+        if not domain_template(row) or not row.active:
+            raise NoticeError('此模板不提供默认初始密码', 404)
+        encrypted = get_setting(initial_password_key(row), '')
+        try:
+            password = (initial_password_cipher(row).decrypt(encrypted.encode('ascii')).decode() if encrypted
+                        else os.environ.get('AD_PRECREATE_DEFAULT_PASSWORD', app.config.get('AD_PRECREATE_DEFAULT_PASSWORD', '')))
+        except (InvalidToken, UnicodeError):
+            raise NoticeError('默认初始密码无法读取，请在模板中重新保存', 409) from None
+        response = jsonify(success=True, password=notice_password(password))
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+
     @bp.post('/templates/<ident>/attachments')
     def upload(ident):
         row = get_template(ident)
+        if domain_template(row):
+            raise NoticeError('域账号开通模板不发送附件')
         value = request.files.get('file')
         if not value:
             raise NoticeError('请选择附件')
@@ -443,17 +498,23 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
             raise NoticeError('模板已停用或变更，请重新选择模板', 409)
         snapshot = dict(template_id=row.id, version=row.version, system_name=row.system_name,
                         subject=row.subject, intro=row.intro)
+        is_domain = domain_template(row)
         for key in FORM_FIELDS:
             if key == 'password_instruction':
-                snapshot[key] = PASSWORD_NOTICE
+                snapshot[key] = password_instruction(row)
                 continue
             raw = value.get(key, '')
+            if is_domain and key in URL_FIELDS:
+                snapshot[key] = ''
+                continue
+            if is_domain and key == 'account':
+                raw = snapshot['employee_id'] or raw
             if key == 'cc_email':
                 snapshot[key] = email_address(raw) if raw else ''
                 continue
             snapshot[key] = (email_address(raw) if key == 'to_email' else web_url(raw) if key in URL_FIELDS else
-                text(raw, 1000 if key == 'notes' else 500 if key == 'password_instruction' else 64 if key == 'employee_id' else 120,
-                     required=key in ('recipient_name', 'account', 'password_instruction'), multiline=key == 'notes'))
+                text(raw, 1000 if key == 'notes' else 64 if key == 'employee_id' else 120,
+                     required=key in ('recipient_name', 'account'), multiline=key == 'notes'))
         snapshot['attachments'] = [dict(id=f.id, filename=f.filename, digest=hashlib.sha256(f.content).hexdigest()) for f in files(row)]
         snapshot['password_included'] = bool(password)
         plain, body, rows = render_notice(snapshot, password=password)
