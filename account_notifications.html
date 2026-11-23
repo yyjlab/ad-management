@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>账号通知</title>
+<style>
+:root{font-family:"Microsoft YaHei",system-ui,sans-serif;color:#263449;background:#f0f2f5;font-size:14px;color-scheme:light}*{box-sizing:border-box}body{margin:0}button,input,select,textarea{font:inherit}button{cursor:pointer;border:1px solid #d5dfeb;background:white;color:#34465e;padding:9px 16px;border-radius:6px;white-space:nowrap}button:hover{border-color:#1677ff;color:#1269df}button:disabled{opacity:.55;cursor:not-allowed}.primary{background:#1677ff;color:white;border-color:#1677ff}.primary:hover{color:white;background:#0967df}.danger{color:#c43d4c}.quiet{background:transparent}h1{font-size:24px;margin:0 0 7px}h2{font-size:17px;margin:0}p{margin:0;line-height:1.6}.muted,small{color:#718198}.header{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:22px}.sender{font-size:12px;text-align:right}.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#1caa82;margin-right:6px}.dot.off{background:#e19a24}.tabs{display:flex;gap:24px;border-bottom:1px solid #dce4ee;margin-bottom:22px}.tab{border:0;border-radius:0;background:none;padding:11px 2px;color:#718198;border-bottom:3px solid transparent}.tab[aria-selected=true]{color:#1677ff;border-bottom-color:#1677ff;font-weight:700}.pane[hidden],[hidden]{display:none!important}.notice{padding:12px 15px;border-radius:6px;background:#eaf3ff;color:#245b9b;margin-bottom:18px;overflow-wrap:anywhere}.notice.error{background:#fff0f0;color:#b72e3f}.notice.good{background:#e9f8f2;color:#167957}.form-layout{display:grid;grid-template-columns:minmax(0,1fr) 280px;gap:24px}.surface{background:white;border:1px solid #e0e7f0;border-radius:8px;padding:22px}.section-title{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:19px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:17px 20px}.full{grid-column:1/-1}label.field{display:flex;flex-direction:column;gap:7px;min-width:0}input:not([type=checkbox]),select,textarea{width:100%;min-width:0;border:1px solid #ccd7e4;background:white;color:#263449;border-radius:6px;padding:10px 11px;outline:none}input:focus,select:focus,textarea:focus{border-color:#1677ff;box-shadow:0 0 0 3px #1677ff16}textarea{resize:vertical;min-height:86px;line-height:1.55}input[type=checkbox]{width:16px;height:16px;accent-color:#1677ff;flex:0 0 auto}.inline{display:flex;gap:10px;align-items:center}.actions{display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;margin-top:22px}.divider{height:1px;background:#e8edf4;margin:22px 0}.aside-step{display:flex;gap:12px;margin:20px 0}.step{width:25px;height:25px;flex:0 0 auto;border:1px solid #c9dcfa;background:#edf4ff;color:#1768dd;text-align:center;line-height:23px;border-radius:6px}.aside-step strong{display:block;margin-bottom:5px}.aside-step p{color:#718198;font-size:12px}.results{border:1px solid #dce5ef;border-radius:6px;margin-top:9px;max-height:220px;overflow:auto}.result{display:block;width:100%;border:0;border-bottom:1px solid #edf1f6;border-radius:0;text-align:left;white-space:normal;padding:11px 13px}.result:last-child{border-bottom:0}.result small{display:block;margin-top:4px;overflow-wrap:anywhere}.template-layout{display:grid;grid-template-columns:230px minmax(0,1fr);gap:22px}.template-list button{display:block;width:100%;text-align:left;margin-bottom:8px;white-space:normal}.template-list button.selected{border-color:#1677ff;background:#edf4ff;color:#1269df}.template-list small{display:block;margin-top:5px}.pill{display:inline-block;padding:3px 8px;border-radius:4px;background:#eaf3ff;color:#2465ba;font-size:12px}.pill.submitted{background:#e5f7ef;color:#147d55}.pill.failed{background:#fff0f0;color:#bd3447}.pill.unknown,.pill.sending{background:#fff6df;color:#926313}.file-row{display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:1px solid #edf1f6;padding:12px 0}.file-row a{color:#1768dd;text-decoration:none;overflow-wrap:anywhere}.file-row small{display:block;margin-top:5px}.upload{margin-top:14px;flex-wrap:wrap}.upload input{flex:1}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;white-space:nowrap}th{text-align:left;font-size:12px;color:#718198;background:#f7f9fc}th,td{padding:14px 12px;border-bottom:1px solid #e8edf4}td small{display:block;margin-top:5px}.empty{text-align:center;padding:48px 15px;color:#718198}.pagination{justify-content:flex-end;margin-top:18px}.checkbox{display:flex;align-items:flex-start;gap:8px;line-height:1.6}.checkbox input{margin:3px 0 0}dialog{width:min(820px,calc(100% - 28px));max-height:calc(100dvh - 40px);border:1px solid #dbe4ef;padding:0;border-radius:8px;color:#263449}dialog::backdrop{background:#172b4655}.modal-head{padding:18px 22px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #e6ecf4}.close{font-size:23px;line-height:1;padding:4px 8px;border:0}.modal-body{padding:22px}.modal-footer{padding:17px 22px;border-top:1px solid #e6ecf4;display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap}.preview-frame{width:100%;height:360px;border:1px solid #e0e7f0;border-radius:6px;background:#fff;margin:15px 0}.detail{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;line-height:1.9}.link-button{border:0;background:none;color:#1677ff;padding:4px 7px}.hint{font-size:12px;line-height:1.6;color:#718198;margin-top:8px}#testEmail{max-width:280px}#globalMessage:empty{display:none}@media(max-width:960px){.form-layout{grid-template-columns:1fr}.send-aside{display:none}.template-layout{grid-template-columns:180px minmax(0,1fr)}}@media(max-width:600px){.header{align-items:flex-start}.sender{max-width:160px;overflow-wrap:anywhere}.grid,.template-layout{grid-template-columns:1fr}.surface{padding:16px}.template-list{display:flex;gap:8px;overflow:auto}.template-list button{min-width:150px;margin:0}.tabs{gap:20px}.inline.search{flex-wrap:wrap}.inline.search input{flex:1;min-width:150px}.preview-frame{height:300px}.modal-body{padding:16px}.actions button{flex:1}.header p{font-size:12px}}
+</style>
+</head>
+<body>
+<header class="header"><div><h1>账号通知</h1><p class="muted">开通账号后，把使用信息一次发给同事。</p></div><div class="sender" id="mailStatus">正在读取邮件配置…</div></header>
+<nav class="tabs" role="tablist" aria-label="账号通知"><button class="tab" role="tab" aria-selected="true" data-tab="send">发送通知</button><button class="tab" role="tab" aria-selected="false" data-tab="templates">通知模板</button><button class="tab" role="tab" aria-selected="false" data-tab="history">发送记录</button></nav>
+<div id="globalMessage" class="notice" role="status"></div>
+<section class="pane" id="pane-send">
+<div class="form-layout"><form id="sendForm" class="surface">
+<div class="section-title"><h2>填写通知</h2><span class="pill">人工确认发送</span></div>
+<div class="grid">
+<label class="field full">通知模板<select id="composeTemplate" required><option value="">正在加载…</option></select></label>
+<div class="full"><label for="employeeSearch">查找同事</label><div class="inline search" style="margin-top:7px"><input id="employeeSearch" placeholder="姓名或工号，至少 2 个字符" maxlength="80"><button type="button" id="searchEmployee">查询 AD</button></div><div id="employeeResults" class="results" hidden></div></div>
+<label class="field">使用人姓名<input id="recipient_name" maxlength="120" required autocomplete="off"></label>
+<label class="field">收件邮箱<input id="to_email" type="email" maxlength="254" required autocomplete="off"></label>
+<label class="field">登录账号<input id="account" maxlength="120" required autocomplete="off"></label>
+<label class="field">员工工号（可选）<input id="employee_id" maxlength="64" autocomplete="off"></label>
+<label class="field full">密码使用说明<input id="password_instruction" maxlength="500" required placeholder="例如：使用现有密码，或由 IT 单独提供"></label>
+<label class="field full">登录地址（可选）<input id="login_url" type="url" maxlength="1000" placeholder="https://"></label>
+<label class="field">使用教程（可选）<input id="tutorial_url" type="url" maxlength="1000" placeholder="https://"></label>
+<label class="field">客户端下载（可选）<input id="download_url" type="url" maxlength="1000" placeholder="https://"></label>
+<label class="field full">补充说明（可选）<textarea id="notes" maxlength="1000" rows="3"></textarea></label>
+</div><div class="hint" id="composeFiles"></div><div class="actions"><button class="primary" id="previewButton" type="submit">预览通知</button></div>
+</form><aside class="surface send-aside"><div class="section-title"><h2>通知摘要</h2><button class="link-button" onclick="tab('templates')">编辑模板</button></div><p class="hint">系统</p><p id="summarySystem">—</p><div class="divider"></div><p class="hint">邮件主题</p><p id="summarySubject">—</p><div class="divider"></div><p class="hint">附件</p><p id="summaryAttachments" style="overflow-wrap:anywhere">无</p><div class="divider"></div><p class="hint">仅发送通知，不会创建账号或修改密码。</p></aside></div>
+</section>
+<section class="pane" id="pane-templates" hidden>
+<div class="section-title"><h2>通知模板</h2><button id="newTemplate">＋ 新建模板</button></div><div class="template-layout"><div class="template-list" id="templateList"></div><div class="surface"><form id="templateForm"><div class="grid">
+<label class="field">模板名称<input name="name" maxlength="80" required></label><label class="field">系统名称<input name="system_name" maxlength="120" required></label>
+<label class="field full">邮件主题<input name="subject" maxlength="200" required></label><label class="field full">开通说明<textarea name="intro" maxlength="4000" required rows="3"></textarea></label>
+<label class="field full">密码使用说明<input name="password_instruction" maxlength="500" placeholder="不要填写实际密码"></label>
+<label class="field full">登录地址<input name="login_url" type="url" maxlength="1000"></label><label class="field">使用教程<input name="tutorial_url" type="url" maxlength="1000"></label><label class="field">客户端下载<input name="download_url" type="url" maxlength="1000"></label>
+<label class="checkbox full"><input name="active" type="checkbox" checked>启用此模板</label></div><div class="actions"><button type="submit" class="primary">保存模板</button></div></form>
+<div class="divider"></div><h2>随邮件发送的附件</h2><p class="hint">支持共用 .ovpn 配置或 PDF 教程。最多 3 个，单个 2 MiB，总计 5 MiB。</p><div id="attachmentList"></div><div class="inline upload"><input type="file" id="attachmentFile" accept=".ovpn,.pdf" aria-label="选择邮件附件"><button id="uploadFile">上传附件</button></div><p class="hint">OVPN 如含私钥，只应发给被授权使用该配置的人员。</p></div></div>
+</section>
+<section class="pane surface" id="pane-history" hidden><div class="section-title"><h2>发送记录</h2><button id="refreshHistory">刷新记录</button></div><div class="table-wrap"><table><thead><tr><th>发送时间</th><th>同事 / 收件邮箱</th><th>系统 / 账号</th><th>结果</th><th>操作人</th><th>操作</th></tr></thead><tbody id="historyBody"><tr><td colspan="6" class="empty">正在加载…</td></tr></tbody></table></div><div class="inline pagination"><span class="muted" id="historyPage"></span><button id="prevPage">上一页</button><button id="nextPage">下一页</button></div></section>
+<dialog id="previewDialog"><div class="modal-head"><h2>确认账号通知</h2><button class="close" data-close="previewDialog" aria-label="关闭预览">×</button></div><div class="modal-body"><p id="previewRecipient"></p><p class="hint" id="previewSubject"></p><iframe class="preview-frame" id="emailPreview" title="邮件内容预览" sandbox=""></iframe><div class="inline"><input id="testEmail" type="email" maxlength="254" placeholder="测试收件邮箱" aria-label="测试收件邮箱"><button id="sendTest">发送测试</button></div><p class="hint" id="sendResult" role="status"></p><div class="divider"></div><label class="checkbox"><input type="checkbox" id="confirmOpened">我已开通该账号，并核对收件邮箱和附件。</label></div><div class="modal-footer"><button data-close="previewDialog">返回修改</button><button id="confirmSend" class="primary" disabled>确认发送给同事</button></div></dialog>
+<dialog id="detailDialog"><div class="modal-head"><h2>发送详情</h2><button class="close" data-close="detailDialog" aria-label="关闭详情">×</button></div><div class="modal-body"><pre class="detail" id="deliveryDetail"></pre></div><div class="modal-footer"><button data-close="detailDialog">关闭</button></div></dialog>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const base = '/api/admin/account-notifications';
+const fields = ['employee_id','recipient_name','to_email','account','notes','login_url','tutorial_url','download_url','password_instruction'];
+const templateFields = ['name','system_name','subject','intro','login_url','tutorial_url','download_url','password_instruction'];
+const state = {csrf:'',templates:[],edit:null,preview:null,keys:{},page:1,total:0,rows:[],sending:false,ready:false};
+const labels = {submitted:'已提交邮件服务器',failed:'发送失败',unknown:'结果待确认',sending:'发送中'};
+function show(message,kind=''){const el=$('globalMessage');el.textContent=message;el.className='notice '+kind;}
+async function api(path,options={}) {
+    const headers = {...options.headers};
+    if(options.method && options.method !== 'GET') headers['X-CSRF-Token']=state.csrf;
+    if(options.body && !(options.body instanceof FormData)){headers['Content-Type']='application/json';options.body=JSON.stringify(options.body);}
+    const response=await fetch(base+path,{...options,headers,credentials:'same-origin'});
+    let result;try{result=await response.json();}catch{throw new Error('服务响应异常，请稍后刷新记录确认。');}
+    if(response.status===401){window.top.location.href='/admin';throw new Error('请重新登录');}
+    if(!response.ok) throw new Error(result.message || '请求失败');
+    return result;
+}
+function element(tag,text,cls){const el=document.createElement(tag);if(text!==undefined)el.textContent=text;if(cls)el.className=cls;return el;}
+function uuid(){const a=crypto.getRandomValues(new Uint8Array(16));a[6]=(a[6]&15)|64;a[8]=(a[8]&63)|128;const h=[...a].map(n=>n.toString(16).padStart(2,'0')).join('');return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;}
+function template(){return state.templates.find(t=>t.id===$('composeTemplate').value);}
+function invalidate(){state.preview=null;state.keys={};$('confirmOpened').checked=false;$('confirmSend').disabled=true;}
+function tab(name){document.querySelectorAll('[data-tab]').forEach(b=>b.setAttribute('aria-selected',String(b.dataset.tab===name)));document.querySelectorAll('.pane').forEach(p=>p.hidden=p.id!=='pane-'+name);history.replaceState(null,'','#'+name);show('');if(name==='history')loadHistory();}
+document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>tab(b.dataset.tab));
+document.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>$(b.dataset.close).close());
+function summary(){const t=template();$('summarySystem').textContent=t?.system_name||'—';$('summarySubject').textContent=t?.subject||'—';$('summaryAttachments').textContent=t?.attachments.map(f=>f.filename).join('、')||'无';}
+function applyTemplate(){invalidate();summary();const t=template();if(!t)return;['login_url','tutorial_url','download_url','password_instruction'].forEach(k=>$(k).value=t[k]);$('composeFiles').textContent=t.attachments.length?'随附：'+t.attachments.map(f=>f.filename).join('、'):'此模板暂无附件';}
+function renderTemplates(keep=true){
+    const selected=$('composeTemplate').value;$('composeTemplate').replaceChildren();
+    for(const t of state.templates.filter(t=>t.active)){const o=element('option',t.name);o.value=t.id;$('composeTemplate').append(o);}
+    if(!state.templates.some(t=>t.active)){$('composeTemplate').append(element('option','暂无启用模板'));$('composeTemplate').firstChild.value='';}
+    if(keep&&state.templates.some(t=>t.id===selected&&t.active))$('composeTemplate').value=selected;
+    $('templateList').replaceChildren();
+    for(const t of state.templates){const b=element('button',t.name,t.id===state.edit?.id?'selected':'');b.append(element('small',t.system_name+(t.active?'':' · 已停用')));b.onclick=()=>editTemplate(t);$('templateList').append(b);}
+    $('previewButton').disabled=!template();summary();
+}
+async function loadTemplates(){state.templates=(await api('/templates')).templates;renderTemplates();}
+function editTemplate(t){state.edit=t||null;const form=$('templateForm');form.reset();for(const k of templateFields)form.elements[k].value=t?.[k]||'';form.elements.active.checked=t?.active!==false;renderTemplates();renderAttachments();}
+function renderAttachments(){
+    $('attachmentList').replaceChildren();$('uploadFile').disabled=!state.edit;$('attachmentFile').disabled=!state.edit;
+    if(!state.edit){$('attachmentList').append(element('p','先保存模板，再上传附件。','hint'));return;}
+    for(const f of state.edit.attachments){const row=element('div',undefined,'file-row');const info=element('div');const a=element('a',f.filename);a.href=base+'/attachments/'+f.id;info.append(a,element('small',`${(f.size/1024).toFixed(1)} KiB`+(f.private_key?' · 含私钥，请核对授权范围':'')));const b=element('button','移除','danger');b.onclick=async()=>{if(!confirm('从模板移除此附件？已发送的邮件不会撤回。'))return;b.disabled=true;try{await api('/attachments/'+f.id,{method:'DELETE'});await refreshEdited();show('附件已移除','good');}catch(e){show(e.message,'error');}finally{b.disabled=false;}};row.append(info,b);$('attachmentList').append(row);}
+}
+async function refreshEdited(){const id=state.edit?.id;await loadTemplates();editTemplate(state.templates.find(t=>t.id===id));invalidate();}
+$('composeTemplate').onchange=applyTemplate;
+$('sendForm').addEventListener('input',invalidate);
+$('searchEmployee').onclick=async()=>{
+    const query=$('employeeSearch').value.trim();if(query.length<2){show('请输入至少 2 个字或字符','error');return;}
+    const b=$('searchEmployee');b.disabled=true;$('employeeResults').hidden=true;
+    try{const data=await api('/recipients?q='+encodeURIComponent(query));$('employeeResults').replaceChildren();
+        if(!data.recipients.length)$('employeeResults').append(element('div','未找到，可直接手动填写。','empty'));
+        for(const p of data.recipients){const item=element('button',`${p.name} · ${p.employee_id}`,'result');item.type='button';item.append(element('small',[p.department,p.email||'未填写邮箱'].filter(Boolean).join(' · ')));item.onclick=()=>{invalidate();$('recipient_name').value=p.name;$('employee_id').value=p.employee_id;$('account').value=p.employee_id;$('to_email').value=p.email;$('employeeResults').hidden=true;};$('employeeResults').append(item);}
+        $('employeeResults').hidden=false;show('');
+    }catch(e){show(e.message,'error');}finally{b.disabled=false;}
+};
+$('employeeSearch').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();$('searchEmployee').click();}};
+$('sendForm').onsubmit=async e=>{
+    e.preventDefault();const t=template();if(!t)return;const b=$('previewButton');b.disabled=true;$('sendTest').disabled=false;
+    try{const data=await api('/preview',{method:'POST',body:{template_id:t.id,version:t.version,...Object.fromEntries(fields.map(k=>[k,$(k).value.trim()]))}});state.preview=data;state.keys={};$('previewRecipient').textContent='收件人：'+$('recipient_name').value+' <'+data.recipient+'>';$('previewSubject').textContent='主题：'+data.subject;$('emailPreview').srcdoc=data.html;$('sendResult').textContent='';$('confirmOpened').checked=false;$('confirmSend').disabled=true;$('previewDialog').showModal();show('');}catch(err){show(err.message,'error');}finally{b.disabled=false;}
+};
+$('confirmOpened').onchange=()=>$('confirmSend').disabled=!$('confirmOpened').checked||state.sending||!state.preview;
+async function send(mode){
+    if(state.sending||!state.preview)return;
+    if(mode==='employee'&&!$('confirmOpened').checked)return;
+    if(mode==='test'&&!$('testEmail').reportValidity())return;
+    if(mode==='test'&&!$('testEmail').value.trim()){$('testEmail').focus();return;}
+    const target=mode==='test'?$('testEmail').value.trim():state.preview.recipient;
+    const intent=mode+':'+target;if(!state.keys[intent])state.keys[intent]=uuid();
+    state.sending=true;$('confirmSend').disabled=true;$('sendTest').disabled=true;$('sendResult').textContent='正在提交邮件服务器，请勿重复发送…';
+    try{const data=await api('/send',{method:'POST',body:{preview_token:state.preview.preview_token,request_key:state.keys[intent],mode,test_email:mode==='test'?target:'',confirm_text:'SEND'}});$('sendResult').textContent=(mode==='test'?'测试邮件：':'')+data.delivery.message;if(mode==='employee'){state.preview=null;show(data.delivery.message,data.success?'good':'error');}if(!data.success)show(data.delivery.message,'error');
+    }catch(e){$('sendResult').textContent=e.message+' 如发生网络中断，请先查看发送记录；重复点击不会另发一封。';show(e.message,'error');}
+    finally{state.sending=false;$('sendTest').disabled=!state.preview;$('confirmSend').disabled=!state.preview||!$('confirmOpened').checked;}
+}
+$('sendTest').onclick=()=>send('test');$('confirmSend').onclick=()=>send('employee');
+$('newTemplate').onclick=()=>editTemplate(null);
+$('templateForm').onsubmit=async e=>{e.preventDefault();const form=e.currentTarget,b=form.querySelector('[type=submit]');b.disabled=true;try{const body={...Object.fromEntries(templateFields.map(k=>[k,form.elements[k].value.trim()])),active:form.elements.active.checked};if(state.edit)body.version=state.edit.version;const result=await api('/templates'+(state.edit?'/'+state.edit.id:''),{method:'POST',body});await loadTemplates();editTemplate(result.template);invalidate();show('模板已保存','good');}catch(err){show(err.message,'error');}finally{b.disabled=false;}};
+$('uploadFile').onclick=async()=>{const f=$('attachmentFile').files[0];if(!f||!state.edit){show('请选择要上传的附件','error');return;}if(f.size>2097152){show('单个附件不能超过 2 MiB','error');return;}const b=$('uploadFile');b.disabled=true;try{const form=new FormData();form.append('file',f);await api('/templates/'+state.edit.id+'/attachments',{method:'POST',body:form});$('attachmentFile').value='';await refreshEdited();show('附件已保存','good');}catch(e){show(e.message,'error');}finally{b.disabled=!state.edit;}};
+function time(value){return new Date(value).toLocaleString('zh-CN',{hour12:false});}
+function detail(row){const s=row.snapshot;$('deliveryDetail').textContent=[`结果：${labels[row.status]||row.status}`,row.message,`时间：${time(row.created_at)}`,`操作人：${row.operator}`,`发送方式：${row.mode==='test'?'测试':'正式通知'}`,`收件邮箱：${row.to_email}`,`使用人：${s.recipient_name}`,`系统：${s.system_name}`,`账号：${s.account}`,`主题：${row.subject}`,`说明：${s.intro}`,`密码说明：${s.password_instruction}`,`登录地址：${s.login_url||'无'}`,`教程：${s.tutorial_url||'无'}`,`下载：${s.download_url||'无'}`,`附件：${s.attachments.map(f=>f.filename).join('、')||'无'}`,`补充说明：${s.notes||'无'}`,`记录编号：${row.id}`].join('\n');$('detailDialog').showModal();}
+function reedit(row){if(!confirm('将这条记录带回编辑。再次发送会产生一封新邮件，请先核对原邮件是否收到。'))return;const t=state.templates.find(t=>t.id===row.snapshot.template_id&&t.active);if(!t){show('原模板已停用，请启用模板后再编辑','error');return;}tab('send');$('composeTemplate').value=t.id;applyTemplate();for(const k of fields)$(k).value=row.snapshot[k]||'';show('已带回编辑，请核对内容并重新预览。');}
+async function loadHistory(){const b=$('refreshHistory');b.disabled=true;try{const data=await api('/deliveries?page='+state.page);state.rows=data.deliveries;state.total=data.total;$('historyBody').replaceChildren();if(!data.deliveries.length){const tr=element('tr'),td=element('td','暂无发送记录','empty');td.colSpan=6;tr.append(td);$('historyBody').append(tr);}for(const r of data.deliveries){const tr=element('tr');tr.append(element('td',time(r.created_at)));const recipient=element('td',r.snapshot.recipient_name);recipient.append(element('small',r.to_email));const account=element('td',r.snapshot.system_name);account.append(element('small',r.snapshot.account));const status=element('td');status.append(element('span',labels[r.status]||r.status,'pill '+r.status));if(r.mode==='test')status.append(element('small','测试'));const ops=element('td'),view=element('button','详情','link-button'),edit=element('button','重新编辑','link-button');view.onclick=()=>detail(r);edit.onclick=()=>reedit(r);ops.append(view,edit);tr.append(recipient,account,status,element('td',r.operator),ops);$('historyBody').append(tr);}$('historyPage').textContent=`共 ${data.total} 条 · 第 ${state.page} 页`;$('prevPage').disabled=state.page<=1;$('nextPage').disabled=state.page*20>=data.total;}catch(e){show(e.message,'error');}finally{b.disabled=false;}}
+$('refreshHistory').onclick=loadHistory;$('prevPage').onclick=()=>{if(state.page>1){state.page--;loadHistory();}};$('nextPage').onclick=()=>{if(state.page*20<state.total){state.page++;loadHistory();}};
+async function init(){try{const config=await api('/config');state.csrf=config.csrf_token;state.ready=true;$('mailStatus').replaceChildren(element('span',undefined,'dot'+(config.mail_ready?'':' off')),document.createTextNode(config.mail_ready?'SMTP 已配置':'SMTP 未配置'),element('p',config.sender||'复用系统邮件配置','hint'));await loadTemplates();applyTemplate();editTemplate(state.templates[0]);const name=location.hash.slice(1);if(['templates','history'].includes(name))tab(name);if(!config.mail_ready)show('现有 SMTP 尚未配置完整，暂不能发送邮件。','error');}catch(e){show(e.message,'error');$('previewButton').disabled=true;}}
+init();
+</script>
+</body>
+</html>

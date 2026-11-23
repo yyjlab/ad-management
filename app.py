@@ -50,6 +50,7 @@ from ad_precreate import PrecreateDirectory, PrecreateError, account_ids, build_
 from ad_bulk_delete import (BulkDeleteDirectory, DAYS as BULK_DELETE_DAYS, LIMIT as BULK_DELETE_LIMIT,
                             blocked_reason, snapshot, entry_text as bulk_delete_entry_text)
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
+from account_notifications import define_models as define_notice_models, seed_templates as seed_notice_templates, register_notifications
 
 # ============================================================
 # 初始化 Flask 应用
@@ -84,6 +85,7 @@ def ensure_stable_secret_key():
 ensure_stable_secret_key()
 app.config.setdefault('SESSION_COOKIE_NAME', 'employee_register_admin_session')
 db = SQLAlchemy(app)
+account_notice_models = define_notice_models(db)
 
 limiter = Limiter(
     app=app,
@@ -364,6 +366,7 @@ def ensure_database_tables():
     """创建数据库表；gunicorn多worker同时启动时，表已存在就跳过。"""
     try:
         db.create_all()
+        seed_notice_templates(db, account_notice_models)
         bootstrap_super_admin()
         set_default_setting('company_name', app.config.get('COMPANY_NAME', '微丰启'))
         set_default_setting('admin_title', app.config.get('ADMIN_TITLE', 'IT管理后台'))
@@ -5301,6 +5304,11 @@ from pc_deploy import register_pc_deploy
 
 pc_deploy_blueprint = register_pc_deploy(app, current_admin_user, touch_admin_session)
 limiter.exempt(pc_deploy_blueprint)
+
+account_notice_blueprint = register_notifications(
+    app, db, account_notice_models, current_admin_user, touch_admin_session,
+    lambda: get_ad_connection(), write_admin_action)
+limiter.exempt(account_notice_blueprint)
 
 
 if os.environ.get('DISABLE_INTERNAL_PASSWORD_SCHEDULER', '').lower() not in ('1', 'true', 'yes'):

@@ -163,7 +163,7 @@ async function run() {
     await page.goto('http://ad-menu.test/admin/manage');
     await page.locator('#pcDeployGroup').waitFor({state:'visible'});
     const names=(await page.locator('.sidebar .menu-item').allTextContents()).map(s=>s.replace(/[▸▾]/g,'').trim());
-    assert.deepEqual(names,['数据概览','AD用户管理','计算机管理','域密码策略','组策略管理','密码到期提醒','日志中心','审批中心','用户中心','登录审计','系统设置','备份恢复','电脑装机']);checks++;
+    assert.deepEqual(names,['数据概览','AD用户管理','计算机管理','域密码策略','组策略管理','密码到期提醒','日志中心','审批中心','用户中心','登录审计','系统设置','备份恢复','电脑装机','账号通知']);checks++;
     assert.equal(requests.filter(p=>p.startsWith('/pc-deploy/')).length,0);checks++;
     assert.ok(await page.locator('#pcDeploySubmenu').isHidden());checks++;
     await page.locator('#pcDeployMenu').click();

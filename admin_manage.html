@@ -19,6 +19,7 @@
         .menu-item:hover { background: #f5f7fb; }
         .menu-item.active { color: #1677ff; background: #e6f4ff; font-weight: 700; }
         .content { flex: 1; min-width: 0; padding: 24px; }
+        #accountNoticeFrame { display:block; width:100%; height:calc(100vh - 110px); min-height:620px; border:0; }
         .page { display: none; }
         .page.active { display: block; }
         .page-head { display: flex; justify-content: space-between; gap: 16px; align-items: center; margin-bottom: 18px; }
@@ -211,6 +212,7 @@
                 <button class="pc-deploy-subitem" data-deploy-view="settings" onclick="openPcDeploy('settings')">启动与设置</button>
             </div>
         </div>
+        <button class="menu-item" id="accountNoticeMenu" data-page="accountNotifications" style="display:none;" onclick="switchPage('accountNotifications')">账号通知</button>
     </aside>
 
     <main class="content">
@@ -480,6 +482,9 @@
         <section class="page" id="page-pcDeploy" aria-label="电脑装机">
             <iframe id="pcDeployFrame" title="电脑装机工作台"></iframe>
         </section>
+        <section class="page" id="page-accountNotifications">
+            <iframe id="accountNoticeFrame" title="账号通知"></iframe>
+        </section>
     </main>
 </div>
 
@@ -591,12 +596,14 @@ async function checkLogin() {
         if (data.settings) document.querySelector('.title').textContent = `${data.settings.company_name} · ${data.settings.admin_title}`;
         applyPermissions();
         loadStats();
+        if (location.hash === '#accountNotifications') switchPage('accountNotifications');
     } catch (e) {
         redirectToLogin();
     }
 }
 
 function applyPermissions() {
+    document.getElementById('accountNoticeMenu').style.display = currentRole === 'super_admin' ? '' : 'none';
     document.querySelectorAll('[data-permission]').forEach(el => el.style.display = hasPerm(el.dataset.permission) ? '' : 'none');
     document.getElementById('createEmployeeButton').style.display = currentRole === 'super_admin' ? '' : 'none';
     document.getElementById('precreateEntryButton').style.display = currentRole === 'super_admin' ? '' : 'none';
@@ -611,6 +618,12 @@ function applyPermissions() {
 }
 
 function switchPage(page) {
+    if (page === 'accountNotifications' && currentRole !== 'super_admin') return;
+    if (page === 'accountNotifications') {
+        const frame = document.getElementById('accountNoticeFrame');
+        if (!frame.getAttribute('src')) frame.src = '/account_notifications.html';
+        history.replaceState(null, '', '#accountNotifications');
+    } else if (location.hash === '#accountNotifications') history.replaceState(null, '', location.pathname + location.search);
     if (['adPrecreate', 'adBulkDelete'].includes(page) && currentRole !== 'super_admin') return;
     if (page === 'endpointPolicy' && (currentRole !== 'super_admin' || !hasPerm('password_policy'))) return;
     if (page !== 'adPrecreate') { pausePrecreate(); hidePrecreatePassword(true); }
@@ -633,6 +646,7 @@ function switchPage(page) {
 }
 
 function openDashboard() {
+    if (location.hash === '#accountNotifications') history.replaceState(null, '', location.pathname + location.search);
     pausePrecreate(); hidePrecreatePassword();
     document.querySelectorAll('.menu-item').forEach(btn => btn.classList.toggle('active', btn.dataset.page === 'dashboard'));
     document.querySelectorAll('.page').forEach(el => el.classList.toggle('active', el.id === 'page-dashboard'));

@@ -9,6 +9,8 @@
 !gpo_endpoint_policy.py
 !ad_precreate.py
 !ad_bulk_delete.py
+!account_notifications.py
+!account_notifications.html
 !nginx.conf
 !index.html
 !admin.html

@@ -19,6 +19,7 @@
         .menu-item:hover { background: #f5f7fb; }
         .menu-item.active { color: #1677ff; background: #e6f4ff; font-weight: 700; }
         .content { flex: 1; min-width: 0; padding: 24px; }
+        #accountNoticeFrame { display:block; width:100%; height:calc(100vh - 110px); min-height:620px; border:0; }
         .page { display: none; }
         .page.active { display: block; }
         .page-head { display: flex; justify-content: space-between; gap: 16px; align-items: center; margin-bottom: 18px; }
@@ -142,6 +143,7 @@
         <button class="menu-item" data-page="audit" data-permission="manage_admins" onclick="switchPage('audit')">登录审计</button>
         <button class="menu-item" data-page="settings" data-permission="system_settings" onclick="switchPage('settings')">系统设置</button>
         <button class="menu-item" data-page="backup" data-permission="system_settings" onclick="switchPage('backup')">备份恢复</button>
+        <button class="menu-item" id="accountNoticeMenu" data-page="accountNotifications" style="display:none;" onclick="switchPage('accountNotifications')">账号通知</button>
     </aside>
 
     <main class="content">
@@ -292,6 +294,9 @@
                 <div class="action-row" style="margin-top:16px;"><button class="btn btn-warning" onclick="restoreBackup()">恢复设置</button></div>
             </div>
         </section>
+        <section class="page" id="page-accountNotifications">
+            <iframe id="accountNoticeFrame" title="账号通知"></iframe>
+        </section>
     </main>
 </div>
 
@@ -403,12 +408,14 @@ async function checkLogin() {
         if (data.settings) document.querySelector('.title').textContent = `${data.settings.company_name} · ${data.settings.admin_title}`;
         applyPermissions();
         loadStats();
+        if (location.hash === '#accountNotifications') switchPage('accountNotifications');
     } catch (e) {
         redirectToLogin();
     }
 }
 
 function applyPermissions() {
+    document.getElementById('accountNoticeMenu').style.display = currentRole === 'super_admin' ? '' : 'none';
     document.querySelectorAll('[data-permission]').forEach(el => el.style.display = hasPerm(el.dataset.permission) ? '' : 'none');
     document.getElementById('createEmployeeButton').style.display = currentRole === 'super_admin' ? '' : 'none';
     if (currentRole === 'readonly') {
@@ -419,6 +426,12 @@ function applyPermissions() {
 }
 
 function switchPage(page) {
+    if (page === 'accountNotifications' && currentRole !== 'super_admin') return;
+    if (page === 'accountNotifications') {
+        const frame = document.getElementById('accountNoticeFrame');
+        if (!frame.getAttribute('src')) frame.src = '/account_notifications.html';
+        history.replaceState(null, '', '#accountNotifications');
+    } else if (location.hash === '#accountNotifications') history.replaceState(null, '', location.pathname + location.search);
     document.querySelectorAll('.menu-item').forEach(btn => btn.classList.toggle('active', btn.dataset.page === page));
     document.querySelectorAll('.page').forEach(el => el.classList.toggle('active', el.id === `page-${page}`));
     if (page === 'dashboard') loadStats();
@@ -433,6 +446,7 @@ function switchPage(page) {
 }
 
 function openDashboard() {
+    if (location.hash === '#accountNotifications') history.replaceState(null, '', location.pathname + location.search);
     document.querySelectorAll('.menu-item').forEach(btn => btn.classList.toggle('active', btn.dataset.page === 'dashboard'));
     document.querySelectorAll('.page').forEach(el => el.classList.toggle('active', el.id === 'page-dashboard'));
     loadStats();
