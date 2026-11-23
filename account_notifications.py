@@ -1,9 +1,10 @@
-"""Account notices only; plaintext passwords are never saved in delivery records."""
+"""Account notices; plaintext passwords are never saved in delivery records."""
 import hashlib
 import hmac
 import html
 import io
 import json
+import os
 import re
 import secrets
 import smtplib
@@ -11,6 +12,7 @@ import ssl
 import uuid
 from datetime import datetime, timedelta
 from email.message import EmailMessage
+from http.client import HTTPSConnection, HTTPException
 from urllib.parse import urlsplit
 
 import ldap3
@@ -24,6 +26,7 @@ MAX_ATTACHMENT = 2 * 1024 * 1024
 MAX_TOTAL = 5 * 1024 * 1024
 DEFAULT_CC_EMAIL = 'yuanyujie@shunhs.cn'
 PASSWORD_NOTICE = '请妥善保管此密码，请勿向他人透露或转发。'
+VPN_TEMPLATE_ID = '8a92f00a-dcb8-4c27-8638-000000000001'
 URL_FIELDS = ('login_url', 'tutorial_url', 'download_url')
 TEMPLATE_FIELDS = ('name', 'system_name', 'subject', 'intro', *URL_FIELDS, 'password_instruction')
 FORM_FIELDS = ('employee_id', 'recipient_name', 'to_email', 'cc_email', 'account', 'notes',
@@ -34,6 +37,46 @@ class NoticeError(ValueError):
     def __init__(self, message, status=400):
         super().__init__(message)
         self.status = status
+
+
+def vpn_connector():
+    token = os.environ.get('VPN_PROVISION_TOKEN', '')
+    try:
+        target = urlsplit(os.environ.get('VPN_PROVISION_ENDPOINT', ''))
+        port = target.port
+        if (not token or target.scheme != 'https' or not target.hostname or port == 0
+                or target.username is not None or target.query or target.fragment or not target.path
+                or target.path.startswith('/cgi-bin/luci/')):
+            return None
+    except ValueError:
+        return None
+    return target, token
+
+
+def provision_vpn(connector, username, password, request_id):
+    """Call an authenticated, create-only adapter; created requires router readback."""
+    target, token = connector
+    conn = HTTPSConnection(target.hostname, target.port, timeout=12, context=ssl.create_default_context())
+    try:
+        conn.request('POST', target.path, json.dumps(dict(username=username, password=password, request_id=request_id)),
+                     {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json', 'Accept': 'application/json'})
+        response = conn.getresponse()
+        if response.status in (401, 403):
+            return 'auth_failed'
+        data = json.loads(response.read(8193))
+        if not isinstance(data, dict) or data.get('request_id') != request_id or data.get('username') != username:
+            return 'unknown'
+        if response.status == 409 and data.get('status') == 'exists':
+            return 'exists'
+        if response.status in (200, 201) and data.get('status') == 'created' and data.get('verified') is True:
+            return 'created'
+        if response.status == 422 and data.get('status') == 'rejected':
+            return 'rejected'
+    except (OSError, HTTPException, ValueError):
+        pass
+    finally:
+        conn.close()
+    return 'unknown'
 
 
 def text(value, limit, required=False, multiline=False):
@@ -128,7 +171,7 @@ def define_models(db):
 def seed_templates(db, models):
     Template = models[0]
     for ident, name, system in (
-        ('8a92f00a-dcb8-4c27-8638-000000000001', 'VPN 开通', '公司 VPN'),
+        (VPN_TEMPLATE_ID, 'VPN 开通', '公司 VPN'),
         ('8a92f00a-dcb8-4c27-8638-000000000002', '通用账号开通', '业务系统'),
     ):
         if not db.session.get(Template, ident):
@@ -216,9 +259,13 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
 
     def public_delivery(row):
         status, message = row.status, row.message
-        if status == 'sending' and datetime.utcnow() - row.created_at > timedelta(minutes=5):
-            status, message = 'unknown', '发送进程未确认结果，请核对邮箱后决定是否重新发送'
         snapshot = json.loads(row.snapshot)
+        if status == 'sending' and datetime.utcnow() - row.created_at > timedelta(minutes=5):
+            status = 'unknown'
+            message = ('开通结果待确认，请先核对路由器和邮箱，不要重复提交' if snapshot.get('vpn_status') == 'pending'
+                       else '发送进程未确认结果，请核对邮箱后决定是否重新发送')
+        if snapshot.get('vpn_status') == 'created':
+            message = f'VPN 账号 {snapshot["account"]} 创建成功。{message}'
         return dict(id=row.id, operator=row.operator, mode=row.mode, to_email=row.to_email,
             cc_email=snapshot.get('cc_email', '') if row.mode == 'employee' else '',
             subject=row.subject, status=status, message=message,
@@ -231,7 +278,8 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
         ready = all(app.config.get(key) for key in ('MAIL_SERVER', 'MAIL_PORT', 'MAIL_USERNAME', 'MAIL_PASSWORD'))
         return jsonify(success=True, csrf_token=session['account_notice_csrf'], mail_ready=ready,
                        sender=app.config.get('MAIL_USERNAME', ''), operator=current_user().username,
-                       default_cc_email=DEFAULT_CC_EMAIL, password_notice=PASSWORD_NOTICE)
+                       default_cc_email=DEFAULT_CC_EMAIL, password_notice=PASSWORD_NOTICE,
+                       vpn_template_id=VPN_TEMPLATE_ID, vpn_provisioning_ready=vpn_connector() is not None)
 
     @bp.route('/templates', methods=['GET', 'POST'])
     @bp.route('/templates/<ident>', methods=['POST'])
@@ -396,7 +444,7 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
 
     @bp.post('/send')
     def send():
-        value = data(('preview_token', 'request_key', 'mode', 'test_email', 'confirm_text', 'password'))
+        value = data(('preview_token', 'request_key', 'mode', 'test_email', 'confirm_text', 'password', 'provision_vpn'))
         password = notice_password(value.get('password', ''))
         if value.get('confirm_text') != 'SEND':
             raise NoticeError('请先预览并确认收件人后发送')
@@ -414,13 +462,22 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
         mode = value.get('mode', 'employee')
         if mode not in ('employee', 'test'):
             raise NoticeError('发送方式不正确')
+        create_vpn = value.get('provision_vpn', False)
+        if type(create_vpn) is not bool or (create_vpn and (mode != 'employee' or snapshot['template_id'] != VPN_TEMPLATE_ID)):
+            raise NoticeError('只能通过 VPN 通知模板开通账号')
+        if create_vpn and (not password or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', snapshot['account'])):
+            raise NoticeError('开通 VPN 需要密码及 1～64 位英文账号（可含数字、点、下划线或短横线）')
         to = email_address(value.get('test_email', '')) if mode == 'test' else snapshot['to_email']
         cc = snapshot.get('cc_email', '') if mode == 'employee' else ''
-        fingerprint = hashlib.sha256(canonical(dict(snapshot=snapshot, mode=mode, to=to, password_digest=password_digest(password))).encode()).hexdigest()
+        intent = dict(snapshot=snapshot, mode=mode, to=to, password_digest=password_digest(password))
+        if create_vpn:
+            intent['provision_vpn'] = True
+        fingerprint = hashlib.sha256(canonical(intent).encode()).hexdigest()
         def replay(row):
             if row.fingerprint != fingerprint:
                 raise NoticeError('同一发送标识不能携带不同内容', 409)
-            return jsonify(success=True, replayed=True, delivery=public_delivery(row))
+            delivery = public_delivery(row)
+            return jsonify(success=not create_vpn or row.status == 'submitted', replayed=True, delivery=delivery, message=delivery['message'])
         existing = Delivery.query.filter_by(operator=operator, request_key=key).first()
         if existing:
             return replay(existing)
@@ -443,6 +500,11 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
         if Delivery.query.filter(Delivery.operator == operator,
                 Delivery.created_at > datetime.utcnow() - timedelta(minutes=1)).count() >= 10:
             raise NoticeError('发送过于频繁，请一分钟后再试', 429)
+        connector = vpn_connector() if create_vpn else None
+        if create_vpn and not connector:
+            raise NoticeError('路由器开通接入尚未配置，没有创建账号或发送邮件', 503)
+        if create_vpn:
+            snapshot['vpn_status'] = 'pending'
         row = Delivery(id=str(uuid.uuid4()), operator=operator, request_key=key, fingerprint=fingerprint,
             snapshot=canonical(snapshot), mode=mode, to_email=to,
             subject=('【测试】' if mode == 'test' else '') + snapshot['subject'])
@@ -453,13 +515,30 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
             db.session.rollback()
             return replay(Delivery.query.filter_by(operator=operator, request_key=key).one())
         try:
-            audit('发送账号通知' if mode == 'employee' else '测试账号通知', (snapshot['employee_id'] or 'MANUAL')[:20],
+            audit('开通 VPN 并通知' if create_vpn else '发送账号通知' if mode == 'employee' else '测试账号通知', (snapshot['employee_id'] or 'MANUAL')[:20],
                   f'记录:{row.id} | 收件:{to}', request.remote_addr)
         except Exception:
             db.session.rollback()
             row.status, row.message = 'failed', '审计记录保存失败，未发送邮件'
             db.session.commit()
             return jsonify(success=False, delivery=public_delivery(row), message=row.message), 500
+        if create_vpn:
+            vpn_status = provision_vpn(connector, snapshot['account'], password, row.id)
+            snapshot['vpn_status'] = vpn_status
+            row.snapshot = canonical(snapshot)
+            if vpn_status != 'created':
+                messages = {
+                    'exists': 'VPN 账号已存在，未覆盖密码，也未发送邮件。',
+                    'rejected': '路由器拒绝开通，未发送邮件。',
+                    'auth_failed': '路由器接入认证失败，请检查服务端配置。未发送邮件。',
+                    'unknown': 'VPN 开通结果未确认，未发送邮件。请先核对路由器，不要重复提交。',
+                }
+                row.status = 'unknown' if vpn_status == 'unknown' else 'failed'
+                row.message = messages[vpn_status]
+                db.session.commit()
+                return jsonify(success=False, delivery=public_delivery(row), message=row.message)
+            row.message = '正在提交邮件服务器'
+            db.session.commit()
         plain, body = render_notice(snapshot, mode == 'test', password=password)
         message = EmailMessage()
         message['From'], message['To'], message['Subject'] = sender, to, row.subject
@@ -490,8 +569,10 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
             db.session.commit()
         except Exception:
             db.session.rollback()
-            return jsonify(success=False, message='邮件可能已提交，但结果保存失败；请勿直接重复发送'), 503
-        return jsonify(success=row.status == 'submitted', delivery=public_delivery(row), message=row.message)
+            prefix = 'VPN 账号创建成功。' if create_vpn else ''
+            return jsonify(success=False, message=prefix + '邮件可能已提交，但结果保存失败；请勿直接重复发送'), 503
+        delivery = public_delivery(row)
+        return jsonify(success=row.status == 'submitted', delivery=delivery, message=delivery['message'])
 
     @bp.get('/deliveries')
     def deliveries():

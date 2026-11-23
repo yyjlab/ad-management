@@ -26,7 +26,7 @@ async function run() {
                 apiRequests++;
                 assert.equal(role,'super_admin');
                 if(req.method()!=='GET')assert.equal(req.headers()['x-csrf-token'],'test-csrf');
-                if(endpoint==='/config')result={success:true,csrf_token:'test-csrf',mail_ready:true,sender:'it@example.test',default_cc_email:'yuanyujie@shunhs.cn',password_notice:passwordNotice};
+                if(endpoint==='/config')result={success:true,csrf_token:'test-csrf',mail_ready:true,sender:'it@example.test',default_cc_email:'yuanyujie@shunhs.cn',password_notice:passwordNotice,vpn_template_id:'template-1',vpn_provisioning_ready:true};
                 if(endpoint==='/templates'&&req.method()==='GET')result={success:true,templates:[template]};
                 if(endpoint.startsWith('/templates/')&&req.method()==='POST'){
                     if(endpoint.endsWith('/attachments'))template={...template,version:template.version+1,attachments:[{id:'file-1',filename:'company.ovpn',size:35,private_key:false}]};
@@ -56,6 +56,7 @@ async function run() {
                     assert.equal(body.password,previewPassword);
                     const record={id:String(records.length+1),mode:body.mode,to_email:body.mode==='test'?body.test_email:seen.at(-1).to_email,
                         cc_email:body.mode==='test'?'':seen.at(-1).cc_email,operator:'admin',subject:template.subject,status:'submitted',message:'邮件服务器已接受；不代表收件人已收到或阅读',created_at:'2026-11-23T02:00:00Z',snapshot:{...template,...seen.at(-1),template_id:template.id,password_included:!!previewPassword}};
+                    if(body.provision_vpn){assert.equal(body.mode,'employee');record.message='VPN 账号 zhangsan 创建成功。'+record.message;record.snapshot.vpn_status='created';}
                     records.unshift(record);result={success:true,delivery:record};
                 }
                 if(endpoint==='/deliveries')result={success:true,page:1,total:records.length,deliveries:records};
@@ -170,9 +171,16 @@ async function run() {
         assert.equal(records[1].cc_email,'');
         assert(!JSON.stringify(records).includes('CustomTestPassword2!'));
         await frame.locator('[data-close="previewDialog"]').first().click();
+        await frame.locator('#previewButton').click();
+        assert(await frame.locator('#confirmSend').isDisabled());
+        page.once('dialog', dialog=>dialog.accept());
+        await frame.locator('#provisionVpn').click();
+        await frame.locator('#sendResult').filter({hasText:'VPN 账号 zhangsan 创建成功'}).waitFor();
+        assert.equal(records[0].snapshot.vpn_status,'created');
+        await frame.locator('[data-close="previewDialog"]').first().click();
         await frame.locator('[data-tab="history"]').click();
-        await frame.locator('#historyBody tr').nth(1).waitFor();
-        assert.equal(await frame.locator('#historyBody tr').count(),2);
+        await frame.locator('#historyBody tr').nth(2).waitFor();
+        assert.equal(await frame.locator('#historyBody tr').count(),3);
         await frame.locator('#historyBody .link-button').first().click();
         assert((await frame.locator('#deliveryDetail').textContent()).includes('zhangsan'));
         assert((await frame.locator('#deliveryDetail').textContent()).includes('不保存明文'));
