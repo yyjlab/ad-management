@@ -19,6 +19,7 @@
 .mail-credential .mail-key-value{display:inline-block;max-width:100%;box-sizing:border-box;padding:0 6px;background-color:#eaf2ff;border-radius:4px}
 .mail-guidance{margin-top:10px}.mail-guidance h3,.mail-section-title{font-size:14px;margin:0 0 4px;color:#243e5a}.mail-guidance p{color:#41546d}.mail-section-title{margin:13px 0 1px;color:#214e41}
 .mail-wifi-row{padding:5px 0;border-bottom:1px solid #dcece6;color:#214e41}.mail-wifi-row:last-child{border-bottom:0}.mail-wifi-row .mail-key-value{font-size:14px}
+textarea#password_instruction[readonly]{background:#f7f9fc}
 .preview-bottom{background:#fff;border-top:1px solid #e6ecf4}.preview-bottom .checkbox{padding:10px 22px 2px;align-items:flex-start}.preview-bottom .modal-footer{border-top:0;padding:9px 22px 13px}.preview-bottom #sendResult{margin:0;padding:9px 22px 0;overflow-wrap:anywhere}.preview-bottom #sendResult:empty{display:none}
 .ad-recipient{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.5fr);gap:4px 12px;margin:8px 0 0;padding:8px 11px;background:#f3f7fc;border-radius:6px;color:#41546d;overflow-wrap:anywhere}.ad-recipient dt{font-size:12px;color:#596d86}.ad-recipient dd{margin:2px 0 0}.ad-email-field{min-width:0;display:grid;gap:7px}.ad-email-row{display:flex;align-items:center;gap:8px}.ad-email-row input{flex:1;min-width:0}.ad-email-row button{padding:8px 10px}
 .domain-wifi-settings{margin:0;padding:5px 0 0;min-width:0;border:0}.domain-wifi-settings legend{padding:0 0 8px;font-weight:700}
@@ -124,7 +125,20 @@ function tab(name){if(name!=='send'){cancelRecipientLookup();recipientHint('');$
 document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>tab(b.dataset.tab));
 document.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>$(b.dataset.close).close());
 function summary(){const t=template();$('summarySystem').textContent=t?.system_name||'—';$('summarySubject').textContent=t?.subject||'—';$('summaryAttachments').textContent=t?.attachments.map(f=>f.filename).join('、')||'无';}
-function syncPasswordHint(){$('password_instruction').value=template()?.password_instruction||state.passwordNotice;}
+function passwordHintControl(control, domain){
+    if(domain===(control.tagName==='TEXTAREA'))return control;
+    const field=element(domain?'textarea':'input');
+    if(control.id)field.id=control.id;
+    if(control.name)field.name=control.name;
+    field.maxLength=control.maxLength;
+    if(domain){field.rows=4;field.wrap='soft';}
+    control.replaceWith(field);
+    return field;
+}
+function syncPasswordHint(){
+    const t=template(),field=passwordHintControl($('password_instruction'),t?.domain_account===true);
+    field.readOnly=true;field.value=t?.password_instruction||state.passwordNotice;
+}
 async function fillInitialPassword(t){
     const requestId=++defaultPasswordRequest;
     try{
@@ -177,8 +191,9 @@ function renderTemplates(keep=true){
 async function loadTemplates(){state.templates=(await api('/templates')).templates;renderTemplates();}
 function editTemplate(t){
     state.edit=t||null;const form=$('templateForm'),domain=t?.domain_account===true;form.reset();
+    const hint=passwordHintControl(form.elements.password_instruction,domain);
     for(const k of templateFields)form.elements[k].value=t?.[k]||(k==='password_instruction'?state.passwordNotice:'');
-    form.elements.name.readOnly=domain;form.elements.password_instruction.readOnly=!(domain||t?.id===state.vpnTemplate);form.elements.active.checked=t?.active!==false;
+    form.elements.name.readOnly=domain;hint.readOnly=!(domain||t?.id===state.vpnTemplate);form.elements.active.checked=t?.active!==false;
     $('templatePasswordHintLabel').textContent=domain?'初始密码说明':'密码保密提示';
     $('initialPasswordSetting').hidden=!domain;$('templateAttachments').hidden=domain;
     $('domainWifiSettings').hidden=!domain;

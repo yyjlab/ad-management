@@ -247,18 +247,23 @@ async function run() {
         assert.equal(await frame.locator('#attachmentList a').textContent(),'company.ovpn');
         await frame.locator('#templateList').getByRole('button',{name:/域账号开通/}).click();
         assert(await frame.locator('#templateAttachments').isHidden());
-        await frame.locator('#templateForm [name=password_instruction]').fill('登录 Windows 后按 Ctrl + Alt + Delete 更改密码。');
+        const domainHint='登录 Windows 后按 Ctrl + Alt + Delete 更改密码。\n\n至少 8 个字符，特殊符号可加可不加。';
+        const domainEditor=frame.locator('#templateForm textarea[name=password_instruction]');
+        assert.equal(await domainEditor.getAttribute('wrap'),'soft');
+        await domainEditor.fill(domainHint);
         await frame.locator('#templateForm [name=initial_password]').fill('NewTestDefault12');
         await frame.locator('#templateForm [name="WIFI-OA"]').fill(officeWifi);
         await frame.locator('#templateForm [name="WIFI-Mobile"]').fill(mobileWifi);
         await frame.locator('#templateForm [type=submit]').click();
         await page.waitForFunction(()=>document.querySelector('#accountNoticeFrame').contentDocument
             .querySelector('#globalMessage').textContent.includes('模板已保存'));
+        assert.equal(await domainEditor.inputValue(),domainHint);
         assert.equal(await frame.locator('#templateForm [name="WIFI-OA"]').inputValue(),'');
         assert.equal(await frame.locator('#templateForm [name="WIFI-OA"]').getAttribute('placeholder'),'已保存，留空保留');
         await frame.locator('[data-tab="send"]').click();
         await frame.locator('#account').fill('vpn.manual');
         await frame.locator('#composeTemplate').selectOption('domain-1');
+        assert.equal(await frame.locator('textarea#password_instruction').inputValue(),domainHint);
         await frame.locator('#temporaryPassword').filter({visible:true}).waitFor();
         await page.waitForFunction(()=>document.querySelector('#accountNoticeFrame').contentDocument
             .querySelector('#temporaryPassword').value==='NewTestDefault12');
@@ -298,10 +303,11 @@ async function run() {
         assert(await frame.locator('#confirmSend').isVisible());
         assert.equal(await frame.locator('.mail-credentials').evaluate(el=>getComputedStyle(el).gridTemplateColumns.split(' ').length),1);
         await page.setViewportSize({width:1440,height:1000});
-        assert((await frame.locator('#previewMailBody > .mail-guidance:last-child').innerText()).includes('Ctrl + Alt + Delete'));
+        assert.equal(await frame.locator('#previewMailBody > .mail-guidance:last-child p').innerText(),domainHint);
         assert(await frame.locator('#openVpnRouter').isHidden());
         await frame.locator('[data-close="previewDialog"]').first().click();
         await frame.locator('#composeTemplate').selectOption('template-1');
+        assert.equal(await frame.locator('input#password_instruction').inputValue(),vpnHint);
         assert.equal(await frame.locator('#account').inputValue(),'vpn.manual');
         assert.equal(await frame.locator('#temporaryPassword').inputValue(),'CustomTestPassword2!');
         assert(await frame.locator('#generatePassword').isVisible());

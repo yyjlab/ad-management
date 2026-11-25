@@ -131,6 +131,7 @@ class AccountNoticeTests(unittest.TestCase):
         hint = '仅限 <本人使用>，请勿转发。'
         endpoint = '/templates/' + VPN_TEMPLATE_ID
         self.assertEqual(self.post(endpoint, dict(value, password_instruction='x' * 501)).status_code, 400)
+        self.assertEqual(self.post(endpoint, dict(value, password_instruction='第一行\n第二行')).status_code, 400)
         saved = self.post(endpoint, dict(value, password_instruction=hint))
         self.assertEqual(saved.status_code, 200)
         self.assertEqual(saved.json['template']['password_instruction'], hint)
@@ -164,10 +165,11 @@ class AccountNoticeTests(unittest.TestCase):
         self.assertIn('人脸或指纹登录', default_preview['text'])
         self.assertEqual(template['attachments'], [])
         update = {k: v for k, v in template.items() if k not in ('id', 'attachments', 'domain_account', 'wifi_configured')}
-        hint, default = 'Windows 登录后请及时修改密码。', 'TestDefault12'
-        update.update(password_instruction=hint, initial_password=default, tutorial_url='')
+        hint, default = 'Windows 登录后请及时修改密码。\n\n至少 8 个字符，<特殊符号可选>。', 'TestDefault12'
+        update.update(password_instruction=hint.replace('\n', '\r\n'), initial_password=default, tutorial_url='')
         saved = self.post('/templates/' + row.id, update)
         self.assertEqual(saved.status_code, 200)
+        self.assertEqual(saved.json['template']['password_instruction'], hint)
         self.assertNotIn(default, saved.get_data(as_text=True))
         self.assertEqual(self.p.db.session.get(self.Template, row.id).tutorial_url, 'https://example.test/legacy')
         setting = self.p.SystemSetting.query.filter_by(key=f'account_notice_initial_password:{row.id}').one()
@@ -191,6 +193,9 @@ class AccountNoticeTests(unittest.TestCase):
         self.assertLess(preview['text'].index(row.intro), preview['text'].index('登录账号'))
         self.assertLess(preview['text'].index('登录账号'), preview['text'].index('初始密码'))
         self.assertIn(hint, preview['text'])
+        self.assertEqual(preview['rows'][-1]['value'], hint)
+        html_hint = escape(hint).replace('\n', '<br>')
+        self.assertIn(html_hint, preview['html'])
         self.assertIn(override, preview['text'])
         self.assertNotIn('example.test', preview['text'])
         self.assertNotIn(default, preview['text'])
@@ -199,6 +204,8 @@ class AccountNoticeTests(unittest.TestCase):
         message = self.connection.send_message.call_args.args[0]
         plain = message.get_body(preferencelist=('plain',)).get_content()
         rich = message.get_body(preferencelist=('html',)).get_content()
+        self.assertIn(hint, plain)
+        self.assertIn(html_hint, rich)
         for body in (plain, rich):
             self.assertLess(body.index(row.intro), body.index('登录账号'))
             self.assertLess(body.index('登录账号'), body.index('初始密码'))

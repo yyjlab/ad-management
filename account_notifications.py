@@ -232,8 +232,9 @@ def render_notice(snapshot, test=False, password='', *, domain=False, wifi=None)
         if kind == 'section':
             return f'<h2 style="font-size:15px;margin:20px 0 8px;color:#23473d">{content}</h2>'
         if kind == 'guidance':
+            guidance = esc(row['value']).replace('\n', '<br>')
             return (f'<h2 style="font-size:14px;margin:16px 0 4px;color:#263449">{esc(row["label"])}</h2>'
-                    f'<p style="margin:0 0 10px;white-space:pre-wrap">{esc(row["value"])}</p>')
+                    f'<p style="margin:0 0 10px;white-space:pre-wrap">{guidance}</p>')
         if 'href' in row:
             url = esc(row['href'])
             content += (f'<a href="{url}" title="{url}" target="_blank" rel="noopener noreferrer" '
@@ -392,7 +393,7 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
         for key in TEMPLATE_FIELDS:
             if key == 'password_instruction':
                 if is_domain or ident == VPN_TEMPLATE_ID:
-                    hint = text(value.get(key, row.password_instruction if row else ''), 500)
+                    hint = text(value.get(key, row.password_instruction if row else ''), 500, multiline=is_domain)
                     cleaned[key] = hint or (DOMAIN_PASSWORD_NOTICE if is_domain else PASSWORD_NOTICE)
                 else:
                     cleaned[key] = PASSWORD_NOTICE
