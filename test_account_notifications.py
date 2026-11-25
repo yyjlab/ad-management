@@ -247,12 +247,20 @@ class AccountNoticeTests(unittest.TestCase):
         self.assertEqual(changed.status_code, 200)
         self.assertEqual(self.send(previous.json, password=password).status_code, 409)
         self.smtp.assert_not_called()
-        preview = self.preview(template_id=row.id, version=changed.json['template']['version'], password=password).json
+        notes = '请核对办公网络。'
+        preview = self.preview(template_id=row.id, version=changed.json['template']['version'],
+                               password=password, notes=notes).json
         self.assertIn(secrets['WIFI-OA'], preview['text'])
         self.assertIn(changed_wifi, preview['text'])
         self.assertNotIn(secrets['WIFI-Mobile'], preview['text'])
+        self.assertEqual(preview['rows'][-2]['text'], notes)
+        self.assertEqual(preview['rows'][-1]['kind'], 'guidance')
         self.assertTrue(self.send(preview, password=password).json['success'])
         mail = self.connection.send_message.call_args.args[0]
+        for representation in ('plain', 'html'):
+            body = mail.get_body(preferencelist=(representation,)).get_content()
+            self.assertLess(body.index('WIFI-Mobile'), body.index(notes))
+            self.assertLess(body.index(notes), body.index('密码说明'))
         for secret in (secrets['WIFI-OA'], changed_wifi):
             self.assertIn(secret, mail.get_body(preferencelist=('plain',)).get_content())
             self.assertIn(escape(secret), mail.get_body(preferencelist=('html',)).get_content())

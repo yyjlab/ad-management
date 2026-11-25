@@ -197,7 +197,8 @@ def render_notice(snapshot, test=False, password='', *, domain=False, wifi=None)
     key_row('登录账号', snapshot['account'], 'credential' if domain else None)
     if password:
         key_row('初始密码', password, 'credential' if domain else None)
-    key_row('密码说明', snapshot['password_instruction'], 'guidance' if domain else None)
+    if not domain:
+        key_row('密码说明', snapshot['password_instruction'])
     if wifi:
         rows.append(dict(kind='section', text='公司 Wi-Fi'))
         for network, secret in wifi.items():
@@ -211,6 +212,8 @@ def render_notice(snapshot, test=False, password='', *, domain=False, wifi=None)
             rows.append(dict(text=f'{label}：', href=snapshot[key], link_text=link_text))
     if snapshot['notes']:
         rows.append(dict(text=snapshot['notes']))
+    if domain:
+        key_row('密码说明', snapshot['password_instruction'], 'guidance')
 
     def html_row(row):
         content = esc(row['text'])

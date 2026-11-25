@@ -81,9 +81,9 @@ async function run() {
                         {text:current.intro},
                         {kind:'credential',label:'登录账号',value:body.account},
                         {kind:'credential',label:'初始密码',value:password},
-                        {kind:'guidance',label:'密码说明',value:current.password_instruction},
                         {kind:'section',text:'公司 Wi-Fi'},
                         ...Object.entries(wifi).map(([label,value])=>({kind:'wifi',label,value})),
+                        {kind:'guidance',label:'密码说明',value:current.password_instruction},
                     ]:[{text:result.text},{text:'使用教程：',href:body.tutorial_url,link_text:'查看配置教程'}];
                 }
                 if(endpoint==='/send'){
@@ -298,7 +298,7 @@ async function run() {
         assert(await frame.locator('#confirmSend').isVisible());
         assert.equal(await frame.locator('.mail-credentials').evaluate(el=>getComputedStyle(el).gridTemplateColumns.split(' ').length),1);
         await page.setViewportSize({width:1440,height:1000});
-        assert((await frame.locator('#previewMailBody').innerText()).includes('Ctrl + Alt + Delete'));
+        assert((await frame.locator('#previewMailBody > .mail-guidance:last-child').innerText()).includes('Ctrl + Alt + Delete'));
         assert(await frame.locator('#openVpnRouter').isHidden());
         await frame.locator('[data-close="previewDialog"]').first().click();
         await frame.locator('#composeTemplate').selectOption('template-1');
