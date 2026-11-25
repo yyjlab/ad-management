@@ -188,6 +188,8 @@ class AccountNoticeTests(unittest.TestCase):
             account='zhangsan', employee_id='wfq123456', password=override,
             tutorial_url='https://example.test/ignored', password_instruction='不采用此提示').json
         self.assertIn('登录账号：wfq123456', preview['text'])
+        self.assertLess(preview['text'].index(row.intro), preview['text'].index('登录账号'))
+        self.assertLess(preview['text'].index('登录账号'), preview['text'].index('初始密码'))
         self.assertIn(hint, preview['text'])
         self.assertIn(override, preview['text'])
         self.assertNotIn('example.test', preview['text'])
@@ -195,7 +197,13 @@ class AccountNoticeTests(unittest.TestCase):
         sent = self.send(preview, password=override)
         self.assertTrue(sent.json['success'])
         message = self.connection.send_message.call_args.args[0]
-        self.assertIn(override, message.get_body(preferencelist=('plain',)).get_content())
+        plain = message.get_body(preferencelist=('plain',)).get_content()
+        rich = message.get_body(preferencelist=('html',)).get_content()
+        for body in (plain, rich):
+            self.assertLess(body.index(row.intro), body.index('登录账号'))
+            self.assertLess(body.index('登录账号'), body.index('初始密码'))
+            self.assertIn(override, body)
+        self.assertEqual(rich.count('background-color:#eaf2ff'), 2)
         self.assertFalse(list(message.iter_attachments()))
         self.assertNotIn(override, self.Delivery.query.one().snapshot)
 

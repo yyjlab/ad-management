@@ -78,6 +78,7 @@ async function run() {
                     result={success:true,preview_token:'preview-token',subject:current.subject,recipient:body.to_email,cc_email:cc,text:`您好，${body.recipient_name}：\n\n${current.intro}\n\n登录账号：${body.account}\n\n初始密码：${password}\n\n密码说明：${current.password_instruction}\n\n${body.notes}`,html:''};
                     result.rows=current.domain_account?[
                         {text:`您好，${body.recipient_name}：`},
+                        {text:current.intro},
                         {kind:'credential',label:'登录账号',value:body.account},
                         {kind:'credential',label:'初始密码',value:password},
                         {kind:'guidance',label:'密码说明',value:current.password_instruction},
@@ -272,10 +273,18 @@ async function run() {
         assert.deepEqual(seen.at(-1).cc_email.split(',').map(address=>address.trim()),[...domainCc.split(', '),'manager@example.test']);
         assert.equal(await frame.locator('#previewCc').innerText(),domainCc+', manager@example.test');
         assert.deepEqual(await frame.locator('.mail-credentials strong').allTextContents(),['wfq101755','OneTimeTest12']);
+        assert.match(await frame.locator('.mail-credentials').evaluate(el=>el.previousElementSibling.textContent),/您的账号已开通/);
         assert.deepEqual(await frame.locator('.mail-wifi-row strong').allTextContents(),[officeWifi,mobileWifi]);
         assert(await frame.locator('.mail-credentials').evaluate(el=>{
             const [account,password]=el.children;
             return account.getBoundingClientRect().bottom<=password.getBoundingClientRect().top;
+        }));
+        assert(await frame.locator('.mail-credentials').evaluate(el=>{
+            const transparent='rgba(0, 0, 0, 0)';
+            return getComputedStyle(el).backgroundColor===transparent &&
+                Array.from(el.querySelectorAll('strong')).every(value=>
+                    getComputedStyle(value).backgroundColor!==transparent &&
+                    value.getBoundingClientRect().width<el.clientWidth);
         }));
         assert(await frame.locator('.mail-wifi-row').evaluateAll(rows=>rows.every(row=>{
             const [label,value]=row.children;

@@ -181,9 +181,9 @@ def seed_templates(db, models):
 
 def render_notice(snapshot, test=False, password='', *, domain=False, wifi=None):
     esc = lambda value: html.escape(str(value), quote=True)
-    lines = [f"您好，{snapshot['recipient_name']}："]
+    lines = [f"您好，{snapshot['recipient_name']}：", snapshot['intro']]
     if not domain:
-        lines.extend((snapshot['intro'], f"系统：{snapshot['system_name']}"))
+        lines.append(f"系统：{snapshot['system_name']}")
     if test:
         lines.insert(0, '测试邮件：本次未向员工发送。')
     rows = [dict(text=line) for line in lines]
@@ -197,8 +197,6 @@ def render_notice(snapshot, test=False, password='', *, domain=False, wifi=None)
     key_row('登录账号', snapshot['account'], 'credential' if domain else None)
     if password:
         key_row('初始密码', password, 'credential' if domain else None)
-    if domain:
-        rows.append(dict(text=snapshot['intro']))
     key_row('密码说明', snapshot['password_instruction'], 'guidance' if domain else None)
     if wifi:
         rows.append(dict(kind='section', text='公司 Wi-Fi'))
@@ -217,12 +215,16 @@ def render_notice(snapshot, test=False, password='', *, domain=False, wifi=None)
     def html_row(row):
         content = esc(row['text'])
         kind = row.get('kind')
-        if kind in ('credential', 'wifi'):
-            background, color = ('#eaf2ff', '#123e76') if kind == 'credential' else ('#eef7f4', '#17483d')
-            size = 18 if kind == 'credential' else 15
-            return (f'<div style="margin:6px 0;padding:9px 14px;background:{background};border-radius:6px">'
-                    f'<span style="display:block;font-size:12px;color:{color}">{esc(row["label"])}</span>'
-                    f'<strong style="font-size:{size}px;color:{color};font-family:Consolas,monospace;'
+        if kind == 'credential':
+            return ('<div style="margin:8px 0">'
+                    f'<span style="display:block;font-size:12px;font-weight:600;color:#123e76">{esc(row["label"])}</span>'
+                    '<strong style="display:inline-block;max-width:100%;box-sizing:border-box;padding:0 6px;'
+                    'background-color:#eaf2ff;border-radius:4px;font-size:18px;color:#123e76;font-family:Consolas,monospace;'
+                    f'word-break:break-all;white-space:pre-wrap">{esc(row["value"])}</strong></div>')
+        if kind == 'wifi':
+            return ('<div style="margin:6px 0;padding:9px 14px;background:#eef7f4;border-radius:6px">'
+                    f'<span style="display:block;font-size:12px;color:#17483d">{esc(row["label"])}</span>'
+                    '<strong style="font-size:15px;color:#17483d;font-family:Consolas,monospace;'
                     f'word-break:break-all;white-space:pre-wrap">{esc(row["value"])}</strong></div>')
         if kind == 'section':
             return f'<h2 style="font-size:15px;margin:20px 0 8px;color:#23473d">{content}</h2>'
