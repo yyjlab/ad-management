@@ -26,6 +26,8 @@ from pypinyin import lazy_pinyin
 MAX_ATTACHMENT = 2 * 1024 * 1024
 MAX_TOTAL = 5 * 1024 * 1024
 DEFAULT_CC_EMAIL = 'yuanyujie@shunhs.cn'
+MAX_CC = 5
+DOMAIN_WIFI_NETWORKS = ('WIFI-OA', 'WIFI-Mobile')
 PASSWORD_NOTICE = '请妥善保管此密码，请勿向他人透露或转发。'
 DOMAIN_TEMPLATE_NAME = '域账号开通'
 OLD_DOMAIN_PASSWORD_NOTICE = '此密码为初始密码。登录 Windows 后，请按 Ctrl + Alt + Delete，选择「更改密码」，并尽快设置自己的密码。'
@@ -62,6 +64,23 @@ def email_address(value):
     if not re.fullmatch(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+", value):
         raise NoticeError('请填写有效的单个收件邮箱')
     return value
+
+
+def cc_address_list(value):
+    value = text(value, MAX_CC * 256)
+    if not value:
+        return ''
+    parts = value.split(',')
+    if len(parts) > MAX_CC:
+        raise NoticeError(f'抄送邮箱最多 {MAX_CC} 个，请用英文逗号分隔')
+    addresses = {}
+    for part in parts:
+        try:
+            address = email_address(part)
+        except NoticeError:
+            raise NoticeError('抄送邮箱格式不正确，请用英文逗号分隔') from None
+        addresses.setdefault(address.casefold(), address)
+    return ', '.join(addresses.values())
 
 
 def web_url(value):
@@ -151,16 +170,31 @@ def seed_templates(db, models):
                 password_instruction=PASSWORD_NOTICE))
 
 
-def render_notice(snapshot, test=False, password=''):
+def render_notice(snapshot, test=False, password='', *, domain=False, wifi=None):
     esc = lambda value: html.escape(str(value), quote=True)
-    lines = [f"您好，{snapshot['recipient_name']}：", snapshot['intro'],
-             f"系统：{snapshot['system_name']}", f"登录账号：{snapshot['account']}"]
-    if password:
-        lines.append(f'初始密码：{password}')
-    lines.append(f"密码说明：{snapshot['password_instruction']}")
+    lines = [f"您好，{snapshot['recipient_name']}："]
+    if not domain:
+        lines.extend((snapshot['intro'], f"系统：{snapshot['system_name']}"))
     if test:
         lines.insert(0, '测试邮件：本次未向员工发送。')
     rows = [dict(text=line) for line in lines]
+
+    def key_row(label, value, kind=None):
+        row = dict(text=f'{label}：{value}')
+        if kind:
+            row.update(kind=kind, label=label, value=value)
+        rows.append(row)
+
+    key_row('登录账号', snapshot['account'], 'credential' if domain else None)
+    if password:
+        key_row('初始密码', password, 'credential' if domain else None)
+    if domain:
+        rows.append(dict(text=snapshot['intro']))
+    rows.append(dict(text=f"密码说明：{snapshot['password_instruction']}"))
+    if wifi:
+        rows.append(dict(kind='section', text='公司 Wi-Fi'))
+        for network, secret in wifi.items():
+            key_row(network, secret, 'wifi')
     for key, label, link_text in (
         ('login_url', '登录地址', '打开登录页面'),
         ('tutorial_url', '使用教程', '查看配置教程'),
@@ -173,6 +207,16 @@ def render_notice(snapshot, test=False, password=''):
 
     def html_row(row):
         content = esc(row['text'])
+        kind = row.get('kind')
+        if kind in ('credential', 'wifi'):
+            background, color = ('#eaf2ff', '#123e76') if kind == 'credential' else ('#eef7f4', '#17483d')
+            size = 18 if kind == 'credential' else 15
+            return (f'<div style="margin:6px 0;padding:9px 14px;background:{background};border-radius:6px">'
+                    f'<span style="display:block;font-size:12px;color:{color}">{esc(row["label"])}</span>'
+                    f'<strong style="font-size:{size}px;color:{color};font-family:Consolas,monospace;'
+                    f'word-break:break-all;white-space:pre-wrap">{esc(row["value"])}</strong></div>')
+        if kind == 'section':
+            return f'<h2 style="font-size:15px;margin:20px 0 8px;color:#23473d">{content}</h2>'
         if 'href' in row:
             url = esc(row['href'])
             content += (f'<a href="{url}" title="{url}" target="_blank" rel="noopener noreferrer" '
@@ -200,12 +244,33 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
     def initial_password_key(row):
         return f'account_notice_initial_password:{row.id}'
 
-    def initial_password_cipher(row):
-        key = hmac.digest(app.secret_key.encode(), initial_password_key(row).encode(), 'sha256')
+    def wifi_password_key(row, network):
+        return f'account_notice_wifi:{row.id}:{network}'
+
+    def template_secret_cipher(setting_key):
+        key = hmac.digest(app.secret_key.encode(), setting_key.encode(), 'sha256')
         return Fernet(base64.urlsafe_b64encode(key))
+
+    def save_template_secret(setting_key, password):
+        encrypted = template_secret_cipher(setting_key).encrypt(password.encode()).decode('ascii')
+        set_setting(setting_key, encrypted)
+
+    def read_template_secret(setting_key, label):
+        encrypted = get_setting(setting_key, '')
+        try:
+            return template_secret_cipher(setting_key).decrypt(encrypted.encode('ascii')).decode() if encrypted else ''
+        except (InvalidToken, UnicodeError):
+            raise NoticeError(f'{label}无法读取，请在模板中重新保存', 409) from None
+
+    def wifi_credentials(row):
+        return {network: password for network in DOMAIN_WIFI_NETWORKS
+                if (password := read_template_secret(wifi_password_key(row, network), network + ' 密码'))} if domain_template(row) else {}
 
     def password_digest(value):
         return hmac.new(app.secret_key.encode(), value.encode(), hashlib.sha256).hexdigest() if value else ''
+
+    def wifi_digest(wifi):
+        return password_digest('wifi:' + canonical(wifi)) if wifi else ''
 
     @bp.before_request
     def authorize():
@@ -256,8 +321,11 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
         return PASSWORD_NOTICE
 
     def public_template(row):
+        domain_settings = dict(domain_account=True, wifi_configured=[
+            network for network in DOMAIN_WIFI_NETWORKS if get_setting(wifi_password_key(row, network), '')
+        ]) if domain_template(row) else {}
         return dict(id=row.id, active=row.active, version=row.version,
-            **({'domain_account': True} if domain_template(row) else {}),
+            **domain_settings,
             **{key: password_instruction(row) if key == 'password_instruction' else getattr(row, key) for key in TEMPLATE_FIELDS},
             attachments=[dict(id=f.id, filename=f.filename, size=len(f.content), private_key=f.private_key) for f in files(row)])
 
@@ -290,12 +358,18 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
     def templates(ident=None):
         if request.method == 'GET':
             return jsonify(success=True, templates=[public_template(row) for row in Template.query.order_by(Template.name).all()])
-        value = data((*TEMPLATE_FIELDS, 'active', 'version', 'initial_password'))
+        value = data((*TEMPLATE_FIELDS, 'active', 'version', 'initial_password', 'wifi_passwords'))
         row = get_template(ident) if ident else None
         is_domain = domain_template(row) or (ident != VPN_TEMPLATE_ID and value.get('name') == DOMAIN_TEMPLATE_NAME)
         initial_password = notice_password(value.get('initial_password', ''))
         if initial_password and (not is_domain or len(initial_password.encode()) > 256):
             raise NoticeError('默认初始密码只适用于域账号开通模板，最多 128 个字符且不超过 256 字节')
+        wifi = value.get('wifi_passwords', {})
+        if not isinstance(wifi, dict) or set(wifi) - set(DOMAIN_WIFI_NETWORKS) or (wifi and not is_domain):
+            raise NoticeError('只可为域账号开通模板设置 WIFI-OA 和 WIFI-Mobile 的密码')
+        for secret in wifi.values():
+            if len(notice_password(secret).encode()) > 256:
+                raise NoticeError('Wi-Fi 密码最多 128 个字符且不超过 256 字节')
         cleaned = {}
         for key in TEMPLATE_FIELDS:
             if key == 'password_instruction':
@@ -329,8 +403,10 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
             row = Template(id=str(uuid.uuid4()), active=active, **cleaned)
             db.session.add(row)
         if initial_password:
-            encrypted = initial_password_cipher(row).encrypt(initial_password.encode()).decode('ascii')
-            set_setting(initial_password_key(row), encrypted)
+            save_template_secret(initial_password_key(row), initial_password)
+        for network, secret in wifi.items():
+            if secret:
+                save_template_secret(wifi_password_key(row, network), secret)
         db.session.commit()
         db.session.expire_all()
         audit('保存账号通知模板', 'SYSTEM', f'模板:{row.id}', request.remote_addr)
@@ -341,12 +417,8 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
         row = get_template(ident)
         if not domain_template(row) or not row.active:
             raise NoticeError('此模板不提供默认初始密码', 404)
-        encrypted = get_setting(initial_password_key(row), '')
-        try:
-            password = (initial_password_cipher(row).decrypt(encrypted.encode('ascii')).decode() if encrypted
-                        else os.environ.get('AD_PRECREATE_DEFAULT_PASSWORD', app.config.get('AD_PRECREATE_DEFAULT_PASSWORD', '')))
-        except (InvalidToken, UnicodeError):
-            raise NoticeError('默认初始密码无法读取，请在模板中重新保存', 409) from None
+        password = (read_template_secret(initial_password_key(row), '默认初始密码')
+                    or os.environ.get('AD_PRECREATE_DEFAULT_PASSWORD', app.config.get('AD_PRECREATE_DEFAULT_PASSWORD', '')))
         response = jsonify(success=True, password=notice_password(password))
         response.headers['Cache-Control'] = 'no-store'
         return response
@@ -473,17 +545,21 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
             if is_domain and key == 'account':
                 raw = snapshot['employee_id'] or raw
             if key == 'cc_email':
-                snapshot[key] = email_address(raw) if raw else ''
+                snapshot[key] = cc_address_list(raw)
                 continue
             snapshot[key] = (email_address(raw) if key == 'to_email' else web_url(raw) if key in URL_FIELDS else
                 text(raw, 1000 if key == 'notes' else 64 if key == 'employee_id' else 120,
                      required=key in ('recipient_name', 'account'), multiline=key == 'notes'))
         snapshot['attachments'] = [dict(id=f.id, filename=f.filename, digest=hashlib.sha256(f.content).hexdigest()) for f in files(row)]
         snapshot['password_included'] = bool(password)
-        plain, body, rows = render_notice(snapshot, password=password)
-        token = signer.dumps(dict(operator=current_user().username, snapshot=snapshot, password_digest=password_digest(password)))
-        return jsonify(success=True, preview_token=token, subject=row.subject, html=body,
-                       text=plain, rows=rows, recipient=snapshot['to_email'], cc_email=snapshot['cc_email'])
+        wifi = wifi_credentials(row)
+        plain, body, rows = render_notice(snapshot, password=password, domain=is_domain, wifi=wifi)
+        token = signer.dumps(dict(operator=current_user().username, snapshot=snapshot,
+                                  password_digest=password_digest(password), wifi_digest=wifi_digest(wifi)))
+        response = jsonify(success=True, preview_token=token, subject=row.subject, html=body,
+                           text=plain, rows=rows, recipient=snapshot['to_email'], cc_email=snapshot['cc_email'])
+        response.headers['Cache-Control'] = 'no-store'
+        return response
 
     @bp.post('/send')
     def send():
@@ -509,7 +585,10 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
             raise NoticeError('发送方式不正确')
         to = email_address(value.get('test_email', '')) if mode == 'test' else snapshot['to_email']
         cc = snapshot.get('cc_email', '') if mode == 'employee' else ''
+        cc_recipients = cc.split(', ') if cc else []
         intent = dict(snapshot=snapshot, mode=mode, to=to, password_digest=password_digest(password))
+        if signed.get('wifi_digest'):
+            intent['wifi_digest'] = signed['wifi_digest']
         fingerprint = hashlib.sha256(canonical(intent).encode()).hexdigest()
         def replay(row):
             if row.fingerprint != fingerprint:
@@ -522,6 +601,9 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
         template = get_template(snapshot['template_id'])
         if not template.active or template.version != snapshot['version']:
             raise NoticeError('模板或附件已变更，请重新预览', 409)
+        wifi = wifi_credentials(template)
+        if not hmac.compare_digest(signed.get('wifi_digest', ''), wifi_digest(wifi)):
+            raise NoticeError('Wi-Fi 密码已更新，请重新预览后发送', 409)
         attachments = files(template)
         current_files = [dict(id=f.id, filename=f.filename, digest=hashlib.sha256(f.content).hexdigest()) for f in attachments]
         if current_files != snapshot['attachments']:
@@ -555,7 +637,8 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
             row.status, row.message = 'failed', '审计记录保存失败，未发送邮件'
             db.session.commit()
             return jsonify(success=False, delivery=public_delivery(row), message=row.message), 500
-        plain, body, _ = render_notice(snapshot, mode == 'test', password=password)
+        plain, body, _ = render_notice(snapshot, mode == 'test', password=password,
+                                      domain=domain_template(template), wifi=wifi)
         message = EmailMessage()
         message['From'], message['To'], message['Subject'] = sender, to, row.subject
         if cc:
@@ -570,9 +653,10 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
             with smtplib.SMTP_SSL(app.config['MAIL_SERVER'], port,
                                   timeout=15, context=ssl.create_default_context()) as smtp:
                 smtp.login(app.config['MAIL_USERNAME'], app.config['MAIL_PASSWORD'])
-                refused = smtp.send_message(message, to_addrs=list(dict.fromkeys([to] + ([cc] if cc else []))))
+                refused = smtp.send_message(message, to_addrs=list(dict.fromkeys([to, *cc_recipients])))
             if refused:
-                rejected = '、'.join(label for address, label in ((to, '收件邮箱'), (cc, '抄送邮箱')) if address in refused)
+                rejected = '、'.join(label for match, label in ((to in refused, '收件邮箱'),
+                    (any(address in refused for address in cc_recipients), '抄送邮箱')) if match)
                 row.status, row.message = 'partial', f'邮件服务器拒绝了{rejected or "部分收件人"}，其余已接受；请核对邮箱，不要直接重复发送'
             else:
                 row.status, row.message = 'submitted', '邮件服务器已接受；不代表收件人已收到或阅读'

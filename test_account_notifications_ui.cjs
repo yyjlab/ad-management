@@ -23,6 +23,8 @@ async function run() {
             subject:'VPN 开通通知',intro:'您的账号已开通',active:true,login_url:'http://vpn.example.test',
             tutorial_url:'',download_url:'',password_instruction:passwordNotice,attachments:[]});
         template = initial();
+        const wifi = {};
+        const officeWifi='MockOfficeWifi14!', mobileWifi='MockMobileWifi23!';
         let domainPassword='TestDefault12', domain={...initial(),id:'domain-1',name:'域账号开通',
             domain_account:true,password_instruction:'此密码为初始密码。',login_url:''};
         await page.route('**/*', async route => {
@@ -40,9 +42,10 @@ async function run() {
                 if(endpoint.startsWith('/templates/')&&req.method()==='POST'){
                     if(endpoint==='/templates/domain-1/initial-password')result={success:true,password:domainPassword};
                     else if(endpoint==='/templates/domain-1'){
-                        const {initial_password,...body}=req.postDataJSON();
+                        const {initial_password,wifi_passwords,...body}=req.postDataJSON();
                         if(initial_password)domainPassword=initial_password;
-                        domain={...domain,...body,version:domain.version+1};result={success:true,template:domain};
+                        for(const [ssid,secret] of Object.entries(wifi_passwords||{}))if(secret)wifi[ssid]=secret;
+                        domain={...domain,...body,wifi_configured:Object.keys(wifi),version:domain.version+1};result={success:true,template:domain};
                     }else{
                         if(endpoint.endsWith('/attachments'))template={...template,version:template.version+1,attachments:[{id:'file-1',filename:'company.ovpn',size:35,private_key:false}]};
                         else template={...template,...req.postDataJSON(),version:template.version+1};
@@ -66,8 +69,16 @@ async function run() {
                     assert.equal(typeof password,'string');
                     assert(!('temporaryPassword' in body));
                     const current=body.template_id===domain.id?domain:template;
-                    result={success:true,preview_token:'preview-token',subject:current.subject,recipient:body.to_email,cc_email:body.cc_email,text:`您好，${body.recipient_name}：\n\n${current.intro}\n\n登录账号：${body.account}\n\n初始密码：${password}\n\n密码说明：${current.password_instruction}\n\n${body.notes}`,html:''};
-                    result.rows=[{text:result.text},{text:'使用教程：',href:body.tutorial_url,link_text:'查看配置教程'}];
+                    const cc=body.cc_email.split(',').map(address=>address.trim()).join(', ');
+                    result={success:true,preview_token:'preview-token',subject:current.subject,recipient:body.to_email,cc_email:cc,text:`您好，${body.recipient_name}：\n\n${current.intro}\n\n登录账号：${body.account}\n\n初始密码：${password}\n\n密码说明：${current.password_instruction}\n\n${body.notes}`,html:''};
+                    result.rows=current.domain_account?[
+                        {text:`您好，${body.recipient_name}：`},
+                        {kind:'credential',label:'登录账号',value:body.account},
+                        {kind:'credential',label:'初始密码',value:password},
+                        {text:current.password_instruction},
+                        {kind:'section',text:'公司 Wi-Fi'},
+                        ...Object.entries(wifi).map(([label,value])=>({kind:'wifi',label,value})),
+                    ]:[{text:result.text},{text:'使用教程：',href:body.tutorial_url,link_text:'查看配置教程'}];
                 }
                 if(endpoint==='/send'){
                     const body=req.postDataJSON();assert.equal(body.confirm_text,'SEND');assert.match(body.request_key,/^[a-f0-9-]{36}$/);
@@ -215,6 +226,7 @@ async function run() {
         assert((await frame.locator('#deliveryDetail').textContent()).includes('不保存明文'));
         await frame.locator('[data-close="detailDialog"]').first().click();
         await frame.locator('[data-tab="templates"]').click();
+        assert(await frame.locator('#domainWifiSettings').isHidden());
         const vpnHint='请妥善保管 VPN 密码，仅限本人使用。';
         await frame.locator('#templateForm [name=password_instruction]').fill(vpnHint);
         await frame.locator('#templateForm [name=name]').fill('公司 VPN 通知');
@@ -231,9 +243,13 @@ async function run() {
         assert(await frame.locator('#templateAttachments').isHidden());
         await frame.locator('#templateForm [name=password_instruction]').fill('登录 Windows 后按 Ctrl + Alt + Delete 更改密码。');
         await frame.locator('#templateForm [name=initial_password]').fill('NewTestDefault12');
+        await frame.locator('#templateForm [name="WIFI-OA"]').fill(officeWifi);
+        await frame.locator('#templateForm [name="WIFI-Mobile"]').fill(mobileWifi);
         await frame.locator('#templateForm [type=submit]').click();
         await page.waitForFunction(()=>document.querySelector('#accountNoticeFrame').contentDocument
             .querySelector('#globalMessage').textContent.includes('模板已保存'));
+        assert.equal(await frame.locator('#templateForm [name="WIFI-OA"]').inputValue(),'');
+        assert.equal(await frame.locator('#templateForm [name="WIFI-OA"]').getAttribute('placeholder'),'已保存，留空保留');
         await frame.locator('[data-tab="send"]').click();
         await frame.locator('#account').fill('vpn.manual');
         await frame.locator('#composeTemplate').selectOption('domain-1');
@@ -244,11 +260,19 @@ async function run() {
         assert(await frame.locator('#generatePassword').isHidden());
         assert(await frame.locator('#login_url').isHidden());
         assert.equal(await frame.locator('#cc_email').inputValue(),'yuanyujie@shunhs.cn');
-        await frame.locator('#cc_email').clear();
+        await frame.locator('#cc_email').fill('yuanyujie@shunhs.cn,manager@example.test');
         await frame.locator('#temporaryPassword').fill('OneTimeTest12');
         await frame.locator('#previewButton').click();
         await frame.locator('#previewMailBody').filter({hasText:'OneTimeTest12'}).waitFor();
-        assert.equal(seen.at(-1).cc_email,'');
+        assert.deepEqual(seen.at(-1).cc_email.split(',').map(address=>address.trim()),['yuanyujie@shunhs.cn','manager@example.test']);
+        assert((await frame.locator('#previewRecipient').innerText()).includes('抄送：yuanyujie@shunhs.cn, manager@example.test'));
+        assert.deepEqual(await frame.locator('.mail-credentials strong').allTextContents(),['wfq101755','OneTimeTest12']);
+        assert.deepEqual(await frame.locator('.mail-wifi-row strong').allTextContents(),[officeWifi,mobileWifi]);
+        assert((await frame.locator('#previewDialog').screenshot()).length>10000);
+        await page.setViewportSize({width:390,height:844});
+        assert(await frame.locator('.preview-frame').evaluate(el=>el.scrollWidth<=el.clientWidth));
+        assert.equal(await frame.locator('.mail-credentials').evaluate(el=>getComputedStyle(el).gridTemplateColumns.split(' ').length),1);
+        await page.setViewportSize({width:1440,height:1000});
         assert((await frame.locator('#previewMailBody').innerText()).includes('Ctrl + Alt + Delete'));
         assert(await frame.locator('#openVpnRouter').isHidden());
         await frame.locator('[data-close="previewDialog"]').first().click();

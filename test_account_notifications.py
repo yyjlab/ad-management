@@ -161,7 +161,7 @@ class AccountNoticeTests(unittest.TestCase):
         self.assertIn('PIN', default_preview['text'])
         self.assertIn('人脸或指纹登录', default_preview['text'])
         self.assertEqual(template['attachments'], [])
-        update = {k: v for k, v in template.items() if k not in ('id', 'attachments', 'domain_account')}
+        update = {k: v for k, v in template.items() if k not in ('id', 'attachments', 'domain_account', 'wifi_configured')}
         hint, default = 'Windows 登录后请及时修改密码。', 'TestDefault12'
         update.update(password_instruction=hint, initial_password=default, tutorial_url='')
         saved = self.post('/templates/' + row.id, update)
@@ -196,6 +196,59 @@ class AccountNoticeTests(unittest.TestCase):
         self.assertIn(override, message.get_body(preferencelist=('plain',)).get_content())
         self.assertFalse(list(message.iter_attachments()))
         self.assertNotIn(override, self.Delivery.query.one().snapshot)
+
+    def test_domain_wifi_settings_appear_in_mail_but_not_history_or_preview_token(self):
+        row = self.Template.query.filter(self.Template.id != VPN_TEMPLATE_ID).one()
+        row.name = DOMAIN_TEMPLATE_NAME
+        self.p.db.session.commit()
+        endpoint = '/templates/' + row.id
+        options = dict(name=row.name, version=row.version, system_name=row.system_name,
+                       subject=row.subject, intro=row.intro)
+        secrets = {'WIFI-OA': 'MockOffice<Wifi14', 'WIFI-Mobile': 'MockMobileWifi23!'}
+        self.assertEqual(self.post(endpoint, dict(options, wifi_passwords={'other': 'test'})).status_code, 400)
+        vpn = {k: v for k, v in self.template.items() if k not in ('id', 'attachments')}
+        self.assertEqual(self.post('/templates/' + VPN_TEMPLATE_ID, dict(vpn, wifi_passwords=secrets)).status_code, 400)
+        saved = self.post(endpoint, dict(options, wifi_passwords=secrets))
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(saved.json['template']['wifi_configured'], list(secrets))
+        ciphertexts = self.p.SystemSetting.query.filter(self.p.SystemSetting.key.like('account_notice_wifi:%')).all()
+        self.assertEqual(len(ciphertexts), 2)
+        self.assertTrue(all(secret not in str([item.value for item in ciphertexts]) for secret in secrets.values()))
+        for secret in secrets.values():
+            self.assertNotIn(secret, str(saved.json))
+            self.assertNotIn(secret, str(self.client.get(self.url('/templates')).json))
+
+        previous_version = saved.json['template']['version']
+        password = 'MockAccountPassword12!'
+        previous = self.preview(template_id=row.id, version=previous_version, password=password)
+        self.assertEqual(previous.headers['Cache-Control'], 'no-store')
+        self.assertEqual([item['label'] for item in previous.json['rows'] if item.get('kind') == 'credential'],
+                         ['登录账号', '初始密码'])
+        signer = URLSafeTimedSerializer(self.p.app.secret_key, salt='account-notification-preview-v1')
+        token_data = signer.loads(previous.json['preview_token'])
+        for secret in secrets.values():
+            self.assertIn(secret, previous.json['text'])
+            self.assertIn(escape(secret), previous.json['html'])
+            self.assertNotIn(secret, str(token_data))
+
+        changed_wifi = 'MockRotatedWifi46!'
+        changed = self.post(endpoint, dict(options, version=previous_version,
+            wifi_passwords={'WIFI-OA': '', 'WIFI-Mobile': changed_wifi}))
+        self.assertEqual(changed.status_code, 200)
+        self.assertEqual(self.send(previous.json, password=password).status_code, 409)
+        self.smtp.assert_not_called()
+        preview = self.preview(template_id=row.id, version=changed.json['template']['version'], password=password).json
+        self.assertIn(secrets['WIFI-OA'], preview['text'])
+        self.assertIn(changed_wifi, preview['text'])
+        self.assertNotIn(secrets['WIFI-Mobile'], preview['text'])
+        self.assertTrue(self.send(preview, password=password).json['success'])
+        mail = self.connection.send_message.call_args.args[0]
+        for secret in (secrets['WIFI-OA'], changed_wifi):
+            self.assertIn(secret, mail.get_body(preferencelist=('plain',)).get_content())
+            self.assertIn(escape(secret), mail.get_body(preferencelist=('html',)).get_content())
+            self.assertNotIn(secret, self.Delivery.query.one().snapshot)
+            self.assertNotIn(secret, str(self.client.get(self.url('/deliveries')).json))
+        self.assertNotIn('公司 Wi-Fi', self.preview().json['text'])
 
     def test_preview_and_html_mail_display_links_with_original_addresses(self):
         url = 'https://docs.example.test/vpn?space=123&file=456'
@@ -295,13 +348,20 @@ class AccountNoticeTests(unittest.TestCase):
 
     def test_partial_cc_refusal_does_not_retry_accepted_recipients(self):
         cc, key = 'yuanyujie@shunhs.cn', str(uuid.uuid4())
-        preview = self.preview(cc_email=cc).json
-        self.connection.send_message.return_value = {cc: (550, b'unknown recipient')}
+        additional = 'it@example.test'
+        preview = self.preview(cc_email=f'{cc}, {additional}, {cc.upper()}').json
+        self.assertEqual(preview['cc_email'], f'{cc}, {additional}')
+        self.connection.send_message.return_value = {additional: (550, b'unknown recipient')}
         response = self.send(preview, key)
         self.assertEqual(response.json['delivery']['status'], 'partial')
         self.assertIn('抄送邮箱', response.json['delivery']['message'])
+        mail = self.connection.send_message.call_args.args[0]
+        self.assertEqual(self.connection.send_message.call_args.kwargs['to_addrs'], ['staff@example.test', cc, additional])
+        self.assertEqual([address.addr_spec for address in mail['Cc'].addresses], [cc, additional])
         self.assertTrue(self.send(preview, key).json['replayed'])
         self.assertEqual(self.connection.send_message.call_count, 1)
+        self.assertEqual(self.preview(cc_email=f'{cc},invalid').status_code, 400)
+        self.assertEqual(self.preview(cc_email=','.join(f'c{i}@example.test' for i in range(6))).status_code, 400)
 
     def test_smtp_failure_and_uncertain_result_are_recorded(self):
         self.connection.login.side_effect = smtplib.SMTPAuthenticationError(535, b'rejected')
