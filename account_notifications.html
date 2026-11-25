@@ -7,14 +7,21 @@
 <style>
 :root{font-family:"Microsoft YaHei",system-ui,sans-serif;color:#263449;background:#f0f2f5;font-size:14px;color-scheme:light}*{box-sizing:border-box}body{margin:0}button,input,select,textarea{font:inherit}button{cursor:pointer;border:1px solid #d5dfeb;background:white;color:#34465e;padding:9px 16px;border-radius:6px;white-space:nowrap}button:hover{border-color:#1677ff;color:#1269df}button:disabled{opacity:.55;cursor:not-allowed}.primary{background:#1677ff;color:white;border-color:#1677ff}.primary:hover{color:white;background:#0967df}.danger{color:#c43d4c}.quiet{background:transparent}h1{font-size:24px;margin:0 0 7px}h2{font-size:17px;margin:0}p{margin:0;line-height:1.6}.muted,small{color:#718198}.header{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:22px}.sender{font-size:12px;text-align:right}.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#1caa82;margin-right:6px}.dot.off{background:#e19a24}.tabs{display:flex;gap:24px;border-bottom:1px solid #dce4ee;margin-bottom:22px}.tab{border:0;border-radius:0;background:none;padding:11px 2px;color:#718198;border-bottom:3px solid transparent}.tab[aria-selected=true]{color:#1677ff;border-bottom-color:#1677ff;font-weight:700}.pane[hidden],[hidden]{display:none!important}.notice{padding:12px 15px;border-radius:6px;background:#eaf3ff;color:#245b9b;margin-bottom:18px;overflow-wrap:anywhere}.notice.error{background:#fff0f0;color:#b72e3f}.notice.good{background:#e9f8f2;color:#167957}.form-layout{display:grid;grid-template-columns:minmax(0,1fr) 280px;gap:24px}.surface{background:white;border:1px solid #e0e7f0;border-radius:8px;padding:22px}.section-title{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:19px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:17px 20px}.full{grid-column:1/-1}label.field{display:flex;flex-direction:column;gap:7px;min-width:0}input:not([type=checkbox]),select,textarea{width:100%;min-width:0;border:1px solid #ccd7e4;background:white;color:#263449;border-radius:6px;padding:10px 11px;outline:none}input:focus,select:focus,textarea:focus{border-color:#1677ff;box-shadow:0 0 0 3px #1677ff16}textarea{resize:vertical;min-height:86px;line-height:1.55}input[type=checkbox]{width:16px;height:16px;accent-color:#1677ff;flex:0 0 auto}.inline{display:flex;gap:10px;align-items:center}.actions{display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;margin-top:22px}.divider{height:1px;background:#e8edf4;margin:22px 0}.aside-step{display:flex;gap:12px;margin:20px 0}.step{width:25px;height:25px;flex:0 0 auto;border:1px solid #c9dcfa;background:#edf4ff;color:#1768dd;text-align:center;line-height:23px;border-radius:6px}.aside-step strong{display:block;margin-bottom:5px}.aside-step p{color:#718198;font-size:12px}.results{border:1px solid #dce5ef;border-radius:6px;margin-top:9px;max-height:220px;overflow:auto}.result{display:block;width:100%;border:0;border-bottom:1px solid #edf1f6;border-radius:0;text-align:left;white-space:normal;padding:11px 13px}.result:last-child{border-bottom:0}.result small{display:block;margin-top:4px;overflow-wrap:anywhere}.template-layout{display:grid;grid-template-columns:230px minmax(0,1fr);gap:22px}.template-list button{display:block;width:100%;text-align:left;margin-bottom:8px;white-space:normal}.template-list button.selected{border-color:#1677ff;background:#edf4ff;color:#1269df}.template-list small{display:block;margin-top:5px}.pill{display:inline-block;padding:3px 8px;border-radius:4px;background:#eaf3ff;color:#2465ba;font-size:12px}.pill.submitted{background:#e5f7ef;color:#147d55}.pill.failed{background:#fff0f0;color:#bd3447}.pill.unknown,.pill.sending{background:#fff6df;color:#926313}.file-row{display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:1px solid #edf1f6;padding:12px 0}.file-row a{color:#1768dd;text-decoration:none;overflow-wrap:anywhere}.file-row small{display:block;margin-top:5px}.upload{margin-top:14px;flex-wrap:wrap}.upload input{flex:1}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;white-space:nowrap}th{text-align:left;font-size:12px;color:#718198;background:#f7f9fc}th,td{padding:14px 12px;border-bottom:1px solid #e8edf4}td small{display:block;margin-top:5px}.empty{text-align:center;padding:48px 15px;color:#718198}.pagination{justify-content:flex-end;margin-top:18px}.checkbox{display:flex;align-items:flex-start;gap:8px;line-height:1.6}.checkbox input{margin:3px 0 0}dialog{width:min(820px,calc(100% - 28px));max-height:calc(100dvh - 40px);border:1px solid #dbe4ef;padding:0;border-radius:8px;color:#263449}dialog::backdrop{background:#172b4655}.modal-head{padding:18px 22px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #e6ecf4}.close{font-size:23px;line-height:1;padding:4px 8px;border:0}.modal-body{padding:22px}.modal-footer{padding:17px 22px;border-top:1px solid #e6ecf4;display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap}.preview-frame{width:100%;height:360px;border:1px solid #e0e7f0;border-radius:6px;background:#fff;margin:15px 0}.detail{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;line-height:1.9}.link-button{border:0;background:none;color:#1677ff;padding:4px 7px}.hint{font-size:12px;line-height:1.6;color:#718198;margin-top:8px}#testEmail{max-width:280px}#globalMessage:empty{display:none}@media(max-width:960px){.form-layout{grid-template-columns:1fr}.send-aside{display:none}.template-layout{grid-template-columns:180px minmax(0,1fr)}}@media(max-width:600px){.header{align-items:flex-start}.sender{max-width:160px;overflow-wrap:anywhere}.grid,.template-layout{grid-template-columns:1fr}.surface{padding:16px}.template-list{display:flex;gap:8px;overflow:auto}.template-list button{min-width:150px;margin:0}.tabs{gap:20px}.inline.search{flex-wrap:wrap}.inline.search input{flex:1;min-width:150px}.preview-frame{height:300px}.modal-body{padding:16px}.actions button{flex:1}.header p{font-size:12px}}
 .lookup-status[data-tone="error"]{color:#b72e3f}.lookup-status[data-tone="good"]{color:#167957}
-.pill.partial{background:#fff6df;color:#926313}#previewRecipient{overflow-wrap:anywhere}
-.preview-frame{overflow:auto}.mail-preview-title{padding:16px 20px;background:#1768dd;color:white;font-size:18px;font-weight:700}.mail-preview-body{padding:18px 20px;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.8}.mail-preview-footer{padding:12px 20px;border-top:1px solid #e5ebf3;font-size:12px;color:#718198}input[readonly]{background:#f7f9fc}
+.pill.partial{background:#fff6df;color:#926313}
+#previewDialog[open]{display:flex;flex-direction:column;width:min(760px,calc(100% - 24px));max-height:calc(100dvh - 24px);overflow:hidden}
+#previewDialog .modal-head,#previewDialog .preview-bottom{flex:none}
+#previewScroll{min-height:0;overflow:auto;overscroll-behavior:contain;padding:17px 22px}
+.preview-meta{display:grid;gap:5px;margin:0;font-size:13px}.preview-meta div{display:grid;grid-template-columns:52px minmax(0,1fr);align-items:baseline;gap:8px}.preview-meta dt{color:#596d86}.preview-meta dd{margin:0;overflow-wrap:anywhere}.preview-meta #previewSubject{font-weight:700;color:#182e49}
+#previewDialog .preview-frame{height:auto;overflow:visible;margin:14px 0;border-color:#e0e7f0}.mail-preview-title{padding:11px 16px;background:#f3f7fc;color:#193b66;border-bottom:1px solid #e0e7f0;font-size:15px;font-weight:700}.mail-preview-body{padding:13px 16px;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.65}.mail-preview-footer{padding:8px 16px;border-top:1px solid #e5ebf3;font-size:12px;color:#596d86}input[readonly]{background:#f7f9fc}
 .mail-preview-body p+p{margin-top:14px}.mail-preview-body a{color:#1768dd;text-decoration:underline;text-underline-offset:3px}
-#previewRecipient{white-space:pre-line}.mail-credentials{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 20px;margin:12px 0;padding:12px 15px;background:#eaf2ff;border-left:3px solid #1768dd;border-radius:6px;color:#123e76}
-.mail-key-label{display:block;font-size:12px;font-weight:600}.mail-key-value{display:block;font-family:Consolas,monospace;font-size:18px;overflow-wrap:anywhere}
-.mail-section-title{font-size:15px;margin:16px 0 2px;color:#214e41}.mail-wifi-row{display:flex;align-items:baseline;flex-wrap:wrap;gap:1px 14px;padding:6px 0;border-bottom:1px solid #dcece6;color:#214e41}.mail-wifi-row .mail-key-label{min-width:95px}.mail-wifi-row .mail-key-value{font-size:14px;min-width:0}
+.mail-credentials{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px 18px;margin:9px 0 10px;padding:10px 13px;background:#eaf2ff;border-radius:6px;color:#123e76}
+.mail-key-label{display:block;font-size:12px;font-weight:600}.mail-key-value{display:block;font-family:Consolas,"Microsoft YaHei",monospace;font-size:18px;overflow-wrap:anywhere}
+.mail-guidance{margin-top:10px}.mail-guidance h3,.mail-section-title{font-size:14px;margin:0 0 4px;color:#243e5a}.mail-guidance p{color:#41546d}.mail-section-title{margin:13px 0 1px;color:#214e41}
+.mail-wifi-row{display:grid;grid-template-columns:110px minmax(0,1fr);align-items:baseline;gap:5px;padding:5px 0;border-bottom:1px solid #dcece6;color:#214e41}.mail-wifi-row:last-child{border-bottom:0}.mail-wifi-row .mail-key-value{font-size:14px}
+.preview-bottom{background:#fff;border-top:1px solid #e6ecf4}.preview-bottom .checkbox{padding:10px 22px 2px;align-items:flex-start}.preview-bottom .modal-footer{border-top:0;padding:9px 22px 13px}.preview-bottom #sendResult{margin:0;padding:9px 22px 0;overflow-wrap:anywhere}.preview-bottom #sendResult:empty{display:none}
+.ad-recipient{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.5fr);gap:4px 12px;margin:8px 0 0;padding:8px 11px;background:#f3f7fc;border-radius:6px;color:#41546d;overflow-wrap:anywhere}.ad-recipient dt{font-size:12px;color:#596d86}.ad-recipient dd{margin:2px 0 0}.ad-email-field{min-width:0;display:grid;gap:7px}.ad-email-row{display:flex;align-items:center;gap:8px}.ad-email-row input{flex:1;min-width:0}.ad-email-row button{padding:8px 10px}
 .domain-wifi-settings{margin:0;padding:5px 0 0;min-width:0;border:0}.domain-wifi-settings legend{padding:0 0 8px;font-weight:700}
-@media(max-width:600px){.mail-credentials{grid-template-columns:minmax(0,1fr)}.mail-preview-body{padding:14px}}
+@media(max-width:600px){.mail-credentials{grid-template-columns:minmax(0,1fr)}.mail-preview-body,#previewScroll{padding:12px}.preview-bottom .checkbox,.preview-bottom .modal-footer,.preview-bottom #sendResult{padding-inline:12px}.ad-recipient{grid-template-columns:minmax(0,1fr)}}
 .router-link{display:inline-block;border:1px solid #d5dfeb;background:white;color:#34465e;padding:9px 16px;border-radius:6px;text-decoration:none;white-space:nowrap}.router-link:hover{border-color:#1677ff;color:#1269df}
 .notice-side{display:grid;gap:18px;align-content:start}.password-length{display:grid;grid-template-columns:minmax(0,1fr) 66px;gap:12px;align-items:center;margin:8px 0 15px}.password-length input[type=range]{padding:0;border:0;box-shadow:none;accent-color:#1677ff}.password-options{display:flex;gap:18px;flex-wrap:wrap;margin-bottom:15px}.password-output{display:flex;gap:6px;align-items:center;margin-top:8px}.password-output input{flex:1;font-family:Consolas,monospace;font-size:16px}.icon-button{display:inline-flex;align-items:center;justify-content:center;width:34px;height:40px;padding:0;flex:0 0 auto}.icon-button svg{width:18px;height:18px}.password-tool .primary{width:100%;margin-top:14px}.copy-buffer{position:fixed;left:-9999px;top:0}@media(max-width:960px){.notice-side{order:-1}}
 </style>
@@ -28,9 +35,9 @@
 <div class="section-title"><h2>填写通知</h2><span class="pill">人工确认发送</span></div>
 <div class="grid">
 <label class="field full">通知模板<select id="composeTemplate" required><option value="">正在加载…</option></select></label>
-<div class="full"><label for="employeeSearch">查找同事</label><div class="inline search" style="margin-top:7px"><input id="employeeSearch" placeholder="输入完整姓名或工号，自动识别域账号" maxlength="80" autocomplete="off"><button type="button" id="searchEmployee">查询 AD</button></div><div id="employeeResults" class="results" hidden></div><p id="recipientHint" class="hint lookup-status" role="status" aria-live="polite"></p></div>
+<div class="full"><label for="employeeSearch">查找同事</label><div class="inline search" style="margin-top:7px"><input id="employeeSearch" placeholder="输入完整姓名或工号，自动识别域账号" maxlength="80" autocomplete="off"><button type="button" id="searchEmployee">查询 AD</button></div><div id="employeeResults" class="results" hidden></div><dl id="adRecipientInfo" class="ad-recipient" hidden><div><dt>部门</dt><dd id="adRecipientDepartment"></dd></div><div><dt>AD 邮箱</dt><dd id="adRecipientEmail"></dd></div></dl><p id="recipientHint" class="hint lookup-status" role="status" aria-live="polite"></p></div>
 <label class="field">使用人姓名<input id="recipient_name" maxlength="120" required autocomplete="off" placeholder="输入姓名，自动填写邮箱"></label>
-<label class="field">收件邮箱<input id="to_email" type="email" maxlength="254" required autocomplete="off"></label>
+<div class="ad-email-field"><label for="to_email">收件邮箱</label><div class="ad-email-row"><input id="to_email" type="email" maxlength="254" required autocomplete="off"><button type="button" id="saveAdEmail" hidden>保存到 AD</button></div></div>
 <label class="field"><span id="accountLabel">登录账号</span><input id="account" maxlength="120" required autocomplete="off"></label>
 <label class="field">员工工号（可选）<input id="employee_id" maxlength="64" autocomplete="off"></label>
 <label class="field full">抄送邮箱（可选）<input id="cc_email" type="email" multiple maxlength="1280" autocomplete="off" placeholder="多个邮箱用英文逗号分隔"></label>
@@ -65,7 +72,26 @@
 <div id="templateAttachments"><div class="divider"></div><h2>随邮件发送的附件</h2><p class="hint">支持共用 .ovpn 配置或 PDF 教程。最多 3 个，单个 2 MiB，总计 5 MiB。</p><div id="attachmentList"></div><div class="inline upload"><input type="file" id="attachmentFile" accept=".ovpn,.pdf" aria-label="选择邮件附件"><button id="uploadFile">上传附件</button></div><p class="hint">OVPN 如含私钥，只应发给被授权使用该配置的人员。</p></div></div></div>
 </section>
 <section class="pane surface" id="pane-history" hidden><div class="section-title"><h2>发送记录</h2><button id="refreshHistory">刷新记录</button></div><div class="table-wrap"><table><thead><tr><th>发送时间</th><th>同事 / 收件邮箱</th><th>系统 / 账号</th><th>结果</th><th>操作人</th><th>操作</th></tr></thead><tbody id="historyBody"><tr><td colspan="6" class="empty">正在加载…</td></tr></tbody></table></div><div class="inline pagination"><span class="muted" id="historyPage"></span><button id="prevPage">上一页</button><button id="nextPage">下一页</button></div></section>
-<dialog id="previewDialog"><div class="modal-head"><h2>确认账号通知</h2><button class="close" data-close="previewDialog" aria-label="关闭预览">×</button></div><div class="modal-body"><p id="previewRecipient"></p><p class="hint" id="previewSubject"></p><div class="preview-frame" id="emailPreview" role="document" aria-label="邮件内容预览"><div class="mail-preview-title" id="previewMailTitle"></div><div class="mail-preview-body" id="previewMailBody"></div><div class="mail-preview-footer">IT 账号通知 · 请勿向无关人员转发账号资料。</div></div><div class="inline"><input id="testEmail" type="email" maxlength="254" placeholder="测试收件邮箱" aria-label="测试收件邮箱"><button id="sendTest">发送测试</button></div><p class="hint lookup-status" id="sendResult" role="status"></p><div class="divider"></div><label class="checkbox"><input type="checkbox" id="confirmOpened">我已在对应系统配置好账号及密码，并核对收件、抄送邮箱和附件。</label></div><div class="modal-footer"><button data-close="previewDialog">返回修改</button><a id="openVpnRouter" class="router-link" href="https://192.168.110.1/cgi-bin/luci/" target="_blank" rel="noopener noreferrer" hidden>去路由器开通 VPN</a><button id="confirmSend" class="primary" disabled>确认发送给同事</button></div></dialog>
+<dialog id="previewDialog" aria-labelledby="previewHeading">
+<div class="modal-head"><h2 id="previewHeading">确认账号通知</h2><button class="close" data-close="previewDialog" aria-label="关闭预览" autofocus>×</button></div>
+<div class="modal-body" id="previewScroll">
+    <dl class="preview-meta">
+        <div><dt>主题</dt><dd id="previewSubject"></dd></div>
+        <div><dt>收件人</dt><dd id="previewRecipient"></dd></div>
+        <div id="previewCcRow" hidden><dt>抄送</dt><dd id="previewCc"></dd></div>
+    </dl>
+    <div class="preview-frame" id="emailPreview" role="document" aria-label="邮件内容预览">
+        <div class="mail-preview-title" id="previewMailTitle"></div>
+        <div class="mail-preview-body" id="previewMailBody"></div>
+        <div class="mail-preview-footer">IT 账号通知 · 请勿向无关人员转发账号资料。</div>
+    </div>
+    <div class="inline"><input id="testEmail" type="email" maxlength="254" placeholder="测试收件邮箱" aria-label="测试收件邮箱"><button id="sendTest">发送测试</button></div>
+</div>
+<div class="preview-bottom">
+    <p class="hint lookup-status" id="sendResult" role="status"></p>
+    <label class="checkbox"><input type="checkbox" id="confirmOpened">我已配置账号和密码，并核对收件人、抄送和附件。</label>
+    <div class="modal-footer"><button data-close="previewDialog">返回修改</button><a id="openVpnRouter" class="router-link" href="https://192.168.110.1/cgi-bin/luci/" target="_blank" rel="noopener noreferrer" hidden>去路由器开通 VPN</a><button id="confirmSend" class="primary" disabled>确认发送给同事</button></div>
+</div></dialog>
 <dialog id="detailDialog"><div class="modal-head"><h2>发送详情</h2><button class="close" data-close="detailDialog" aria-label="关闭详情">×</button></div><div class="modal-body"><pre class="detail" id="deliveryDetail"></pre></div><div class="modal-footer"><button data-close="detailDialog">关闭</button></div></dialog>
 <script>
 'use strict';
@@ -75,7 +101,7 @@ const urlFields = ['login_url','tutorial_url','download_url'];
 const fields = ['employee_id','recipient_name','to_email','cc_email','account','notes','login_url','tutorial_url','download_url','password_instruction'];
 const templateFields = ['name','system_name','subject','intro','login_url','tutorial_url','download_url','password_instruction'];
 const wifiNetworks = ['WIFI-OA','WIFI-Mobile'];
-const state = {csrf:'',templates:[],edit:null,preview:null,keys:{},page:1,total:0,rows:[],sending:false,ready:false,vpnTemplate:'',defaultCc:'',passwordNotice:'请妥善保管此密码，请勿向他人透露或转发。'};
+const state = {csrf:'',templates:[],edit:null,preview:null,keys:{},page:1,total:0,rows:[],sending:false,ready:false,vpnTemplate:'',defaultCc:'',domainDefaultCc:'',passwordNotice:'请妥善保管此密码，请勿向他人透露或转发。'};
 let selectedRecipient, generalDraft, domainTemplateId='', defaultPasswordRequest=0;
 const labels = {submitted:'已提交邮件服务器',partial:'部分收件人被拒绝',failed:'发送失败',unknown:'结果待确认',sending:'发送中'};
 function show(message,kind=''){const el=$('globalMessage');el.textContent=message;el.className='notice '+kind;}
@@ -114,7 +140,7 @@ function applyTemplate(reloadPassword=false){
             cc:$('cc_email').value,account:$('account').value,employeeId:$('employee_id').value,recipient:selectedRecipient};
         $('temporaryPassword').value=domain?'':generalDraft?.password||'';
         $('includePassword').checked=domain||!!generalDraft?.include;
-        if(!domain||!domainTemplateId)$('cc_email').value=domain?state.defaultCc:generalDraft?.cc||'';
+        if(!domain||!domainTemplateId)$('cc_email').value=domain?state.domainDefaultCc:generalDraft?.cc||'';
         passwordStatus('');
         if(domain)fillInitialPassword(t);
         if(!domain&&generalDraft?.recipient===selectedRecipient&&generalDraft){
@@ -127,6 +153,8 @@ function applyTemplate(reloadPassword=false){
     }
     $('account').readOnly=domain&&!!selectedRecipient;
     $('accountLabel').textContent=domain?'域登录账号':'登录账号';
+    $('account').placeholder=domain?'例如 wfq102001':'';
+    updateAdRecipient();
     $('composePasswordHintLabel').textContent=domain?'初始密码说明':'密码保密提示';
     $('temporaryPasswordLabel').textContent=domain?'初始密码（可手动修改）':'密码（可手动修改）';
     $('passwordLocalHint').textContent=domain?'请核对是否与开户时设置的密码一致。':'请先在对应系统设置相同密码。发送记录不保存明文密码。';
@@ -166,7 +194,18 @@ async function refreshEdited(){const id=state.edit?.id;await loadTemplates();edi
 $('composeTemplate').onchange=()=>applyTemplate();
 $('sendForm').addEventListener('input',invalidate);
 let recipientTimer, recipientRequest;
+let savingAdEmail=false;
 function recipientHint(message,tone=''){const el=$('recipientHint');el.textContent=message;el.dataset.tone=tone;}
+function updateAdRecipient(){
+    const person=template()?.domain_account?selectedRecipient:null;
+    $('adRecipientInfo').hidden=!person;
+    $('adRecipientDepartment').textContent=person?.department||'未填写';
+    $('adRecipientEmail').textContent=person?.email_status==='valid'?person.email:person?.email_status==='invalid'?'格式不正确':'未填写';
+    const button=$('saveAdEmail');
+    button.hidden=!person?.employee_id||!['missing','invalid'].includes(person.email_status);
+    button.disabled=savingAdEmail||!$('to_email').validity.valid;
+    button.textContent=savingAdEmail?'保存中…':'保存到 AD';
+}
 function cancelRecipientLookup(){clearTimeout(recipientTimer);recipientRequest?.abort();recipientRequest=null;$('searchEmployee').disabled=false;}
 function selectRecipient(person){
     cancelRecipientLookup();invalidate();selectedRecipient=person;
@@ -174,6 +213,7 @@ function selectRecipient(person){
     $('employeeSearch').value=person.name;$('recipient_name').value=person.name;$('employee_id').value=person.employee_id;
     $('account').value=domain?person.employee_id:person.suggested_account||person.employee_id;$('account').readOnly=domain;
     $('to_email').value=person.email_status==='valid'?person.email:'';$('employeeResults').hidden=true;
+    updateAdRecipient();
     if(person.email_status==='valid')recipientHint(`已识别域账号 ${person.employee_id}，邮箱已自动填写，请核对。`,'good');
     else if(person.email_status==='invalid')recipientHint(`域账号 ${person.employee_id} 的邮箱格式不正确，请修正 AD 邮箱或手动填写有效邮箱。`,'error');
     else recipientHint(`域账号 ${person.employee_id} 尚未填写邮箱，请补充 AD 邮箱或手动填写收件邮箱。`,'error');
@@ -201,6 +241,7 @@ function scheduleRecipientLookup(event){
     cancelRecipientLookup();$('employeeResults').hidden=true;recipientHint('');
     selectedRecipient=null;$('account').readOnly=false;
     for(const key of ['to_email','employee_id','account'])$(key).value='';
+    updateAdRecipient();
     if(event.target.id==='employeeSearch')$('recipient_name').value='';
     else $('employeeSearch').value=event.target.value;
     const query=event.target.value.trim();
@@ -212,6 +253,23 @@ for(const id of ['employeeSearch','recipient_name']){
     $(id).addEventListener('compositionend',scheduleRecipientLookup);
 }
 for(const id of ['to_email','employee_id','account'])$(id).addEventListener('input',()=>{cancelRecipientLookup();recipientHint('');$('employeeResults').hidden=true;});
+$('to_email').addEventListener('input',updateAdRecipient);
+$('saveAdEmail').onclick=async()=>{
+    const person=selectedRecipient,t=template(),field=$('to_email'),button=$('saveAdEmail');
+    if(button.hidden||button.disabled||!person||!t?.domain_account||!field.reportValidity())return;
+    const address=field.value.trim();
+    if(!confirm(`将「${person.name}（${person.employee_id}）」的 AD 邮箱保存为：\n${address}\n\n此操作只修改邮箱，不会发送邮件。`))return;
+    savingAdEmail=true;updateAdRecipient();
+    try{
+        const result=await api('/recipients/email',{method:'POST',body:{template_id:t.id,employee_id:person.employee_id,email:address}});
+        if(selectedRecipient===person){
+            selectedRecipient={...person,email:result.email,email_status:'valid'};
+            if(field.value.trim()===address)field.value=result.email;
+            recipientHint(result.message,'good');invalidate();
+        }else show(result.message,'good');
+    }catch(e){if(selectedRecipient===person)recipientHint(e.message,'error');else show(e.message,'error');}
+    finally{savingAdEmail=false;updateAdRecipient();}
+};
 $('searchEmployee').onclick=()=>lookupRecipient($('employeeSearch').value.trim(),false);
 $('employeeSearch').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();$('searchEmployee').click();}};
 function passwordStatus(message,tone=''){const el=$('passwordToolStatus');el.textContent=message;el.dataset.tone=tone;}
@@ -254,6 +312,11 @@ function renderPreviewBody(data){
             continue;
         }
         if(row.kind==='section'){nodes.push(element('h3',row.text,'mail-section-title'));continue;}
+        if(row.kind==='guidance'){
+            const guidance=element('div',undefined,'mail-guidance');
+            guidance.append(element('h3',row.label),element('p',row.value));
+            nodes.push(guidance);continue;
+        }
         const line=element('p',row.text);
         if(typeof row.href==='string'&&/^https?:\/\//i.test(row.href)){
             const link=element('a',row.link_text);
@@ -276,7 +339,7 @@ $('copyTemporaryPassword').onclick=async()=>{
 $('sendForm').onsubmit=async e=>{
     e.preventDefault();cancelRecipientLookup();const t=template();if(!t)return;const b=$('previewButton');b.disabled=true;$('sendTest').disabled=false;
     if($('includePassword').checked&&!emailPassword()){passwordStatus('请填写或生成密码。','error');$('temporaryPassword').focus();b.disabled=false;return;}
-    try{const data=await api('/preview',{method:'POST',body:{template_id:t.id,version:t.version,password:emailPassword(),...Object.fromEntries(fields.map(k=>[k,$(k).value.trim()]))}});if(typeof data.text!=='string'||!data.text.trim())throw new Error('服务未返回预览正文，请刷新后重试。');state.preview=data;state.keys={};$('previewRecipient').textContent='收件人：'+$('recipient_name').value+' <'+data.recipient+'>'+(data.cc_email?'\n抄送：'+data.cc_email:'');$('previewSubject').textContent='主题：'+data.subject;$('previewMailTitle').textContent=t.system_name+' · 账号开通通知';renderPreviewBody(data);$('sendResult').textContent='';$('sendResult').dataset.tone='';$('confirmOpened').checked=false;$('confirmSend').disabled=true;$('openVpnRouter').hidden=t.id!==state.vpnTemplate;$('previewDialog').showModal();show('');}catch(err){show(err.message,'error');}finally{b.disabled=false;}
+    try{const data=await api('/preview',{method:'POST',body:{template_id:t.id,version:t.version,password:emailPassword(),...Object.fromEntries(fields.map(k=>[k,$(k).value.trim()]))}});if(typeof data.text!=='string'||!data.text.trim())throw new Error('服务未返回预览正文，请刷新后重试。');state.preview=data;state.keys={};$('previewRecipient').textContent=$('recipient_name').value+' <'+data.recipient+'>';$('previewCc').textContent=data.cc_email||'';$('previewCcRow').hidden=!data.cc_email;$('previewSubject').textContent=data.subject;$('previewMailTitle').textContent=t.system_name+' · 账号开通通知';renderPreviewBody(data);$('sendResult').textContent='';$('sendResult').dataset.tone='';$('confirmOpened').checked=false;$('confirmSend').disabled=true;$('openVpnRouter').hidden=t.id!==state.vpnTemplate;$('previewDialog').showModal();$('previewScroll').scrollTop=0;show('');}catch(err){show(err.message,'error');}finally{b.disabled=false;}
 };
 $('confirmOpened').onchange=()=>$('confirmSend').disabled=!$('confirmOpened').checked||state.sending||!state.preview;
 async function send(mode){
@@ -300,7 +363,7 @@ function detail(row){const s=row.snapshot;$('deliveryDetail').textContent=[`结�
 function reedit(row){if(!confirm('将这条记录带回编辑。再次发送会产生一封新邮件，请先核对原邮件是否收到。'))return;const t=state.templates.find(t=>t.id===row.snapshot.template_id&&t.active);if(!t){show('原模板已停用，请启用模板后再编辑','error');return;}tab('send');selectedRecipient=null;$('composeTemplate').value=t.id;applyTemplate();for(const k of fields)if(!t.domain_account||!urlFields.includes(k))$(k).value=row.snapshot[k]||'';if(t.domain_account&&row.snapshot.employee_id){$('account').value=row.snapshot.employee_id;$('account').readOnly=true;}syncPasswordHint();defaultPasswordRequest++;$('temporaryPassword').value='';$('includePassword').checked=!!row.snapshot.password_included;show('已带回编辑；原密码未保存，请按需重新填写，再预览。');}
 async function loadHistory(){const b=$('refreshHistory');b.disabled=true;try{const data=await api('/deliveries?page='+state.page);state.rows=data.deliveries;state.total=data.total;$('historyBody').replaceChildren();if(!data.deliveries.length){const tr=element('tr'),td=element('td','暂无发送记录','empty');td.colSpan=6;tr.append(td);$('historyBody').append(tr);}for(const r of data.deliveries){const tr=element('tr');tr.append(element('td',time(r.created_at)));const recipient=element('td',r.snapshot.recipient_name);recipient.append(element('small',r.to_email));const account=element('td',r.snapshot.system_name);account.append(element('small',r.snapshot.account));const status=element('td');status.append(element('span',labels[r.status]||r.status,'pill '+r.status));if(r.mode==='test')status.append(element('small','测试'));const ops=element('td'),view=element('button','详情','link-button'),edit=element('button','重新编辑','link-button');view.onclick=()=>detail(r);edit.onclick=()=>reedit(r);ops.append(view,edit);tr.append(recipient,account,status,element('td',r.operator),ops);$('historyBody').append(tr);}$('historyPage').textContent=`共 ${data.total} 条 · 第 ${state.page} 页`;$('prevPage').disabled=state.page<=1;$('nextPage').disabled=state.page*20>=data.total;}catch(e){show(e.message,'error');}finally{b.disabled=false;}}
 $('refreshHistory').onclick=loadHistory;$('prevPage').onclick=()=>{if(state.page>1){state.page--;loadHistory();}};$('nextPage').onclick=()=>{if(state.page*20<state.total){state.page++;loadHistory();}};
-async function init(){try{const config=await api('/config');state.csrf=config.csrf_token;state.ready=true;state.vpnTemplate=config.vpn_template_id||'';state.passwordNotice=config.password_notice||state.passwordNotice;state.defaultCc=config.default_cc_email||'';$('cc_email').value=state.defaultCc;$('mailStatus').replaceChildren(element('span',undefined,'dot'+(config.mail_ready?'':' off')),document.createTextNode(config.mail_ready?'SMTP 已配置':'SMTP 未配置'),element('p',config.sender||'复用系统邮件配置','hint'));await loadTemplates();applyTemplate();editTemplate(state.templates[0]);const name=location.hash.slice(1);if(['templates','history'].includes(name))tab(name);if(!config.mail_ready)show('现有 SMTP 尚未配置完整，暂不能发送邮件。','error');}catch(e){show(e.message,'error');$('previewButton').disabled=true;}}
+async function init(){try{const config=await api('/config');state.csrf=config.csrf_token;state.ready=true;state.vpnTemplate=config.vpn_template_id||'';state.passwordNotice=config.password_notice||state.passwordNotice;state.defaultCc=config.default_cc_email||'';state.domainDefaultCc=config.domain_default_cc_email??state.defaultCc;$('cc_email').value=state.defaultCc;$('mailStatus').replaceChildren(element('span',undefined,'dot'+(config.mail_ready?'':' off')),document.createTextNode(config.mail_ready?'SMTP 已配置':'SMTP 未配置'),element('p',config.sender||'复用系统邮件配置','hint'));await loadTemplates();applyTemplate();editTemplate(state.templates[0]);const name=location.hash.slice(1);if(['templates','history'].includes(name))tab(name);if(!config.mail_ready)show('现有 SMTP 尚未配置完整，暂不能发送邮件。','error');}catch(e){show(e.message,'error');$('previewButton').disabled=true;}}
 generateTemporaryPassword();
 init();
 </script>

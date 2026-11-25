@@ -26,6 +26,7 @@ from pypinyin import lazy_pinyin
 MAX_ATTACHMENT = 2 * 1024 * 1024
 MAX_TOTAL = 5 * 1024 * 1024
 DEFAULT_CC_EMAIL = 'yuanyujie@shunhs.cn'
+DOMAIN_DEFAULT_CC_EMAIL = f'{DEFAULT_CC_EMAIL}, liuchongxiang@shunhs.cn'
 MAX_CC = 5
 DOMAIN_WIFI_NETWORKS = ('WIFI-OA', 'WIFI-Mobile')
 PASSWORD_NOTICE = '请妥善保管此密码，请勿向他人透露或转发。'
@@ -64,6 +65,14 @@ def email_address(value):
     if not re.fullmatch(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+", value):
         raise NoticeError('请填写有效的单个收件邮箱')
     return value
+
+
+def directory_email_status(value):
+    try:
+        email_address(value)
+        return 'valid'
+    except NoticeError:
+        return 'invalid' if value.strip() else 'missing'
 
 
 def cc_address_list(value):
@@ -190,7 +199,7 @@ def render_notice(snapshot, test=False, password='', *, domain=False, wifi=None)
         key_row('初始密码', password, 'credential' if domain else None)
     if domain:
         rows.append(dict(text=snapshot['intro']))
-    rows.append(dict(text=f"密码说明：{snapshot['password_instruction']}"))
+    key_row('密码说明', snapshot['password_instruction'], 'guidance' if domain else None)
     if wifi:
         rows.append(dict(kind='section', text='公司 Wi-Fi'))
         for network, secret in wifi.items():
@@ -217,6 +226,9 @@ def render_notice(snapshot, test=False, password='', *, domain=False, wifi=None)
                     f'word-break:break-all;white-space:pre-wrap">{esc(row["value"])}</strong></div>')
         if kind == 'section':
             return f'<h2 style="font-size:15px;margin:20px 0 8px;color:#23473d">{content}</h2>'
+        if kind == 'guidance':
+            return (f'<h2 style="font-size:14px;margin:16px 0 4px;color:#263449">{esc(row["label"])}</h2>'
+                    f'<p style="margin:0 0 10px;white-space:pre-wrap">{esc(row["value"])}</p>')
         if 'href' in row:
             url = esc(row['href'])
             content += (f'<a href="{url}" title="{url}" target="_blank" rel="noopener noreferrer" '
@@ -351,6 +363,7 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
         return jsonify(success=True, csrf_token=session['account_notice_csrf'], mail_ready=ready,
                        sender=app.config.get('MAIL_USERNAME', ''), operator=current_user().username,
                        default_cc_email=DEFAULT_CC_EMAIL, password_notice=PASSWORD_NOTICE,
+                       domain_default_cc_email=DOMAIN_DEFAULT_CC_EMAIL,
                        vpn_template_id=VPN_TEMPLATE_ID)
 
     @bp.route('/templates', methods=['GET', 'POST'])
@@ -500,11 +513,7 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
                     values = attrs.get(key, [])
                     return str(values[0]) if values and values[0] is not None else ''
                 mail = first('mail').strip()
-                try:
-                    email_address(mail)
-                    email_status = 'valid'
-                except NoticeError:
-                    email_status = 'invalid' if mail else 'missing'
+                email_status = directory_email_status(mail)
                 matched_name = next((first(key) for key in ('description', 'displayName', 'cn')
                     if first(key).casefold() == query.casefold()), '') if exact else ''
                 name = matched_name or first('description') or first('displayName') or first('cn') or first('sAMAccountName')
@@ -523,6 +532,65 @@ def register_notifications(app, db, models, current_user, touch_session, get_ad_
                     conn.unbind()
                 except Exception:
                     pass
+
+    @bp.post('/recipients/email')
+    def save_recipient_email():
+        value = data(('template_id', 'employee_id', 'email'))
+        template = get_template(value.get('template_id'))
+        if not domain_template(template) or not template.active:
+            raise NoticeError('仅域账号开通模板支持补全 AD 邮箱')
+        employee_id = text(value.get('employee_id', ''), 64, True)
+        address = email_address(value.get('email', ''))
+        conn = None
+        writing = False
+        try:
+            conn = get_ad_connection()
+            conn.search(app.config['AD_BASE_DN'],
+                f'(&(objectCategory=person)(objectClass=user)(sAMAccountName={escape_filter_chars(employee_id)}))',
+                ldap3.SUBTREE, attributes=['mail'], size_limit=2, time_limit=5)
+            result = conn.result.get('result')
+            if result == 4 or len(conn.entries) > 1:
+                raise NoticeError('无法唯一确认员工域账号，请重新查询', 409)
+            if result != 0:
+                raise NoticeError('AD 查询失败，未保存邮箱，可手动填写后发送', 503)
+            if not conn.entries:
+                raise NoticeError('未找到该域账号，未保存邮箱', 404)
+            entry = conn.entries[0]
+            old_values = [value for value in entry.entry_attributes_as_dict.get('mail', []) if isinstance(value, str)]
+            if any(directory_email_status(old) == 'valid' for old in old_values):
+                raise NoticeError('该账号已有有效 AD 邮箱，没有覆盖。可仅用手填地址发送本次通知', 409)
+            # AD mail is single-valued. Delete only the value we read, then add the new value atomically.
+            changes = [(ldap3.MODIFY_DELETE, old_values)] if old_values else []
+            changes.append((ldap3.MODIFY_ADD, [address]))
+            writing = True
+            conn.modify(entry.entry_dn, {'mail': changes})
+            result = conn.result.get('result')
+            if result in (16, 19, 20):
+                raise NoticeError('AD 邮箱可能已被修改，请重新查询，没有覆盖原值', 409)
+            if result == 50:
+                raise NoticeError('当前 AD 连接没有修改邮箱的权限，仍可使用手填地址发送本次通知', 403)
+            if result != 0:
+                raise NoticeError('AD 未确认保存邮箱，请重新查询，仍可手动发送本次通知', 503)
+        except NoticeError:
+            raise
+        except Exception as exc:
+            app.logger.warning('账号通知保存 AD 邮箱异常: %s', type(exc).__name__)
+            message = 'AD 邮箱写入结果未确认，请重新查询' if writing else '无法连接 AD，未保存邮箱'
+            raise NoticeError(message, 503) from None
+        finally:
+            if conn is not None:
+                try:
+                    conn.unbind()
+                except Exception:
+                    pass
+        message = '邮箱已保存到 AD'
+        try:
+            audit('补全 AD 邮箱', employee_id, '仅更新 AD 邮箱属性', request.remote_addr)
+        except Exception:
+            db.session.rollback()
+            app.logger.warning('补全 AD 邮箱成功，但审计记录保存失败')
+            message += '，但审计记录保存失败'
+        return jsonify(success=True, email=address, message=message)
 
     @bp.post('/preview')
     def preview():

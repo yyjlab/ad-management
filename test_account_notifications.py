@@ -7,6 +7,8 @@ from html import escape
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import ldap3
+
 from account_notifications import (DOMAIN_PASSWORD_NOTICE, DOMAIN_TEMPLATE_NAME, MAX_ATTACHMENT, OLD_DOMAIN_PASSWORD_NOTICE,
                                    PASSWORD_NOTICE, VPN_TEMPLATE_ID, seed_templates, suggested_account)
 from itsdangerous import URLSafeTimedSerializer
@@ -302,6 +304,7 @@ class AccountNoticeTests(unittest.TestCase):
             self.assertEqual(suggested_account(name), account)
         config = self.client.get(self.url('/config')).json
         self.assertEqual(config['default_cc_email'], 'yuanyujie@shunhs.cn')
+        self.assertEqual(config['domain_default_cc_email'], 'yuanyujie@shunhs.cn, liuchongxiang@shunhs.cn')
 
     def test_cc_and_password_delivery_without_plaintext_storage(self):
         password, cc, key = 'MockPassword12!', 'yuanyujie@shunhs.cn', str(uuid.uuid4())
@@ -485,6 +488,55 @@ class AccountNoticeTests(unittest.TestCase):
             response = self.client.get(self.url('/recipients?q=不存在&exact=1'))
         self.assertEqual(response.status_code, 503)
         self.assertIn('无法查询 AD', response.json['message'])
+
+    def test_save_recipient_email_only_changes_mail_without_sending(self):
+        row = self.Template.query.filter(self.Template.id != VPN_TEMPLATE_ID).one()
+        row.name = DOMAIN_TEMPLATE_NAME
+        self.p.db.session.commit()
+        address = 'staff@example.test'
+        body = dict(template_id=row.id, employee_id='wfq123456', email=address)
+        dn = 'CN=Test Staff,OU=People,DC=test'
+        self.assertEqual(self.client.post(self.url('/recipients/email'), json=body).status_code, 403)
+        for current in ([], ['bad-address']):
+            with self.subTest(current=current):
+                conn = MagicMock(result={'result': 0}, entries=[SimpleNamespace(
+                    entry_dn=dn, entry_attributes_as_dict={'mail': current})])
+                with patch.object(self.p, 'get_ad_connection', return_value=conn):
+                    response = self.post('/recipients/email', body)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json['email'], address)
+                self.assertIn('(sAMAccountName=wfq123456)', conn.search.call_args.args[1])
+                changes = [(ldap3.MODIFY_DELETE, current)] if current else []
+                conn.modify.assert_called_once_with(dn, {'mail': [*changes, (ldap3.MODIFY_ADD, [address])]})
+                conn.unbind.assert_called_once()
+        self.assertEqual(self.p.AdminActionLog.query.filter_by(action='补全 AD 邮箱').count(), 2)
+        self.smtp.assert_not_called()
+        self.assertEqual(self.Delivery.query.count(), 0)
+
+    def test_save_recipient_email_refuses_existing_valid_mail_ambiguity_and_race(self):
+        row = self.Template.query.filter(self.Template.id != VPN_TEMPLATE_ID).one()
+        row.name = DOMAIN_TEMPLATE_NAME
+        self.p.db.session.commit()
+        body = dict(template_id=row.id, employee_id='wfq000001', email='corrected@example.test')
+        endpoint = '/recipients/email'
+        known = SimpleNamespace(entry_dn='CN=Test,DC=test', entry_attributes_as_dict={'mail': ['existing@example.test']})
+        conn = MagicMock(result={'result': 0}, entries=[known])
+        with patch.object(self.p, 'get_ad_connection', return_value=conn):
+            self.assertEqual(self.post(endpoint, dict(body, template_id=VPN_TEMPLATE_ID)).status_code, 400)
+            self.assertEqual(self.post(endpoint, dict(body, email='invalid')).status_code, 400)
+            self.assertEqual(self.post(endpoint, body).status_code, 409)
+            conn.entries = [known, known]
+            self.assertEqual(self.post(endpoint, body).status_code, 409)
+            conn.entries = []
+            self.assertEqual(self.post(endpoint, body).status_code, 404)
+            conn.modify.assert_not_called()
+            conn.entries = [SimpleNamespace(entry_dn=known.entry_dn, entry_attributes_as_dict={'mail': []})]
+            conn.modify.side_effect = lambda *_: setattr(conn, 'result', {'result': 19})
+            response = self.post(endpoint, body)
+            self.assertEqual(response.status_code, 409)
+            self.assertIn('没有覆盖', response.json['message'])
+            conn.modify.assert_called_once()
+        self.smtp.assert_not_called()
 
 
 if __name__ == '__main__':

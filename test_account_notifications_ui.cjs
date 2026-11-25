@@ -19,6 +19,7 @@ async function run() {
         const errors = [];
         page.on('pageerror', e => errors.push(e.message));
         let role = 'super_admin', records = [], seen = [], template, apiRequests=0, previewPassword='';
+        const emailWrites=[], domainCc='yuanyujie@shunhs.cn, liuchongxiang@shunhs.cn';
         const initial = () => ({id:'template-1',version:1,name:'VPN 开通',system_name:'公司 VPN',
             subject:'VPN 开通通知',intro:'您的账号已开通',active:true,login_url:'http://vpn.example.test',
             tutorial_url:'',download_url:'',password_instruction:passwordNotice,attachments:[]});
@@ -26,7 +27,7 @@ async function run() {
         const wifi = {};
         const officeWifi='MockOfficeWifi14!', mobileWifi='MockMobileWifi23!';
         let domainPassword='TestDefault12', domain={...initial(),id:'domain-1',name:'域账号开通',
-            domain_account:true,password_instruction:'此密码为初始密码。',login_url:''};
+            domain_account:true,system_name:'微丰启 AD 域',password_instruction:'此密码为初始密码。',login_url:''};
         await page.route('**/*', async route => {
             const req=route.request(), url=new URL(req.url()), endpoint=url.pathname.replace('/api/admin/account-notifications','');
             if(url.pathname==='/admin/manage'||url.pathname==='/admin.html') return route.fulfill({contentType:'text/html',body:fs.readFileSync(path.join(__dirname,url.pathname==='/admin.html'?'admin.html':'admin_manage.html'),'utf8')});
@@ -37,7 +38,7 @@ async function run() {
                 apiRequests++;
                 assert.equal(role,'super_admin');
                 if(req.method()!=='GET')assert.equal(req.headers()['x-csrf-token'],'test-csrf');
-                if(endpoint==='/config')result={success:true,csrf_token:'test-csrf',mail_ready:true,sender:'it@example.test',default_cc_email:'yuanyujie@shunhs.cn',password_notice:passwordNotice,vpn_template_id:'template-1'};
+                if(endpoint==='/config')result={success:true,csrf_token:'test-csrf',mail_ready:true,sender:'it@example.test',default_cc_email:'yuanyujie@shunhs.cn',domain_default_cc_email:domainCc,password_notice:passwordNotice,vpn_template_id:'template-1'};
                 if(endpoint==='/templates'&&req.method()==='GET')result={success:true,templates:[template,domain]};
                 if(endpoint.startsWith('/templates/')&&req.method()==='POST'){
                     if(endpoint==='/templates/domain-1/initial-password')result={success:true,password:domainPassword};
@@ -64,6 +65,10 @@ async function run() {
                     const query=url.searchParams.get('q'),spellings={'张三':'zhangsan','李四':'lisi','王五':'wangwu','赵六':'zhaoliu','袁玉杰':'yuanyujie','不存在':'bucunzai'};
                     result={success:true,exact:url.searchParams.get('exact')==='1',truncated:false,suggested_account:spellings[query]||'',recipients:(people[query]||[]).map(p=>({...p,suggested_account:spellings[p.name]}))};
                 }
+                if(endpoint==='/recipients/email'){
+                    const body=req.postDataJSON();emailWrites.push(body);
+                    result={success:true,email:body.email,message:'邮箱已保存到 AD'};
+                }
                 if(endpoint==='/preview'){
                     const {password,...body}=req.postDataJSON();previewPassword=password;seen.push(body);
                     assert.equal(typeof password,'string');
@@ -75,7 +80,7 @@ async function run() {
                         {text:`您好，${body.recipient_name}：`},
                         {kind:'credential',label:'登录账号',value:body.account},
                         {kind:'credential',label:'初始密码',value:password},
-                        {text:current.password_instruction},
+                        {kind:'guidance',label:'密码说明',value:current.password_instruction},
                         {kind:'section',text:'公司 Wi-Fi'},
                         ...Object.entries(wifi).map(([label,value])=>({kind:'wifi',label,value})),
                     ]:[{text:result.text},{text:'使用教程：',href:body.tutorial_url,link_text:'查看配置教程'}];
@@ -191,7 +196,7 @@ async function run() {
         assert(await frame.locator('#previewMailBody').evaluate(()=>window.previewInjected===undefined));
         const bounds=await frame.locator('#emailPreview').boundingBox();
         assert(bounds.width>300&&bounds.height>200);
-        assert((await frame.locator('#previewRecipient').textContent()).includes('yuanyujie@shunhs.cn'));
+        assert.equal(await frame.locator('#previewCc').textContent(),'yuanyujie@shunhs.cn');
         assert.equal(previewPassword,'CustomTestPassword2!');
         assert(await frame.locator('#confirmSend').isDisabled());
         const routerLink=frame.getByRole('link',{name:'去路由器开通 VPN'});
@@ -259,18 +264,21 @@ async function run() {
         assert.equal(await frame.locator('#account').inputValue(),'wfq101755');
         assert(await frame.locator('#generatePassword').isHidden());
         assert(await frame.locator('#login_url').isHidden());
-        assert.equal(await frame.locator('#cc_email').inputValue(),'yuanyujie@shunhs.cn');
-        await frame.locator('#cc_email').fill('yuanyujie@shunhs.cn,manager@example.test');
+        assert.deepEqual((await frame.locator('#cc_email').inputValue()).split(',').map(address=>address.trim()),domainCc.split(', '));
+        await frame.locator('#cc_email').fill(domainCc+',manager@example.test');
         await frame.locator('#temporaryPassword').fill('OneTimeTest12');
         await frame.locator('#previewButton').click();
         await frame.locator('#previewMailBody').filter({hasText:'OneTimeTest12'}).waitFor();
-        assert.deepEqual(seen.at(-1).cc_email.split(',').map(address=>address.trim()),['yuanyujie@shunhs.cn','manager@example.test']);
-        assert((await frame.locator('#previewRecipient').innerText()).includes('抄送：yuanyujie@shunhs.cn, manager@example.test'));
+        assert.deepEqual(seen.at(-1).cc_email.split(',').map(address=>address.trim()),[...domainCc.split(', '),'manager@example.test']);
+        assert.equal(await frame.locator('#previewCc').innerText(),domainCc+', manager@example.test');
         assert.deepEqual(await frame.locator('.mail-credentials strong').allTextContents(),['wfq101755','OneTimeTest12']);
         assert.deepEqual(await frame.locator('.mail-wifi-row strong').allTextContents(),[officeWifi,mobileWifi]);
         assert((await frame.locator('#previewDialog').screenshot()).length>10000);
         await page.setViewportSize({width:390,height:844});
         assert(await frame.locator('.preview-frame').evaluate(el=>el.scrollWidth<=el.clientWidth));
+        assert(await frame.locator('#previewScroll').evaluate(el=>el.scrollWidth<=el.clientWidth));
+        assert.equal(await frame.locator('.preview-frame').evaluate(el=>getComputedStyle(el).overflowY),'visible');
+        assert(await frame.locator('#confirmSend').isVisible());
         assert.equal(await frame.locator('.mail-credentials').evaluate(el=>getComputedStyle(el).gridTemplateColumns.split(' ').length),1);
         await page.setViewportSize({width:1440,height:1000});
         assert((await frame.locator('#previewMailBody').innerText()).includes('Ctrl + Alt + Delete'));
@@ -283,6 +291,25 @@ async function run() {
         await frame.locator('#previewButton').click();
         await frame.locator('#previewMailBody').filter({hasText:vpnHint}).waitFor();
         await frame.locator('[data-close="previewDialog"]').first().click();
+        await frame.locator('#composeTemplate').selectOption('domain-1');
+        await frame.locator('#recipient_name').fill('李四');
+        await frame.locator('#recipientHint').filter({hasText:'尚未填写邮箱'}).waitFor();
+        assert.equal(await frame.locator('#adRecipientDepartment').textContent(),'行政部');
+        assert.equal(await frame.locator('#adRecipientEmail').textContent(),'未填写');
+        assert(await frame.locator('#saveAdEmail').isDisabled());
+        await frame.locator('#to_email').fill('corrected@example.test');
+        await frame.locator('#previewButton').click();
+        await frame.locator('#previewRecipient').filter({hasText:'corrected@example.test'}).waitFor();
+        assert.equal(emailWrites.length,0);
+        await frame.locator('[data-close="previewDialog"]').first().click();
+        page.once('dialog', dialog=>dialog.accept());
+        await frame.locator('#saveAdEmail').click();
+        await frame.locator('#recipientHint').filter({hasText:'邮箱已保存到 AD'}).waitFor();
+        assert.deepEqual(emailWrites,[{template_id:'domain-1',employee_id:'wfq000001',email:'corrected@example.test'}]);
+        assert.equal(records.length,2);
+        assert.equal(await frame.locator('#adRecipientEmail').textContent(),'corrected@example.test');
+        assert(await frame.locator('#saveAdEmail').isHidden());
+        await frame.locator('#composeTemplate').selectOption('template-1');
         const png=await page.screenshot();assert(png.length>10000);
         await page.reload();
         await frame.locator('#composeTemplate').waitFor();
@@ -301,7 +328,7 @@ async function run() {
         await page.waitForFunction(()=>document.getElementById('loginUser').textContent.includes('admin'));
         assert(await page.locator('#accountNoticeMenu').isHidden());
         assert.deepEqual(errors,[]);
-        console.log('PASS account notice: AD template, VPN link without side effects, preview, mail and mobile layout');
+        console.log('PASS account notice: AD email save, manual recipients, CC defaults, preview and mobile layout');
     } finally {await browser.close();}
 }
 run().catch(e=>{console.error(e);process.exitCode=1;});
