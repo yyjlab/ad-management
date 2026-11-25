@@ -273,6 +273,14 @@ async function run() {
         assert.equal(await frame.locator('#previewCc').innerText(),domainCc+', manager@example.test');
         assert.deepEqual(await frame.locator('.mail-credentials strong').allTextContents(),['wfq101755','OneTimeTest12']);
         assert.deepEqual(await frame.locator('.mail-wifi-row strong').allTextContents(),[officeWifi,mobileWifi]);
+        assert(await frame.locator('.mail-credentials').evaluate(el=>{
+            const [account,password]=el.children;
+            return account.getBoundingClientRect().bottom<=password.getBoundingClientRect().top;
+        }));
+        assert(await frame.locator('.mail-wifi-row').evaluateAll(rows=>rows.every(row=>{
+            const [label,value]=row.children;
+            return label.getBoundingClientRect().bottom<=value.getBoundingClientRect().top;
+        })));
         assert((await frame.locator('#previewDialog').screenshot()).length>10000);
         await page.setViewportSize({width:390,height:844});
         assert(await frame.locator('.preview-frame').evaluate(el=>el.scrollWidth<=el.clientWidth));
